@@ -1,0 +1,16 @@
+[book]
+title = "Пустол"
+description = "Бронирование столов в баре из Telegram Mini App."
+authors = ["Alexey Naborshchikov"]
+language = "ru"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+
+[output.html]
+site-url = "/pustol/"
+git-repository-url = "https://github.com/naborka/pustol"
+edit-url-template = "https://github.com/naborka/pustol/edit/main/{path}"
+default-theme = "rust"
+preferred-dark-theme = "ayu"

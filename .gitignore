@@ -1,0 +1,24 @@
+# The local PostgreSQL used by the integration tests. Downloaded by scripts/pg.sh, never committed.
+/.tools/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Next.js
+/web/node_modules/
+/web/.next/
+/web/out/
+/web/next-env.d.ts
+/web/tsconfig.tsbuildinfo
+
+# Secrets. The examples are committed; the real files are not.
+.env
+.env.local
+.env*.local
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+*.swp
+.idea/

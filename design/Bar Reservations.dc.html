@@ -1,0 +1,1379 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:#101216;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer;text-align:left}
+input{font:inherit;outline:none}
+a{color:#6ab7ff;text-decoration:none}
+a:hover{color:#8fcaff}
+@keyframes sheetUp{from{transform:translateY(102%)}to{transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes pop{from{transform:scale(.7);opacity:0}to{transform:scale(1);opacity:1}}
+@keyframes toastIn{from{transform:translateY(14px);opacity:0}to{transform:translateY(0);opacity:1}}
+::-webkit-scrollbar{width:0;height:0}
+</style>
+</helmet>
+<div style="--bg: {{ cBg }}; --sec: {{ cSec }}; --txt: {{ cTxt }}; --hint: {{ cHint }}; --btn: {{ cBtn }}; --link: {{ cLink }}; --sep: {{ cSep }}; --dest: {{ cDest }}; --ok: {{ cOk }}; --warn: {{ cWarn }}; --tint: {{ cTint }}; min-height:100vh;background:#101216;display:flex;flex-direction:column;align-items:center;gap:14px;padding:18px 16px 40px">
+
+  <div style="display:flex;align-items:center;gap:8px;padding:6px;background:#191c22;border:1px solid #24282f;border-radius:12px">
+    <span style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#6b727e;padding:0 6px;font-weight:600">Прототип</span>
+    <div style="display:flex;background:#101216;border-radius:8px;padding:2px;gap:2px">
+      <button onClick="{{ goClient }}" style="padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;color:{{ swClientFg }};background:{{ swClientBg }}">Клиент</button>
+      <button onClick="{{ goAdmin }}" style="padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;color:{{ swAdminFg }};background:{{ swAdminBg }}">Админ</button>
+    </div>
+    <button onClick="{{ toggleTheme }}" style="padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;color:#aeb6c2;background:#101216">{{ themeLabel }}</button>
+    <button onClick="{{ reset }}" style="padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;color:#6b727e;background:#101216">Сброс</button>
+  </div>
+
+  <div style="width:390px;height:800px;background:var(--bg, #17212b);border-radius:34px;overflow:hidden;position:relative;box-shadow:0 30px 70px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06);display:flex;flex-direction:column">
+
+    <div style="height:46px;flex:none;display:flex;align-items:flex-end;justify-content:space-between;padding:0 16px 6px;background:var(--sec, #232e3c);color:var(--txt, #fff)">
+      <button onClick="{{ back }}" style="font-size:14px;color:var(--link, #6ab7ff);font-weight:500;min-width:60px">{{ leftChrome }}</button>
+      <div style="display:flex;flex-direction:column;align-items:center;line-height:1.15">
+        <span style="font-size:15px;font-weight:600">{{ chromeTitle }}</span>
+        <span style="font-size:11px;color:var(--hint, #708499)">{{ chromeSub }}</span>
+      </div>
+      <span style="font-size:14px;color:var(--hint, #708499);min-width:60px;text-align:right">Закрыть</span>
+    </div>
+
+    <div style="flex:1;overflow-y:auto;overflow-x:hidden;position:relative">
+
+      <sc-if value="{{ showHome }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:16px 16px 24px;display:flex;flex-direction:column;gap:14px">
+
+          <sc-if value="{{ hasBooking }}" hint-placeholder-val="{{ true }}">
+            <div style="background:var(--sec, #232e3c);border-radius:16px;padding:18px;display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="width:7px;height:7px;border-radius:99px;background:var(--ok, #34c759)"></span>
+                <span style="font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ok, #34c759)">Бронь подтверждена</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:30px;font-weight:700;color:var(--txt, #fff);letter-spacing:-.02em">{{ myWhen }}</span>
+                <span style="font-size:15px;color:var(--hint, #708499)">{{ myWho }}</span>
+              </div>
+              <div style="height:1px;background:var(--sep, rgba(255,255,255,.08))"></div>
+              <div style="display:flex;gap:10px">
+                <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45;text-wrap:pretty">{{ graceNote }}</span>
+              </div>
+              <button onClick="{{ cancelMine }}" style="padding:12px;border-radius:10px;background:var(--tint, rgba(236,57,66,.12));color:var(--dest, #ec3942);font-size:15px;font-weight:600;text-align:center">Отменить бронь</button>
+            </div>
+
+            <sc-if value="{{ showNotifBanner }}" hint-placeholder-val="{{ true }}">
+              <div style="background:var(--sec, #232e3c);border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px">
+                <span style="font-size:15px;font-weight:600;color:var(--txt, #fff)">Напомнить о брони?</span>
+                <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45;text-wrap:pretty">{{ remindNote }}</span>
+                <div style="display:flex;gap:8px">
+                  <button onClick="{{ enableNotif }}" style="flex:1;padding:11px;border-radius:10px;background:var(--btn, #5288c1);color:#fff;font-size:14px;font-weight:600;text-align:center">Включить</button>
+                  <button onClick="{{ dismissNotif }}" style="padding:11px 16px;border-radius:10px;color:var(--hint, #708499);font-size:14px;font-weight:500">Не сейчас</button>
+                </div>
+              </div>
+            </sc-if>
+          </sc-if>
+
+          <sc-if value="{{ noBooking }}" hint-placeholder-val="{{ false }}">
+            <div style="background:var(--sec, #232e3c);border-radius:16px;padding:26px 18px;display:flex;flex-direction:column;gap:8px;align-items:center;text-align:center">
+              <span style="font-size:20px;font-weight:700;color:var(--txt, #fff);letter-spacing:-.01em">Столик на вечер</span>
+              <span style="font-size:14px;color:var(--hint, #708499);line-height:1.45;max-width:250px;text-wrap:pretty">Три касания — и стол ваш. Подтверждение сразу, без звонков.</span>
+            </div>
+          </sc-if>
+
+          <div style="background:var(--sec, #232e3c);border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="font-size:14px;color:var(--hint, #708499)">Сегодня открыт</span>
+              <span style="font-size:14px;font-weight:600;color:var(--txt, #fff)">{{ hoursLabel }}</span>
+            </div>
+            <div style="height:1px;background:var(--sep, rgba(255,255,255,.08))"></div>
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="font-size:14px;color:var(--hint, #708499)">Адрес</span>
+              <span style="font-size:14px;font-weight:600;color:var(--txt, #fff)">{{ addressFull }}</span>
+            </div>
+            <div style="height:1px;background:var(--sep, rgba(255,255,255,.08))"></div>
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="font-size:14px;color:var(--hint, #708499)">{{ maxPartyLabel }}</span>
+              <a href="#" style="font-size:14px;font-weight:600">Написать бару</a>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showBook }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:14px 16px 20px;display:flex;flex-direction:column;gap:22px">
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Сколько гостей</span>
+            <div style="display:flex;gap:8px">
+              <sc-for list="{{ sizes }}" as="s" hint-placeholder-count="6">
+                <button onClick="{{ s.on }}" style="flex:1;height:50px;border-radius:12px;background:{{ s.bg }};color:{{ s.fg }};font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center">{{ s.n }}</button>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Когда</span>
+            <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px">
+              <sc-for list="{{ days }}" as="d" hint-placeholder-count="4">
+                <button onClick="{{ d.on }}" style="flex:none;min-width:80px;padding:11px 8px;border-radius:12px;background:{{ d.bg }};color:{{ d.fg }};display:flex;flex-direction:column;align-items:center;gap:2px">
+                  <span style="font-size:14px;font-weight:600">{{ d.top }}</span>
+                  <span style="font-size:11px;opacity:.7">{{ d.sub }}</span>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Во сколько</span>
+              <span style="font-size:12px;color:var(--hint, #708499)">{{ turnNote }}</span>
+            </div>
+            <sc-if value="{{ dayHidden }}" hint-placeholder-val="{{ true }}">
+              <button onClick="{{ showDay }}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:11px;background:var(--sec, #232e3c)">
+                <span style="font-size:14px;color:var(--txt, #fff)">Днём</span>
+                <span style="font-size:13px;color:var(--hint, #708499)">{{ dayRange }} ›</span>
+              </button>
+            </sc-if>
+            <sc-if value="{{ dayShown }}" hint-placeholder-val="{{ false }}">
+              <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:8px">
+                <sc-for list="{{ daySlots }}" as="t" hint-placeholder-count="14">
+                  <button onClick="{{ t.on }}" style="height:44px;border-radius:11px;background:{{ t.bg }};color:{{ t.fg }};font-size:15px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:{{ t.cur }}">{{ t.label }}</button>
+                </sc-for>
+              </div>
+              <div style="height:1px;background:var(--sep, rgba(255,255,255,.08))"></div>
+            </sc-if>
+            <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:8px">
+              <sc-for list="{{ slots }}" as="t" hint-placeholder-count="16">
+                <button onClick="{{ t.on }}" style="height:44px;border-radius:11px;background:{{ t.bg }};color:{{ t.fg }};font-size:15px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:{{ t.cur }}">{{ t.label }}</button>
+              </sc-for>
+            </div>
+            <span style="font-size:12px;color:var(--hint, #708499);line-height:1.5;text-wrap:pretty">{{ availNote }}</span>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showDone }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:52px 22px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center">
+          <div style="width:74px;height:74px;border-radius:99px;background:var(--ok, #34c759);display:flex;align-items:center;justify-content:center;font-size:36px;color:#fff;font-weight:700;animation:pop .28s cubic-bezier(.2,.9,.3,1.2) both">✓</div>
+          <span style="font-size:24px;font-weight:700;color:var(--txt, #fff);margin-top:8px;letter-spacing:-.01em">Стол забронирован</span>
+          <span style="font-size:16px;color:var(--hint, #708499)">{{ myWhen }} · {{ myWho }}</span>
+          <div style="height:8px"></div>
+          <sc-if value="{{ showNotifBanner }}" hint-placeholder-val="{{ true }}">
+            <div style="background:var(--sec, #232e3c);border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px;width:100%">
+              <span style="font-size:15px;font-weight:600;color:var(--txt, #fff)">{{ remindTitle }}</span>
+              <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45;text-wrap:pretty">Чтобы мы могли написать вам в этот чат — разрешите сообщения от бота.</span>
+              <button onClick="{{ enableNotif }}" style="padding:12px;border-radius:10px;background:var(--btn, #5288c1);color:#fff;font-size:15px;font-weight:600;text-align:center">Разрешить сообщения</button>
+            </div>
+          </sc-if>
+          <sc-if value="{{ notifOn }}" hint-placeholder-val="{{ false }}">
+            <span style="font-size:13px;color:var(--ok, #34c759);font-weight:500">{{ remindConfirm }}</span>
+          </sc-if>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showAdmin }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column">
+
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 12px 8px;gap:6px">
+            <button onClick="{{ dayPrev }}" style="width:34px;height:34px;border-radius:9px;background:var(--sec, #232e3c);color:var(--txt, #fff);display:flex;align-items:center;justify-content:center;font-size:16px">‹</button>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;line-height:1.2">
+              <span style="font-size:15px;font-weight:600;color:var(--txt, #fff)">{{ adminDayLabel }}</span>
+              <span style="font-size:11px;color:var(--hint, #708499)">{{ adminDaySub }}</span>
+            </div>
+            <button onClick="{{ dayNext }}" style="width:34px;height:34px;border-radius:9px;background:var(--sec, #232e3c);color:var(--txt, #fff);display:flex;align-items:center;justify-content:center;font-size:16px">›</button>
+          </div>
+
+          <div style="display:flex;gap:8px;padding:4px 12px 10px">
+            <div style="flex:1;background:var(--sec, #232e3c);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:1px">
+              <span style="font-size:20px;font-weight:700;color:var(--txt, #fff);letter-spacing:-.01em">{{ statBookings }}</span>
+              <span style="font-size:11px;color:var(--hint, #708499)">броней</span>
+            </div>
+            <div style="flex:1;background:var(--sec, #232e3c);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:1px">
+              <span style="font-size:20px;font-weight:700;color:var(--txt, #fff);letter-spacing:-.01em">{{ statGuests }}</span>
+              <span style="font-size:11px;color:var(--hint, #708499)">гостей</span>
+            </div>
+            <div style="flex:1;background:var(--sec, #232e3c);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:1px">
+              <span style="font-size:20px;font-weight:700;color:{{ freeColor }};letter-spacing:-.01em">{{ statFree }}</span>
+              <span style="font-size:11px;color:var(--hint, #708499)">свободно сейчас</span>
+            </div>
+          </div>
+
+          <sc-if value="{{ adminOpen }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex;padding:0 12px 10px;gap:2px">
+              <div style="display:flex;background:var(--sec, #232e3c);border-radius:9px;padding:2px;gap:2px;width:100%">
+                <button onClick="{{ viewTimeline }}" style="flex:1;padding:8px;border-radius:7px;text-align:center;font-size:13px;font-weight:600;background:{{ vtBg }};color:{{ vtFg }}">Таймлайн</button>
+                <button onClick="{{ viewList }}" style="flex:1;padding:8px;border-radius:7px;text-align:center;font-size:13px;font-weight:600;background:{{ vlBg }};color:{{ vlFg }}">Список</button>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ adminClosed }}" hint-placeholder-val="{{ false }}">
+            <div style="margin:0 12px 14px;padding:22px 16px;border-radius:14px;background:var(--sec, #232e3c);display:flex;flex-direction:column;gap:6px;align-items:center;text-align:center">
+              <span style="font-size:17px;font-weight:700;color:var(--txt, #fff)">Выходной</span>
+              <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45;text-wrap:pretty">В этот день бар закрыт, гостям он не предлагается. Часы работы меняются в настройках.</span>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ hasOrphans }}" hint-placeholder-val="{{ false }}">
+            <div style="margin:0 12px 10px;padding:11px 13px;border-radius:12px;background:rgba(234,161,58,.16);display:flex;gap:9px;align-items:flex-start">
+              <span style="font-size:13px;font-weight:700;color:var(--warn, #eaa13a);line-height:1.4">!</span>
+              <span style="font-size:12px;color:var(--warn, #eaa13a);line-height:1.45;text-wrap:pretty">{{ orphanNote }}</span>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isTimeline }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex;padding:0 0 12px">
+              <div style="width:50px;flex:none;background:var(--bg, #17212b);z-index:2;border-right:1px solid var(--sep, rgba(255,255,255,.08))">
+                <div style="height:26px"></div>
+                <sc-if value="{{ hasOrphans }}" hint-placeholder-val="{{ false }}">
+                  <div style="height:34px;display:flex;align-items:center;padding:0 8px 0 12px;border-bottom:1px solid var(--sep, rgba(255,255,255,.05))">
+                    <span style="font-size:13px;font-weight:700;color:var(--warn, #eaa13a)">!</span>
+                  </div>
+                </sc-if>
+                <sc-for list="{{ rows }}" as="r" hint-placeholder-count="15">
+                  <button onClick="{{ r.onLabel }}" style="height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 8px 0 12px;width:100%;border-bottom:1px solid var(--sep, rgba(255,255,255,.05))">
+                    <span style="font-size:13px;font-weight:600;color:{{ r.labelColor }}">{{ r.num }}</span>
+                    <span style="font-size:10px;color:var(--hint, #708499)">{{ r.seats }}</span>
+                  </button>
+                </sc-for>
+              </div>
+              <div ref="{{ tlRef }}" style="flex:1;overflow-x:auto;overflow-y:hidden">
+                <div style="width:{{ tlWidth }};position:relative">
+                  <div style="height:26px;position:relative">
+                    <sc-for list="{{ hours }}" as="h" hint-placeholder-count="17">
+                      <span style="position:absolute;left:{{ h.x }};top:6px;font-size:10px;color:var(--hint, #708499);font-variant-numeric:tabular-nums">{{ h.label }}</span>
+                    </sc-for>
+                  </div>
+                  <sc-if value="{{ hasOrphans }}" hint-placeholder-val="{{ false }}">
+                    <div style="height:34px;position:relative;border-bottom:1px solid var(--sep, rgba(255,255,255,.05));background:rgba(234,161,58,.07)">
+                      <sc-for list="{{ orphanBlocks }}" as="b" hint-placeholder-count="1">
+                        <button onClick="{{ b.on }}" style="position:absolute;left:{{ b.x }};width:{{ b.w }};top:3px;bottom:3px;border-radius:7px;background:{{ b.bg }};border-left:3px solid {{ b.bd }};padding:0 6px;display:flex;align-items:center;overflow:hidden;z-index:1">
+                          <span style="font-size:11px;font-weight:600;color:{{ b.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ b.label }}</span>
+                        </button>
+                      </sc-for>
+                    </div>
+                  </sc-if>
+                  <sc-for list="{{ rows }}" as="r" hint-placeholder-count="15">
+                    <div style="height:34px;position:relative;border-bottom:1px solid var(--sep, rgba(255,255,255,.05));background:{{ r.rowBg }}">
+                      <sc-for list="{{ hours }}" as="h" hint-placeholder-count="17">
+                        <span style="position:absolute;left:{{ h.x }};top:0;bottom:0;width:1px;background:var(--sep, rgba(255,255,255,.05))"></span>
+                      </sc-for>
+                      <sc-for list="{{ r.blocks }}" as="b" hint-placeholder-count="2">
+                        <button onClick="{{ b.on }}" style="position:absolute;left:{{ b.x }};width:{{ b.w }};top:3px;bottom:3px;border-radius:7px;background:{{ b.bg }};border-left:3px solid {{ b.bd }};padding:0 6px;display:flex;align-items:center;overflow:hidden;z-index:1">
+                          <span style="font-size:11px;font-weight:600;color:{{ b.fg }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ b.label }}</span>
+                        </button>
+                      </sc-for>
+                      <sc-if value="{{ r.blocked }}" hint-placeholder-val="{{ false }}">
+                        <span style="position:absolute;left:0;right:0;top:3px;bottom:3px;border-radius:7px;background:{{ r.blockBg }};display:flex;align-items:center;padding-left:10px;font-size:11px;font-weight:600;color:var(--hint, #708499);z-index:0">{{ r.blockLabel }}</span>
+                      </sc-if>
+                    </div>
+                  </sc-for>
+                  <span style="position:absolute;left:{{ nowX }};top:20px;bottom:0;width:2px;background:var(--dest, #ec3942);opacity:.85"></span>
+                </div>
+              </div>
+            </div>
+            <span style="padding:0 16px 10px;font-size:11px;color:var(--hint, #708499);line-height:1.5;text-wrap:pretty">Нажмите на бронь — карточка гостя. Нажмите на номер стола слева — закрыть стол.</span>
+          </sc-if>
+
+          <sc-if value="{{ isList }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:0 12px 12px;display:flex;flex-direction:column;gap:6px">
+              <sc-for list="{{ listRows }}" as="l" hint-placeholder-count="10">
+                <button onClick="{{ l.on }}" style="display:flex;align-items:center;gap:12px;padding:11px 12px;background:var(--sec, #232e3c);border-radius:12px;width:100%">
+                  <span style="font-size:15px;font-weight:700;color:var(--txt, #fff);font-variant-numeric:tabular-nums;min-width:44px">{{ l.time }}</span>
+                  <span style="width:8px;height:8px;border-radius:99px;background:{{ l.dot }};flex:none"></span>
+                  <div style="flex:1;display:flex;flex-direction:column;gap:1px;min-width:0">
+                    <span style="font-size:14px;font-weight:600;color:var(--txt, #fff);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ l.name }}</span>
+                    <span style="font-size:11px;color:var(--hint, #708499)">{{ l.meta }}</span>
+                  </div>
+                  <span style="font-size:11px;font-weight:600;color:{{ l.dot }}">{{ l.status }}</span>
+                </button>
+              </sc-for>
+              <sc-if value="{{ listEmpty }}" hint-placeholder-val="{{ false }}">
+                <span style="padding:30px 0;text-align:center;font-size:14px;color:var(--hint, #708499)">На этот день броней нет</span>
+              </sc-if>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ adminOpen }}" hint-placeholder-val="{{ true }}">
+            <div style="padding:0 12px 20px">
+              <button onClick="{{ openNew }}" style="width:100%;padding:14px;border-radius:12px;background:var(--sec, #232e3c);color:var(--link, #6ab7ff);font-size:15px;font-weight:600;text-align:center">+ Бронь вручную</button>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:14px 16px 24px;display:flex;flex-direction:column;gap:22px">
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Бар</span>
+            <input value="{{ cfgName }}" onChange="{{ setCfgName }}" placeholder="Название" style="padding:13px 14px;border-radius:12px;background:var(--sec, #232e3c);border:none;color:var(--txt, #fff);font-size:15px;width:100%" />
+            <input value="{{ cfgAddress }}" onChange="{{ setCfgAddress }}" placeholder="Адрес" style="padding:13px 14px;border-radius:12px;background:var(--sec, #232e3c);border:none;color:var(--txt, #fff);font-size:15px;width:100%" />
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Столы</span>
+              <span style="font-size:12px;color:var(--hint, #708499)">{{ tableSummary }}</span>
+            </div>
+            <sc-for list="{{ tableRows }}" as="t" hint-placeholder-count="15">
+              <div style="display:flex;align-items:center;gap:8px;padding:6px 6px 6px 12px;background:var(--sec, #232e3c);border-radius:12px">
+                <button onClick="{{ t.zoneOn }}" style="flex:1;min-width:0;height:44px;display:flex;flex-direction:column;justify-content:center;gap:1px">
+                  <span style="font-size:14px;font-weight:600;color:var(--txt, #fff)">{{ t.label }}</span>
+                  <span style="font-size:11px;color:var(--link, #6ab7ff)">{{ t.zone }}</span>
+                </button>
+                <sc-if value="{{ t.hasBadge }}" hint-placeholder-val="{{ false }}">
+                  <span style="font-size:10px;font-weight:600;color:var(--warn, #eaa13a);white-space:nowrap">{{ t.badge }}</span>
+                </sc-if>
+                <div style="display:flex;align-items:center;gap:2px">
+                  <button onClick="{{ t.lessOn }}" style="width:44px;height:44px;border-radius:11px;background:var(--bg, #17212b);color:{{ t.lessFg }};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:{{ t.lessCur }}">−</button>
+                  <span style="font-size:14px;font-weight:600;color:var(--txt, #fff);min-width:26px;text-align:center;font-variant-numeric:tabular-nums">{{ t.seats }}</span>
+                  <button onClick="{{ t.moreOn }}" style="width:44px;height:44px;border-radius:11px;background:var(--bg, #17212b);color:{{ t.moreFg }};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:{{ t.moreCur }}">+</button>
+                </div>
+                <button onClick="{{ t.delOn }}" style="width:38px;height:44px;border-radius:11px;color:{{ t.delFg }};display:flex;align-items:center;justify-content:center;font-size:17px;cursor:{{ t.delCur }}">×</button>
+              </div>
+            </sc-for>
+            <button onClick="{{ addTable }}" style="padding:13px;border-radius:12px;background:var(--sec, #232e3c);color:var(--link, #6ab7ff);font-size:15px;font-weight:600;text-align:center">+ Добавить стол</button>
+            <span style="font-size:12px;color:var(--hint, #708499);line-height:1.5;text-wrap:pretty">Нажмите на название стола, чтобы сменить зону. Номера не переиспользуются: удалили седьмой — восьмой остаётся восьмым, иначе брони начнут ссылаться на чужие столы.</span>
+            <sc-if value="{{ hasCapNote }}" hint-placeholder-val="{{ false }}">
+              <span style="font-size:12px;color:var(--warn, #eaa13a);line-height:1.5;text-wrap:pretty">{{ capNote }}</span>
+            </sc-if>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Часы работы</span>
+            <div style="display:flex;gap:5px">
+              <sc-for list="{{ weekChips }}" as="w" hint-placeholder-count="7">
+                <button onClick="{{ w.on }}" style="flex:1;height:48px;border-radius:11px;background:{{ w.bg }};color:{{ w.fg }};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:13px;font-weight:600">
+                  <span>{{ w.label }}</span>
+                  <span style="width:4px;height:4px;border-radius:99px;background:{{ w.dot }}"></span>
+                </button>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--sec, #232e3c);border-radius:12px">
+              <div style="display:flex;flex-direction:column;gap:2px">
+                <span style="font-size:15px;font-weight:600;color:var(--txt, #fff)">{{ editDayName }}</span>
+                <span style="font-size:12px;color:{{ closedFg }}">{{ closedLabel }}</span>
+              </div>
+              <button onClick="{{ toggleClosed }}" style="font-size:13px;font-weight:600;color:{{ toggleClosedFg }};padding:12px 4px">{{ toggleClosedLabel }}</button>
+            </div>
+            <sc-for list="{{ hourSteppers }}" as="c" hint-placeholder-count="2">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 14px;background:var(--sec, #232e3c);border-radius:12px">
+                <span style="font-size:15px;color:var(--txt, #fff)">{{ c.label }}</span>
+                <div style="display:flex;align-items:center;gap:4px">
+                  <button onClick="{{ c.lessOn }}" style="width:44px;height:44px;border-radius:11px;background:var(--bg, #17212b);color:{{ c.lessFg }};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:{{ c.lessCur }}">−</button>
+                  <span style="font-size:15px;font-weight:600;color:var(--txt, #fff);min-width:56px;text-align:center;font-variant-numeric:tabular-nums">{{ c.value }}</span>
+                  <button onClick="{{ c.moreOn }}" style="width:44px;height:44px;border-radius:11px;background:var(--bg, #17212b);color:{{ c.moreFg }};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:{{ c.moreCur }}">+</button>
+                </div>
+              </div>
+            </sc-for>
+            <sc-if value="{{ dayIsOpen }}" hint-placeholder-val="{{ true }}">
+              <button onClick="{{ copyAll }}" style="padding:12px;border-radius:11px;background:var(--sec, #232e3c);color:var(--link, #6ab7ff);font-size:14px;font-weight:600;text-align:center">Применить ко всем дням</button>
+            </sc-if>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Правила брони</span>
+            <sc-for list="{{ ruleSteppers }}" as="c" hint-placeholder-count="2">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 8px 8px 14px;background:var(--sec, #232e3c);border-radius:12px">
+                <span style="font-size:15px;color:var(--txt, #fff)">{{ c.label }}</span>
+                <div style="display:flex;align-items:center;gap:4px">
+                  <button onClick="{{ c.lessOn }}" style="width:44px;height:44px;border-radius:11px;background:var(--bg, #17212b);color:{{ c.lessFg }};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:{{ c.lessCur }}">−</button>
+                  <span style="font-size:15px;font-weight:600;color:var(--txt, #fff);min-width:56px;text-align:center;font-variant-numeric:tabular-nums">{{ c.value }}</span>
+                  <button onClick="{{ c.moreOn }}" style="width:44px;height:44px;border-radius:11px;background:var(--bg, #17212b);color:{{ c.moreFg }};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:{{ c.moreCur }}">+</button>
+                </div>
+              </div>
+            </sc-for>
+            <div style="padding:12px 14px;background:var(--sec, #232e3c);border-radius:12px;display:flex;flex-direction:column;gap:9px">
+              <span style="font-size:15px;color:var(--txt, #fff)">Шаг времени</span>
+              <div style="display:flex;background:var(--bg, #17212b);border-radius:9px;padding:2px;gap:2px">
+                <sc-for list="{{ stepOpts }}" as="o" hint-placeholder-count="3">
+                  <button onClick="{{ o.on }}" style="flex:1;padding:9px;border-radius:7px;text-align:center;font-size:13px;font-weight:600;background:{{ o.bg }};color:{{ o.fg }}">{{ o.label }}</button>
+                </sc-for>
+              </div>
+            </div>
+            <span style="font-size:12px;color:var(--hint, #708499);line-height:1.5;text-wrap:pretty">Последняя бронь — в {{ lastArrival }}: это закрытие минус время, на которое держим стол. Отдельно не настраивается, чтобы значения не разошлись.</span>
+            <sc-if value="{{ hasLimitNote }}" hint-placeholder-val="{{ false }}">
+              <span style="font-size:12px;color:var(--warn, #eaa13a);line-height:1.5;text-wrap:pretty">{{ limitNote }}</span>
+            </sc-if>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Сообщения гостю</span>
+            <sc-for list="{{ tmplRows }}" as="t" hint-placeholder-count="4">
+              <div style="display:flex;align-items:center;gap:6px">
+                <input value="{{ t.value }}" onChange="{{ t.on }}" style="flex:1;min-width:0;padding:13px 14px;border-radius:12px;background:var(--sec, #232e3c);border:none;color:var(--txt, #fff);font-size:14px" />
+                <button onClick="{{ t.del }}" style="width:38px;height:44px;border-radius:11px;color:{{ t.delFg }};display:flex;align-items:center;justify-content:center;font-size:17px">×</button>
+              </div>
+            </sc-for>
+            <button onClick="{{ addTmpl }}" style="padding:12px;border-radius:11px;background:var(--sec, #232e3c);color:var(--link, #6ab7ff);font-size:14px;font-weight:600;text-align:center">+ Сообщение</button>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Причины отмены</span>
+            <sc-for list="{{ reasonRows }}" as="t" hint-placeholder-count="4">
+              <div style="display:flex;align-items:center;gap:6px">
+                <input value="{{ t.value }}" onChange="{{ t.on }}" style="flex:1;min-width:0;padding:13px 14px;border-radius:12px;background:var(--sec, #232e3c);border:none;color:var(--txt, #fff);font-size:14px" />
+                <button onClick="{{ t.del }}" style="width:38px;height:44px;border-radius:11px;color:{{ t.delFg }};display:flex;align-items:center;justify-content:center;font-size:17px">×</button>
+              </div>
+            </sc-for>
+            <button onClick="{{ addReason }}" style="padding:12px;border-radius:11px;background:var(--sec, #232e3c);color:var(--link, #6ab7ff);font-size:14px;font-weight:600;text-align:center">+ Причина</button>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Кто работает в админке</span>
+            <sc-for list="{{ staffRows }}" as="t" hint-placeholder-count="3">
+              <div style="display:flex;align-items:center;gap:6px;padding:0 0 0 14px;background:var(--sec, #232e3c);border-radius:12px">
+                <span style="flex:1;font-size:15px;color:var(--txt, #fff)">{{ t.handle }}</span>
+                <button onClick="{{ t.del }}" style="width:44px;height:48px;border-radius:11px;color:{{ t.delFg }};display:flex;align-items:center;justify-content:center;font-size:17px">×</button>
+              </div>
+            </sc-for>
+            <div style="display:flex;align-items:center;gap:6px">
+              <input value="{{ newStaff }}" onChange="{{ setNewStaff }}" placeholder="@username" style="flex:1;min-width:0;padding:13px 14px;border-radius:12px;background:var(--sec, #232e3c);border:none;color:var(--txt, #fff);font-size:15px" />
+              <button onClick="{{ addStaff }}" style="padding:13px 18px;border-radius:12px;background:var(--btn, #5288c1);color:#fff;font-size:14px;font-weight:600">Добавить</button>
+            </div>
+            <span style="font-size:12px;color:var(--hint, #708499);line-height:1.5;text-wrap:pretty">{{ staffNote }}</span>
+          </div>
+
+          <div style="display:flex;gap:8px">
+            <button onClick="{{ saveSettings }}" style="flex:1;padding:15px;border-radius:12px;background:{{ saveBg }};color:{{ saveFg }};font-size:16px;font-weight:600;text-align:center">{{ saveLabel }}</button>
+            <sc-if value="{{ dirty }}" hint-placeholder-val="{{ false }}">
+              <button onClick="{{ revert }}" style="padding:15px 18px;border-radius:12px;background:var(--sec, #232e3c);color:var(--hint, #708499);font-size:15px;font-weight:600">Отмена</button>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+
+    <sc-if value="{{ showMain }}" hint-placeholder-val="{{ false }}">
+      <div style="flex:none;padding:8px 12px;background:var(--bg, #17212b)">
+        <button onClick="{{ mainAction }}" style="width:100%;padding:15px;border-radius:12px;background:{{ mainBg }};color:{{ mainFg }};font-size:16px;font-weight:600;text-align:center">{{ mainLabel }}</button>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isAdminUser }}" hint-placeholder-val="{{ false }}">
+      <div style="flex:none;display:flex;border-top:1px solid var(--sep, rgba(255,255,255,.08));background:var(--sec, #232e3c)">
+        <button onClick="{{ goMine }}" style="flex:1;padding:9px 0 14px;display:flex;flex-direction:column;align-items:center;gap:3px;color:{{ tabClientFg }}">
+          <span style="font-size:17px;line-height:1">◍</span>
+          <span style="font-size:10px;font-weight:600">Моя бронь</span>
+        </button>
+        <button onClick="{{ goAdmin }}" style="flex:1;padding:9px 0 14px;display:flex;flex-direction:column;align-items:center;gap:3px;color:{{ tabAdminFg }}">
+          <span style="font-size:17px;line-height:1">▤</span>
+          <span style="font-size:10px;font-weight:600">Смена</span>
+        </button>
+        <button onClick="{{ goSettings }}" style="flex:1;padding:9px 0 14px;display:flex;flex-direction:column;align-items:center;gap:3px;color:{{ tabSetFg }}">
+          <span style="font-size:17px;line-height:1">⚙</span>
+          <span style="font-size:10px;font-weight:600">Настройки</span>
+        </button>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ sheetOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeSheet }}" style="position:absolute;inset:0;background:rgba(0,0,0,.5);z-index:10;animation:fadeIn .16s ease both"></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;z-index:11;background:var(--bg, #17212b);border-radius:18px 18px 0 0;padding:8px 16px 22px;max-height:86%;overflow-y:auto;animation:sheetUp .24s cubic-bezier(.2,.8,.3,1) both">
+        <div style="width:36px;height:4px;border-radius:9px;background:var(--sep, rgba(255,255,255,.18));margin:0 auto 14px"></div>
+
+        <sc-if value="{{ sheetBooking }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <span style="font-size:22px;font-weight:700;color:var(--txt, #fff);letter-spacing:-.01em">{{ selName }}</span>
+              <span style="font-size:14px;color:var(--hint, #708499)">{{ selMeta }}</span>
+            </div>
+
+            <sc-if value="{{ selOrphan }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:14px;border-radius:12px;background:rgba(234,161,58,.16);display:flex;flex-direction:column;gap:11px">
+                <span style="font-size:13px;color:var(--warn, #eaa13a);line-height:1.45;text-wrap:pretty">Стол закрыли, а свободного на это время не нашлось. Гость об этом ещё не знает.</span>
+                <button onClick="{{ seatOrphan }}" style="padding:12px;border-radius:10px;background:var(--warn, #eaa13a);color:#1a1205;font-size:14px;font-weight:700;text-align:center">Найти стол</button>
+              </div>
+            </sc-if>
+
+            <div style="display:flex;background:var(--sec, #232e3c);border-radius:11px;padding:3px;gap:3px">
+              <sc-for list="{{ statusOpts }}" as="o" hint-placeholder-count="3">
+                <button onClick="{{ o.on }}" style="flex:1;padding:9px;border-radius:9px;text-align:center;font-size:13px;font-weight:600;background:{{ o.bg }};color:{{ o.fg }}">{{ o.label }}</button>
+              </sc-for>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <span style="font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Связаться</span>
+              <button onClick="{{ openTemplates }}" style="display:flex;align-items:center;justify-content:space-between;padding:14px;background:var(--sec, #232e3c);border-radius:12px">
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  <span style="font-size:15px;font-weight:600;color:var(--txt, #fff)">Написать в бот</span>
+                  <span style="font-size:12px;color:{{ botHintColor }}">{{ botHint }}</span>
+                </div>
+                <span style="font-size:16px;color:var(--hint, #708499)">›</span>
+              </button>
+              <button onClick="{{ openChat }}" style="display:flex;align-items:center;justify-content:space-between;padding:14px;background:var(--sec, #232e3c);border-radius:12px;opacity:{{ chatOpacity }}">
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  <span style="font-size:15px;font-weight:600;color:var(--txt, #fff)">Открыть чат с гостем</span>
+                  <span style="font-size:12px;color:{{ chatHintColor }}">{{ chatHint }}</span>
+                </div>
+                <span style="font-size:16px;color:var(--hint, #708499)">›</span>
+              </button>
+            </div>
+
+            <button onClick="{{ openCancel }}" style="padding:14px;border-radius:12px;background:var(--tint, rgba(236,57,66,.12));color:var(--dest, #ec3942);font-size:15px;font-weight:600;text-align:center">Отменить бронь</button>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ sheetTemplates }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-size:20px;font-weight:700;color:var(--txt, #fff)">Сообщение гостю</span>
+            <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45">Уйдёт от бота в чат гостя. {{ selName }} получит его сразу.</span>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ templates }}" as="t" hint-placeholder-count="4">
+                <button onClick="{{ t.on }}" style="padding:14px;background:var(--sec, #232e3c);border-radius:12px;font-size:14px;color:var(--txt, #fff);line-height:1.4">{{ t.text }}</button>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ sheetCancel }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-size:20px;font-weight:700;color:var(--txt, #fff)">Причина отмены</span>
+            <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45">Гость получит сообщение с этой причиной. Стол сразу освободится.</span>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ reasons }}" as="r" hint-placeholder-count="4">
+                <button onClick="{{ r.on }}" style="padding:14px;background:var(--sec, #232e3c);border-radius:12px;font-size:14px;color:var(--txt, #fff);line-height:1.4">{{ r.text }}</button>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ sheetBlock }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <span style="font-size:20px;font-weight:700;color:var(--txt, #fff)">{{ blockTitle }}</span>
+              <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45;text-wrap:pretty">{{ blockImpact }}</span>
+            </div>
+            <sc-if value="{{ showScope }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;background:var(--sec, #232e3c);border-radius:11px;padding:3px;gap:3px">
+                <sc-for list="{{ scopeOpts }}" as="o" hint-placeholder-count="2">
+                  <button onClick="{{ o.on }}" style="flex:1;padding:10px 6px;border-radius:9px;text-align:center;font-size:13px;font-weight:600;background:{{ o.bg }};color:{{ o.fg }}">{{ o.label }}</button>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ blockIsOpen }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <sc-for list="{{ blockReasons }}" as="r" hint-placeholder-count="3">
+                  <button onClick="{{ r.on }}" style="padding:14px;background:var(--sec, #232e3c);border-radius:12px;font-size:14px;color:var(--txt, #fff)">{{ r.text }}</button>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ blockIsClosed }}" hint-placeholder-val="{{ false }}">
+              <button onClick="{{ unblock }}" style="padding:14px;border-radius:12px;background:var(--btn, #5288c1);color:#fff;font-size:15px;font-weight:600;text-align:center">Открыть стол снова</button>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ sheetConflict }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-size:20px;font-weight:700;color:var(--dest, #ec3942)">Так сохранить нельзя</span>
+            <span style="font-size:13px;color:var(--hint, #708499);line-height:1.45;text-wrap:pretty">{{ conflictNote }}</span>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <sc-for list="{{ conflictList }}" as="c" hint-placeholder-count="3">
+                <span style="padding:12px 13px;background:var(--tint, rgba(236,57,66,.14));border-radius:11px;font-size:13px;color:var(--txt, #fff);line-height:1.4">{{ c.text }}</span>
+              </sc-for>
+            </div>
+            <button onClick="{{ closeSheet }}" style="padding:14px;border-radius:12px;background:var(--sec, #232e3c);color:var(--txt, #fff);font-size:15px;font-weight:600;text-align:center">Понятно</button>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ sheetNew }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:18px">
+            <span style="font-size:20px;font-weight:700;color:var(--txt, #fff)">Бронь вручную</span>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <span style="font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Имя гостя</span>
+              <input value="{{ newName }}" onChange="{{ setNewName }}" placeholder="Как записать" style="padding:13px 14px;border-radius:12px;background:var(--sec, #232e3c);border:none;color:var(--txt, #fff);font-size:15px;width:100%" />
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <span style="font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Гостей</span>
+              <div style="display:flex;gap:6px">
+                <sc-for list="{{ newSizes }}" as="s" hint-placeholder-count="6">
+                  <button onClick="{{ s.on }}" style="flex:1;height:44px;border-radius:11px;background:{{ s.bg }};color:{{ s.fg }};font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center">{{ s.n }}</button>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <span style="font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint, #708499)">Время</span>
+              <sc-if value="{{ newDayHidden }}" hint-placeholder-val="{{ true }}">
+                <button onClick="{{ showNewDay }}" style="display:flex;align-items:center;justify-content:space-between;padding:11px 13px;border-radius:10px;background:var(--sec, #232e3c)">
+                  <span style="font-size:13px;color:var(--txt, #fff)">Днём</span>
+                  <span style="font-size:12px;color:var(--hint, #708499)">{{ dayRange }} ›</span>
+                </button>
+              </sc-if>
+              <sc-if value="{{ newDayShown }}" hint-placeholder-val="{{ false }}">
+                <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:6px">
+                  <sc-for list="{{ newDaySlots }}" as="t" hint-placeholder-count="14">
+                    <button onClick="{{ t.on }}" style="height:40px;border-radius:10px;background:{{ t.bg }};color:{{ t.fg }};font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:{{ t.cur }}">{{ t.label }}</button>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:6px">
+                <sc-for list="{{ newSlots }}" as="t" hint-placeholder-count="16">
+                  <button onClick="{{ t.on }}" style="height:40px;border-radius:10px;background:{{ t.bg }};color:{{ t.fg }};font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:{{ t.cur }}">{{ t.label }}</button>
+                </sc-for>
+              </div>
+            </div>
+            <button onClick="{{ createBooking }}" style="padding:15px;border-radius:12px;background:{{ createBg }};color:{{ createFg }};font-size:16px;font-weight:600;text-align:center">{{ createLabel }}</button>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ toastOn }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;left:14px;right:14px;bottom:78px;z-index:20;background:rgba(20,24,30,.96);border:1px solid rgba(255,255,255,.1);border-radius:13px;padding:13px 15px;animation:toastIn .22s ease both">
+        <span style="font-size:13px;color:#fff;line-height:1.45;text-wrap:pretty">{{ toastText }}</span>
+      </div>
+    </sc-if>
+  </div>
+
+  <span style="font-size:11px;color:#5b626e;max-width:390px;text-align:center;line-height:1.6;text-wrap:pretty">Столы назначаются автоматически при бронировании — гость номер стола не видит. Свободное время в пикере посчитано настоящим алгоритмом подбора, а не заглушкой.</span>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:440,&quot;height&quot;:900},&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;dark&quot;,&quot;light&quot;],&quot;default&quot;:&quot;dark&quot;,&quot;tsType&quot;:&quot;'dark' | 'light'&quot;,&quot;section&quot;:&quot;Платформа&quot;},&quot;occupancy&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;busy&quot;,&quot;quiet&quot;],&quot;default&quot;:&quot;busy&quot;,&quot;tsType&quot;:&quot;'busy' | 'quiet'&quot;,&quot;section&quot;:&quot;Данные смены&quot;},&quot;turnMinutes&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;min&quot;:60,&quot;max&quot;:240,&quot;step&quot;:30,&quot;default&quot;:120,&quot;unit&quot;:&quot;мин&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Правила бронирования&quot;},&quot;slotStep&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[15,30,60],&quot;default&quot;:30,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Правила бронирования&quot;},&quot;maxParty&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;min&quot;:4,&quot;max&quot;:10,&quot;step&quot;:1,&quot;default&quot;:6,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Правила бронирования&quot;}}">
+class Component extends DCLogic {
+  DEFAULT_TABLES = [
+    {id:1,seats:2,zone:'Бар'},{id:2,seats:2,zone:'Бар'},{id:3,seats:2,zone:'Бар'},{id:4,seats:2,zone:'Бар'},
+    {id:5,seats:4,zone:'Зал'},{id:6,seats:4,zone:'Зал'},{id:7,seats:4,zone:'Зал'},
+    {id:8,seats:4,zone:'Зал'},{id:9,seats:4,zone:'Зал'},{id:10,seats:4,zone:'Зал'},
+    {id:11,seats:6,zone:'Зал'},{id:12,seats:6,zone:'Зал'},{id:13,seats:6,zone:'Зал'},
+    {id:14,seats:4,zone:'Терраса'},{id:15,seats:6,zone:'Терраса'}
+  ];
+  ZONES = ['Бар', 'Зал', 'Терраса'];
+  NOW = 1215; HOURW = 68; ME = 999;
+  LIM = { open: [480, 1080], close: [1200, 1680], turn: [60, 240], maxParty: [2, 10],
+    horizon: [1, 30], remindHours: [1, 12], graceMin: [5, 60], seats: [1, 12] };
+
+  state = {
+    cfg: null, draft: null,
+    isAdminUser: false, tab: 'client', screen: 'home', theme: null,
+    bookSize: 2, bookDay: 0, bookTime: null,
+    newName: '', newSize: 2, newTime: null,
+    bookings: [], blocks: [], notif: false, notifAsked: false,
+    sheet: null, selId: null, blockTable: null, blockScope: 'table', showDay: false, showNewDay: false,
+    editDay: 1, newStaff: '',
+    adminDay: 0, adminView: 'timeline', toast: null
+  };
+
+  defaults() {
+    const week = [0,1,2,3,4,5,6].map(() => ({ open: 600, close: 1560, closed: false }));
+    return { name: 'Бар «Подвал»', address: 'Дечанска 12, Белград', week,
+      tables: this.DEFAULT_TABLES, horizon: 4, remindHours: 3, graceMin: 15,
+      staff: ['anna_mgr', 'pavel_bar', 'marko_b'],
+      templates: ['Ваш стол готов, ждём вас!', 'Опаздываете? Держим стол ещё 15 минут.',
+        'Можем предложить другое время — напишите, какое удобно.', 'Уточните, пожалуйста, сколько вас будет.'],
+      reasons: ['Технические проблемы в баре', 'Частное мероприятие', 'Нет свободных столов на это время', 'По просьбе гостя'],
+      turn: this.props.turnMinutes ?? 120, step: this.props.slotStep ?? 30, maxParty: this.props.maxParty ?? 6 };
+  }
+  seedKey() { return (this.props.occupancy ?? 'busy') + '|' + (this.props.turnMinutes ?? 120) +
+    '|' + (this.props.slotStep ?? 30) + '|' + (this.props.maxParty ?? 6); }
+  componentDidMount() {
+    this._seedKey = this.seedKey();
+    const cfg = this.defaults();
+    this.setState({ cfg, draft: cfg, bookings: this.seed() });
+  }
+
+  /* Nothing here reads lifecycle arguments: their shape is not guaranteed by this runtime,
+     and a wrong assumption fails silently on every update. Each effect compares against its
+     own last-applied value held on the instance, which is self-evidently correct. */
+  componentDidUpdate() {
+    if (this._seedKey !== this.seedKey()) {
+      this._seedKey = this.seedKey();
+      const cfg = this.defaults();
+      this.setState({ cfg, draft: cfg, bookings: this.seed(), blocks: [] });
+      return;
+    }
+    if (this._anchoredDay !== this.state.adminDay) this.anchorTimeline();
+  }
+
+  /* The timeline's useful window is never its left edge, so the scroll origin is derived from
+     the day's own content instead of being applied once in a lifecycle hook that fires on a
+     screen the element does not live on. Runs on every attach and on every day change. */
+  anchorMin() {
+    const day = this.state.adminDay;
+    if (day === 0) return this.NOW - 90;
+    const first = this.state.bookings
+      .filter(b => b.day === day && b.status !== 'cancelled')
+      .reduce((a, b) => Math.min(a, b.start), Infinity);
+    return first === Infinity ? this.eveOn(day) : first - 60;
+  }
+  /* A scroller clamps scrollLeft to its laid-out width, so a write issued before the inner
+     grid has width lands silently at 0. Verify the write against the DOM and retry on the
+     next frame rather than trusting it — self-limiting, and no timing constant to guess. */
+  anchorTimeline(tries) {
+    if (!this.tl) return;
+    this._anchoredDay = this.state.adminDay;
+    const target = Math.max(0, (this.anchorMin() - this.openOn(this.state.adminDay)) * this.HOURW / 60);
+    this.tl.scrollLeft = target;
+    if (Math.round(this.tl.scrollLeft) !== Math.round(target) && (tries || 0) < 4)
+      requestAnimationFrame(() => this.anchorTimeline((tries || 0) + 1));
+  }
+  componentWillUnmount() { clearTimeout(this._t); }
+
+  cfg() { return this.state.cfg || this.defaults(); }
+  tables() { return this.cfg().tables; }
+  maxSeats() { return this.cfg().tables.reduce((a, t) => Math.max(a, t.seats), 0); }
+  turn() { return this.cfg().turn; }
+  step() { return this.cfg().step; }
+  maxParty() { return this.cfg().maxParty; }
+  /* Hours belong to a weekday, not to the bar, so every time question is asked about a day.
+     There is no day-less open()/close() to accidentally use on the wrong day. */
+  wd(off) { return this.dateFor(off).getDay(); }
+  sch(off) { return this.cfg().week[this.wd(off)]; }
+  openOn(off) { return this.sch(off).open; }
+  closeOn(off) { return this.sch(off).close; }
+  closedOn(off) { return this.sch(off).closed; }
+  /* Last arrival is not a setting: it is closing time minus one turn. Storing it separately
+     would create a second source for one fact, and the two would drift. */
+  lastOn(off) { return this.closeOn(off) - this.turn(); }
+  eveOn(off) { return Math.max(this.openOn(off), 1020); }
+  theme() { return this.state.theme ?? this.props.theme ?? 'dark'; }
+
+  pal() {
+    return this.theme() === 'light'
+      ? { bg:'#ffffff', sec:'#f2f2f7', txt:'#000000', hint:'#8e8e93', btn:'#2481cc', link:'#2481cc',
+          sep:'rgba(0,0,0,.09)', dest:'#df3f40', ok:'#2aa14a', warn:'#e08600', tint:'rgba(223,63,64,.10)',
+          chipBg:'#f2f2f7', chipOff:'#f7f7fa' }
+      : { bg:'#17212b', sec:'#232e3c', txt:'#ffffff', hint:'#708499', btn:'#5288c1', link:'#6ab7ff',
+          sep:'rgba(255,255,255,.08)', dest:'#ec3942', ok:'#42c767', warn:'#eaa13a', tint:'rgba(236,57,66,.14)',
+          chipBg:'#232e3c', chipOff:'#1d2733' };
+  }
+
+  fmt(m) { const h = Math.floor(m / 60) % 24, mm = m % 60; return String(h).padStart(2,'0') + ':' + String(mm).padStart(2,'0'); }
+  dateFor(off) { const d = new Date(2026, 6, 30); d.setDate(d.getDate() + off); return d; }
+  /* Three explicitly-named forms instead of two that silently assumed who carries the date:
+     dayName is the top line, dayDate the sub line, dayFull the one-line form. */
+  dayName(off) {
+    if (off === 0) return 'Сегодня'; if (off === 1) return 'Завтра';
+    return ['вс','пн','вт','ср','чт','пт','сб'][this.dateFor(off).getDay()];
+  }
+  dayDate(off) {
+    const d = this.dateFor(off);
+    return d.getDate() + ' ' + ['янв','фев','мар','апр','мая','июн','июл','авг','сен','окт','ноя','дек'][d.getMonth()];
+  }
+  dayFull(off) { return off < 2 ? this.dayName(off) : this.dayName(off) + ', ' + this.dayDate(off); }
+  plural(n, a, b, c) { const m = n % 100, k = n % 10;
+    if (m > 10 && m < 20) return c; if (k === 1) return a; if (k > 1 && k < 5) return b; return c; }
+  guests(n) { return n + ' ' + this.plural(n, 'гость', 'гостя', 'гостей'); }
+
+  isBlocked(tid, day) { return this.state.blocks.some(b => b.tableId === tid && b.day === day); }
+
+  /* Core of the architecture: a booking is only ever written with a concrete table.
+     Nothing is accepted against aggregate seat totals, so "accepted but unseatable" cannot occur. */
+  assign(size, start, day, bookings, blocks, excludeId) {
+    const T = this.turn();
+    const cands = this.tables()
+      .filter(t => t.seats >= size && !blocks.some(b => b.tableId === t.id && b.day === day))
+      .sort((a, b) => a.seats - b.seats || a.id - b.id);
+    return cands.find(t => !bookings.some(b =>
+      b.tableId === t.id && b.day === day && b.status !== 'cancelled' && b.id !== excludeId &&
+      b.start < start + T && start < b.start + T)) || null;
+  }
+
+  seed() {
+    const quiet = (this.props.occupancy ?? 'busy') === 'quiet';
+    /* [start, size, name, username, status, source, tgId] — a busy Friday must actually
+       saturate the four 6-tops between 18:00 and 21:30, otherwise the allocator's constraint
+       never binds and the picker can never demonstrate a refusal. */
+    const raw = quiet
+      ? [[1140,2,'Анна К.','anna_k','arrived'],[1170,4,'Дмитрий','dmitry_v','arrived'],
+         [1200,6,'Игорь','igor_bel','arrived'],[1260,2,'Вера','vera','confirmed'],
+         [1290,4,'Алексей','alexey','confirmed','app',999],[1320,6,'Роман','roman_b','confirmed'],
+         [1350,3,'Полина','','confirmed','staff']]
+      : [[1080,6,'Игорь','igor_bel','arrived'],[1080,4,'Дмитрий','dmitry_v','arrived'],
+         [1080,2,'Анна К.','anna_k','arrived'],
+         [1110,5,'Роман','roman_b','arrived'],[1110,4,'Соня','sonya','arrived'],
+         [1140,6,'Тимур','timur','arrived'],[1140,3,'Никита','nik','arrived'],
+         [1140,4,'Вадим','vadim','arrived'],[1140,2,'Марина','','no_show'],
+         [1170,6,'Ксения','ksenia','confirmed'],[1170,4,'Катя','katya_r','arrived'],
+         [1170,2,'Павел','','arrived'],
+         [1200,6,'Олег','oleg_s','confirmed'],[1200,4,'Артём','','confirmed','staff'],
+         [1200,4,'Марк','mark','confirmed'],[1200,2,'Вера','vera','confirmed'],
+         [1230,5,'Данила','','confirmed'],[1230,3,'Юля','yulia','confirmed'],
+         [1260,6,'Мила','mila','confirmed'],[1260,4,'Саша','sasha_p','confirmed'],
+         [1260,2,'Лиза','liza','confirmed'],
+         [1290,6,'Артур','artur_bg','confirmed'],[1290,4,'Алексей','alexey','confirmed','app',999],
+         [1320,4,'Глеб','gleb','confirmed'],[1320,2,'Настя','nastya','confirmed'],
+         [1350,3,'Полина','','confirmed','staff'],[1380,2,'Егор','egor','confirmed']];
+    const out = [];
+    raw.forEach((r, i) => {
+      const t = this.assign(r[1], r[0], 0, out, [], null);
+      if (t) out.push({ id: i + 1, tableId: t.id, start: r[0], size: r[1], name: r[2],
+        username: r[3], status: r[4], source: r[5] || 'app', tgId: r[6] ?? 1000 + i, day: 0 });
+    });
+    return out;
+  }
+
+  mine() { return this.state.bookings.find(b => b.tgId === this.ME && b.status !== 'cancelled'); }
+  byId(id) { return this.state.bookings.find(b => b.id === id); }
+  tableOf(id) { return this.tables().find(t => t.id === id); }
+
+  toast(text) { clearTimeout(this._t); this.setState({ toast: text });
+    this._t = setTimeout(() => this.setState({ toast: null }), 4200); }
+
+  slotList(size, day, selected, pick) {
+    if (this.closedOn(day)) return [];
+    const st = this.step(), out = [], p = this.pal();
+    for (let m = this.openOn(day); m <= this.lastOn(day); m += st) {
+      const free = !!this.assign(size, m, day, this.state.bookings, this.state.blocks, null);
+      const sel = selected === m;
+      out.push({ label: this.fmt(m), min: m, cur: free ? 'pointer' : 'default',
+        bg: sel ? p.btn : (free ? p.chipBg : 'transparent'),
+        fg: sel ? '#fff' : (free ? p.txt : p.hint),
+        on: free ? () => pick(m) : () => {} });
+    }
+    return out;
+  }
+
+  renderVals() {
+    const p = this.pal(), s = this.state, me = this.mine();
+    const sel = s.selId ? this.byId(s.selId) : null;
+    const adminScreen = s.tab !== 'client';
+    const d = s.draft || this.defaults(), c = this.cfg();
+    const dirty = JSON.stringify(d) !== JSON.stringify(c);
+    const conflicts = s.sheet === 'conflict' ? this.conflicts(d) : [];
+    const stepOpts = [15, 30, 60].map(n => ({ label: n + ' мин', bg: d.step === n ? p.btn : 'transparent',
+      fg: d.step === n ? '#fff' : p.hint, on: () => this.setDraft('step', n) }));
+
+    const can = (k, v) => this.valid({ ...d, [k]: v });
+    const ctl = (k, label, delta, value) => {
+      const cl = can(k, d[k] - delta), cm = can(k, d[k] + delta);
+      return { label, value,
+        lessFg: cl ? p.link : p.hint, moreFg: cm ? p.link : p.hint,
+        lessCur: cl ? 'pointer' : 'default', moreCur: cm ? 'pointer' : 'default',
+        lessOn: cl ? () => this.setDraft(k, d[k] - delta) : () => {},
+        moreOn: cm ? () => this.setDraft(k, d[k] + delta) : () => {} };
+    };
+    const ed = s.editDay, W = d.week[ed];
+    const WDS = ['вс','пн','вт','ср','чт','пт','сб'];
+    const WDL = ['Воскресенье','Понедельник','Вторник','Среда','Четверг','Пятница','Суббота'];
+    const canW = patch => this.valid({ ...d, week: d.week.map((w, k) => k === ed ? { ...w, ...patch } : w) });
+    const weekChips = [1,2,3,4,5,6,0].map(i => ({ label: WDS[i],
+      bg: ed === i ? p.btn : p.chipBg, fg: ed === i ? '#fff' : (d.week[i].closed ? p.hint : p.txt),
+      dot: d.week[i].closed ? p.dest : 'transparent', on: () => this.setState({ editDay: i }) }));
+    const wCtl = (key, label, delta, value) => {
+      const cl = canW({ [key]: W[key] - delta }), cm = canW({ [key]: W[key] + delta });
+      return { label, value,
+        lessFg: cl ? p.link : p.hint, moreFg: cm ? p.link : p.hint,
+        lessCur: cl ? 'pointer' : 'default', moreCur: cm ? 'pointer' : 'default',
+        lessOn: cl ? () => this.setWeek(ed, { [key]: W[key] - delta }) : () => {},
+        moreOn: cm ? () => this.setWeek(ed, { [key]: W[key] + delta }) : () => {} };
+    };
+    const hourSteppers = W.closed ? [] : [wCtl('open','Открытие',60,this.fmt(W.open)), wCtl('close','Закрытие',60,this.fmt(W.close))];
+    const canToggleClosed = canW({ closed: !W.closed });
+    const ruleSteppers = [ctl('turn','Бронь занимает',30,(d.turn/60)+' ч'), ctl('maxParty','Компания до',1,d.maxParty+' чел.'),
+      ctl('graceMin','Ждём опоздавших',5,d.graceMin+' мин'), ctl('horizon','Бронь вперёд',1,d.horizon+' дн.'),
+      ctl('remindHours','Напомнить за',1,d.remindHours+' ч')];
+
+    const dT = d.tables, dSeats = dT.reduce((a,t) => a + t.seats, 0);
+    const dMax = dT.reduce((a,t) => Math.max(a, t.seats), 0);
+    const canT = list => this.valid({ ...d, tables: list });
+    const tableRows = dT.map(t => {
+      const swap = n => dT.map(x => x.id === t.id ? { ...x, seats: n } : x);
+      const cl = t.seats - 1 >= this.LIM.seats[0] && canT(swap(t.seats - 1));
+      const cm = t.seats + 1 <= this.LIM.seats[1] && canT(swap(t.seats + 1));
+      const cd = canT(dT.filter(x => x.id !== t.id));
+      const n = s.bookings.filter(b => b.tableId === t.id && b.day === s.adminDay && b.status !== 'cancelled').length;
+      return { label: 'Стол ' + t.id, zone: t.zone, seats: t.seats,
+        hasBadge: n > 0, badge: n + ' ' + this.plural(n,'бронь','брони','броней'),
+        lessFg: cl ? p.link : p.hint, moreFg: cm ? p.link : p.hint, delFg: cd ? p.dest : p.hint,
+        lessCur: cl ? 'pointer' : 'default', moreCur: cm ? 'pointer' : 'default', delCur: cd ? 'pointer' : 'default',
+        lessOn: cl ? () => this.tableSeats(t.id, -1) : () => {},
+        moreOn: cm ? () => this.tableSeats(t.id, 1) : () => {},
+        delOn: cd ? () => this.delTable(t.id) : () => {},
+        zoneOn: () => this.cycleZone(t.id) };
+    });
+    const capBlocked = !canT(dT) || d.maxParty >= dMax;
+
+    const shortest = d.week.filter(w => !w.closed).reduce((a, w) => Math.min(a, w.close - w.open), Infinity);
+    const why = [];
+    if (!can('turn', d.turn + 30) && d.turn + 30 <= this.LIM.turn[1])
+      why.push('держать стол дольше нельзя — самая короткая смена всего ' + (shortest / 60) + ' ч');
+
+    const sizes = [];
+    for (let n = 1; n <= this.maxParty(); n++) sizes.push({ n,
+      bg: s.bookSize === n ? p.btn : p.chipBg, fg: s.bookSize === n ? '#fff' : p.txt,
+      on: () => this.setState({ bookSize: n, bookTime: null }) });
+
+    const dayNums = [];
+    for (let i = 0; i < c.horizon; i++) if (!this.closedOn(i)) dayNums.push(i);
+    const days = dayNums.map(o => ({ top: this.dayName(o), sub: this.dayDate(o),
+      bg: s.bookDay === o ? p.btn : p.chipBg, fg: s.bookDay === o ? '#fff' : p.txt,
+      on: () => this.setState({ bookDay: o, bookTime: null }) }));
+
+    const allSlots = this.slotList(s.bookSize, s.bookDay, s.bookTime, m => this.setState({ bookTime: m }));
+    const slots = allSlots.filter(x => x.min >= this.eveOn(s.bookDay));
+    const daySlots = allSlots.filter(x => x.min < this.eveOn(s.bookDay));
+    const freeCount = allSlots.filter(x => x.cur === 'pointer').length;
+
+    const newSizes = [];
+    for (let n = 1; n <= this.maxParty(); n++) newSizes.push({ n,
+      bg: s.newSize === n ? p.btn : p.chipBg, fg: s.newSize === n ? '#fff' : p.txt,
+      on: () => this.setState({ newSize: n, newTime: null }) });
+    const allNew = this.slotList(s.newSize, s.adminDay, s.newTime, m => this.setState({ newTime: m }));
+    const newSlots = allNew.filter(x => x.min >= this.eveOn(s.adminDay));
+    const newDaySlots = allNew.filter(x => x.min < this.eveOn(s.adminDay));
+
+    const dayB = s.bookings.filter(b => b.day === s.adminDay && b.status !== 'cancelled');
+    const nowFree = this.tables().filter(t => !this.isBlocked(t.id, s.adminDay) &&
+      !dayB.some(b => b.tableId === t.id && b.start <= this.NOW && this.NOW < b.start + this.turn())).length;
+
+    const stColor = st => st === 'arrived' ? p.ok : st === 'no_show' ? p.dest : p.btn;
+    const stWord = st => st === 'arrived' ? 'за столом' : st === 'no_show' ? 'не пришли' : 'ждём';
+
+    const rows = this.tables().map(t => {
+      const blocked = this.isBlocked(t.id, s.adminDay);
+      const blk = s.blocks.find(b => b.tableId === t.id && b.day === s.adminDay);
+      return { num: t.id, seats: t.seats, blocked, blockLabel: blk ? blk.reason : '',
+        blockBg: p.tint, labelColor: blocked ? p.dest : p.txt,
+        rowBg: blocked ? 'transparent' : 'transparent',
+        onLabel: () => this.setState({ sheet: 'block', blockTable: t.id, blockScope: 'table' }),
+        blocks: dayB.filter(b => b.tableId === t.id).map(b => ({
+          x: ((b.start - this.openOn(s.adminDay)) * this.HOURW / 60) + 'px',
+          w: (this.turn() * this.HOURW / 60 - 3) + 'px',
+          bg: b.status === 'arrived' ? 'rgba(66,199,103,.18)' : b.status === 'no_show' ? p.tint : 'rgba(82,136,193,.20)',
+          bd: stColor(b.status), fg: p.txt, label: b.name + ' · ' + b.size,
+          on: () => this.setState({ sheet: 'booking', selId: b.id })
+        })) };
+    });
+
+    const hours = [];
+    for (let m = this.openOn(s.adminDay); m <= this.closeOn(s.adminDay); m += 60)
+      hours.push({ label: this.fmt(m), x: ((m - this.openOn(s.adminDay)) * this.HOURW / 60) + 'px' });
+
+    const orphans = dayB.filter(b => !b.tableId);
+    const orphanBlocks = orphans.map(b => ({
+      x: ((b.start - this.openOn(s.adminDay)) * this.HOURW / 60) + 'px',
+      w: (this.turn() * this.HOURW / 60 - 3) + 'px',
+      bg: 'rgba(234,161,58,.20)', bd: p.warn, fg: p.txt, label: b.name + ' · ' + b.size,
+      on: () => this.setState({ sheet: 'booking', selId: b.id }) }));
+
+    const listRows = dayB.slice().sort((a,b) => a.start - b.start).map(b => ({
+      time: this.fmt(b.start), name: b.name,
+      dot: b.tableId ? stColor(b.status) : p.warn,
+      status: b.tableId ? stWord(b.status) : 'без стола',
+      meta: this.guests(b.size) + ' · ' + (b.tableId ? 'стол ' + b.tableId : 'стол не назначен') +
+        (b.source === 'staff' ? ' · вручную' : ''),
+      on: () => this.setState({ sheet: 'booking', selId: b.id }) }));
+
+    const statusOpts = ['confirmed','arrived','no_show'].map(k => ({
+      label: k === 'confirmed' ? 'Ждём' : k === 'arrived' ? 'Пришли' : 'Не пришли',
+      bg: sel && sel.status === k ? stColor(k) : 'transparent',
+      fg: sel && sel.status === k ? '#fff' : p.hint,
+      on: () => this.setStatus(k) }));
+
+    const tmpl = c.templates, reas = c.reasons;
+
+    const bTab = s.blockTable ? this.tableOf(s.blockTable) : null;
+    const zoneIds = bTab ? this.tables().filter(t => t.zone === bTab.zone).map(t => t.id) : [];
+    const bIds = s.blockScope === 'zone' ? zoneIds : (s.blockTable ? [s.blockTable] : []);
+    const blockedNow = bIds.length > 0 && bIds.every(id => this.isBlocked(id, s.adminDay));
+    const affected = dayB.filter(b => bIds.indexOf(b.tableId) >= 0).length;
+    const scopeOpts = [
+      { label: 'Только стол', k: 'table' },
+      { label: 'Вся зона «' + (bTab ? bTab.zone : '') + '»', k: 'zone' }
+    ].map(o => ({ label: o.label, bg: s.blockScope === o.k ? p.btn : 'transparent',
+      fg: s.blockScope === o.k ? '#fff' : p.hint, on: () => this.setState({ blockScope: o.k }) }));
+
+    const canCreate = !!(s.newName.trim() && s.newTime !== null);
+    const bookReady = s.bookTime !== null;
+
+    return {
+      cBg: p.bg, cSec: p.sec, cTxt: p.txt, cHint: p.hint, cBtn: p.btn, cLink: p.link,
+      cSep: p.sep, cDest: p.dest, cOk: p.ok, cWarn: p.warn, cTint: p.tint,
+
+      themeLabel: this.theme() === 'light' ? 'Тёмная' : 'Светлая',
+      toggleTheme: () => this.setState({ theme: this.theme() === 'light' ? 'dark' : 'light' }),
+      reset: () => this.setState({ bookings: this.seed(), blocks: [], notif: false, notifAsked: false,
+        screen: 'home', tab: 'client', sheet: null, bookTime: null, adminDay: 0 }),
+      isAdminUser: s.isAdminUser,
+      swClientBg: !s.isAdminUser ? '#2b3240' : 'transparent', swClientFg: !s.isAdminUser ? '#fff' : '#6b727e',
+      swAdminBg: s.isAdminUser ? '#2b3240' : 'transparent', swAdminFg: s.isAdminUser ? '#fff' : '#6b727e',
+      /* Prototype-only: simulates a non-admin user. Role mutation lives here and nowhere else. */
+      goClient: () => this.setState({ isAdminUser: false, tab: 'client', screen: 'home', sheet: null }),
+      /* In-app tab: navigation only. An admin opening their own booking is not a demotion. */
+      goMine: () => this.setState({ tab: 'client', screen: 'home', sheet: null }),
+      goAdmin: () => this.setState({ isAdminUser: true, tab: 'admin', sheet: null }),
+      tabClientFg: !adminScreen ? p.btn : p.hint, tabAdminFg: s.tab === 'admin' ? p.btn : p.hint,
+
+      chromeTitle: s.tab === 'admin' ? 'Смена' : s.tab === 'settings' ? 'Настройки' : c.name,
+      chromeSub: s.tab === 'admin' ? 'админ' : s.tab === 'settings' ? 'бар и правила' : c.address,
+      hoursLabel: this.closedOn(0) ? 'Выходной' : this.fmt(this.openOn(0)) + ' — ' + this.fmt(this.closeOn(0)),
+      addressFull: c.address,
+      maxPartyLabel: 'Компания больше ' + c.maxParty,
+      leftChrome: s.screen === 'book' && !adminScreen ? '‹ Назад' : '',
+      back: () => { if (s.screen === 'book') this.setState({ screen: 'home' }); },
+
+      showHome: !adminScreen && s.screen === 'home',
+      showBook: !adminScreen && s.screen === 'book',
+      showDone: !adminScreen && s.screen === 'done',
+      showAdmin: s.tab === 'admin', showSettings: s.tab === 'settings',
+      goSettings: () => this.setState({ tab: 'settings', sheet: null, draft: this.cfg() }),
+      tabSetFg: s.tab === 'settings' ? p.btn : p.hint,
+      cfgName: d.name, cfgAddress: d.address,
+      setCfgName: e => this.setDraft('name', e.target.value),
+      setCfgAddress: e => this.setDraft('address', e.target.value),
+      lastArrival: W.closed ? '—' : this.fmt(W.close - d.turn),
+      weekChips, editDayName: WDL[ed],
+      dayIsClosed: W.closed, dayIsOpen: !W.closed,
+      closedLabel: W.closed ? 'Выходной' : 'Рабочий день',
+      closedFg: W.closed ? p.dest : p.ok,
+      toggleClosed: canToggleClosed ? () => this.setWeek(ed, { closed: !W.closed }) : () => {},
+      toggleClosedFg: canToggleClosed ? p.link : p.hint,
+      toggleClosedLabel: W.closed ? 'Сделать рабочим' : 'Сделать выходным',
+      copyAll: () => this.copyWeekToAll(ed),
+      stepOpts, dirty, hourSteppers, ruleSteppers, tableRows,
+      tmplRows: d.templates.map((t, i) => ({ value: t,
+        on: e => this.setListItem('templates', i, e.target.value),
+        del: d.templates.length > 1 ? () => this.delListItem('templates', i) : () => {},
+        delFg: d.templates.length > 1 ? p.dest : p.hint })),
+      reasonRows: d.reasons.map((t, i) => ({ value: t,
+        on: e => this.setListItem('reasons', i, e.target.value),
+        del: d.reasons.length > 1 ? () => this.delListItem('reasons', i) : () => {},
+        delFg: d.reasons.length > 1 ? p.dest : p.hint })),
+      addTmpl: () => this.addListItem('templates', 'Новое сообщение'),
+      addReason: () => this.addListItem('reasons', 'Новая причина'),
+      staffRows: d.staff.map((h, i) => ({ handle: '@' + h,
+        del: d.staff.length > 1 ? () => this.delListItem('staff', i) : () => {},
+        delFg: d.staff.length > 1 ? p.dest : p.hint })),
+      newStaff: s.newStaff,
+      setNewStaff: e => this.setState({ newStaff: e.target.value }),
+      addStaff: () => { const v = s.newStaff.trim().replace('@', '');
+        if (!v) return; this.setState({ newStaff: '' }); this.addListItem('staff', v); },
+      staffNote: 'Любой из списка может менять эти настройки и добавлять других. Последнего убрать нельзя — иначе в админку не войдёт никто.',
+      addTable: () => this.addTable(),
+      tableSummary: dT.length + ' ' + this.plural(dT.length,'стол','стола','столов') + ' · ' + dSeats +
+        ' ' + this.plural(dSeats,'место','места','мест') + ' · самый большой на ' + dMax,
+      hasCapNote: capBlocked,
+      capNote: 'Компанию больше ' + dMax + ' принять некуда: это самый большой стол. Лимит брони не может быть выше.',
+      hasLimitNote: why.length > 0,
+      limitNote: why.length ? 'При этих часах ' + why.join('; ') + '.' : '',
+      graceNote: 'Стол держим ' + c.graceMin + ' минут после времени брони. Опаздываете — напишите нам в чат.',
+      remindNote: 'Пришлём напоминание за ' + c.remindHours + ' ч. Если планы изменятся — отмените одной кнопкой прямо из чата.',
+      remindTitle: 'Напомнить за ' + c.remindHours + ' ч?',
+      remindConfirm: 'Напомним за ' + c.remindHours + ' ч до брони',
+      saveLabel: dirty ? 'Сохранить' : 'Всё сохранено',
+      saveBg: dirty ? p.btn : p.chipBg, saveFg: dirty ? '#fff' : p.hint,
+      saveSettings: () => { if (dirty) this.saveSettings(); },
+      revert: () => this.setState({ draft: c }),
+      sheetConflict: s.sheet === 'conflict',
+      conflictList: conflicts.map(t => ({ text: t })),
+      conflictNote: 'Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их — тогда настройку можно будет сохранить.',
+
+      hasBooking: !adminScreen && s.screen === 'home' && !!me,
+      noBooking: !adminScreen && s.screen === 'home' && !me,
+      myWhen: me ? this.dayFull(me.day) + ' в ' + this.fmt(me.start) : '',
+      myWho: me ? this.guests(me.size) : '',
+      notifOn: s.notif,
+      showNotifBanner: !!me && !s.notif && !s.notifAsked,
+      enableNotif: () => { this.setState({ notif: true, notifAsked: true });
+        this.toast('Бот теперь может писать вам. Напомним за ' + c.remindHours + ' ч — с кнопкой «не смогу прийти».'); },
+      dismissNotif: () => this.setState({ notifAsked: true }),
+      cancelMine: () => { if (!me) return;
+        this.setState({ bookings: s.bookings.map(b => b.id === me.id ? {...b, status:'cancelled'} : b) });
+        this.toast('Бронь отменена. Стол ' + me.tableId + ' снова свободен.'); },
+
+      sizes, days, slots, daySlots,
+      dayRange: this.fmt(this.openOn(s.bookDay)) + ' — ' + this.fmt(this.eveOn(s.bookDay) - this.step()),
+      dayHidden: !s.showDay && daySlots.length > 0, dayShown: s.showDay && daySlots.length > 0,
+      showDay: () => this.setState({ showDay: true }),
+      turnNote: 'стол на ' + (this.turn() / 60) + ' ч',
+      availNote: freeReady(freeCount, this.guests(s.bookSize)),
+
+      showMain: (!adminScreen && (s.screen === 'home' || s.screen === 'book' || s.screen === 'done')) && !s.sheet,
+      mainLabel: s.screen === 'done' ? 'На главную'
+        : s.screen === 'book' ? (bookReady ? 'Забронировать на ' + this.fmt(s.bookTime) : 'Выберите время')
+        : me ? 'Изменить бронь' : 'Забронировать стол',
+      mainBg: s.screen === 'book' && !bookReady ? p.chipBg : p.btn,
+      mainFg: s.screen === 'book' && !bookReady ? p.hint : '#fff',
+      mainAction: () => this.mainAction(),
+
+      adminDayLabel: this.dayName(s.adminDay), adminDaySub: this.dayDate(s.adminDay),
+      dayPrev: () => this.setState({ adminDay: Math.max(0, s.adminDay - 1) }),
+      dayNext: () => this.setState({ adminDay: s.adminDay + 1 }),
+      statBookings: dayB.length, statGuests: dayB.reduce((a,b) => a + b.size, 0),
+      statFree: nowFree, freeColor: nowFree <= 2 ? p.dest : p.txt,
+      adminClosed: this.closedOn(s.adminDay), adminOpen: !this.closedOn(s.adminDay),
+      isTimeline: s.adminView === 'timeline' && !this.closedOn(s.adminDay),
+      isList: s.adminView === 'list' && !this.closedOn(s.adminDay),
+      viewTimeline: () => this.setState({ adminView: 'timeline' }),
+      viewList: () => this.setState({ adminView: 'list' }),
+      vtBg: s.adminView === 'timeline' ? p.btn : 'transparent', vtFg: s.adminView === 'timeline' ? '#fff' : p.hint,
+      vlBg: s.adminView === 'list' ? p.btn : 'transparent', vlFg: s.adminView === 'list' ? '#fff' : p.hint,
+      rows, hours, listRows, listEmpty: listRows.length === 0,
+      orphanBlocks, hasOrphans: orphans.length > 0,
+      orphanNote: orphans.length + ' ' + this.plural(orphans.length,'бронь','брони','броней') +
+        ' без стола — откройте карточку и посадите вручную',
+      tlWidth: ((this.closeOn(s.adminDay) - this.openOn(s.adminDay)) * this.HOURW / 60 + 20) + 'px',
+      nowX: s.adminDay === 0 ? ((this.NOW - this.openOn(0)) * this.HOURW / 60) + 'px' : '-10px',
+      tlRef: el => { if (el && el !== this.tl) { this.tl = el; this.anchorTimeline(); } },
+
+      sheetOpen: !!s.sheet, closeSheet: () => this.setState({ sheet: null }),
+      sheetBooking: s.sheet === 'booking', sheetTemplates: s.sheet === 'templates',
+      sheetCancel: s.sheet === 'cancel', sheetNew: s.sheet === 'new', sheetBlock: s.sheet === 'block',
+      selName: sel ? sel.name : '',
+      selMeta: sel ? this.fmt(sel.start) + '–' + this.fmt(sel.start + this.turn()) + ' · ' +
+        this.guests(sel.size) + ' · ' + (sel.tableId
+          ? 'стол ' + sel.tableId + ' (' + this.tableOf(sel.tableId).zone + ')'
+          : 'стол не назначен') : '',
+      selOrphan: !!sel && !sel.tableId,
+      seatOrphan: () => this.seatOrphan(),
+      statusOpts,
+      botHint: sel ? (sel.source === 'app' ? 'Гость разрешил сообщения' : 'Гость бронировал не через приложение') : '',
+      botHintColor: sel && sel.source === 'app' ? p.ok : p.warn,
+      chatHint: sel ? (sel.username ? '@' + sel.username : 'Username скрыт — чат недоступен') : '',
+      chatHintColor: sel && sel.username ? p.hint : p.warn,
+      chatOpacity: sel && sel.username ? '1' : '.5',
+      openChat: () => { if (sel && sel.username) this.toast('Открываем чат с @' + sel.username + ' в Telegram.');
+        else this.toast('У гостя скрыт username — открыть чат нельзя. Напишите через бота.'); },
+      openTemplates: () => this.setState({ sheet: sel && sel.source === 'app' ? 'templates' : 'booking' },
+        () => { if (sel && sel.source !== 'app') this.toast('Гость записан вручную — у бота нет с ним чата. Позвоните или откройте чат.'); }),
+      templates: tmpl.map(t => ({ text: t, on: () => { this.setState({ sheet: null });
+        this.toast('Отправлено ' + (sel ? sel.name : '') + ': «' + t + '»'); } })),
+      openCancel: () => this.setState({ sheet: 'cancel' }),
+      reasons: reas.map(r => ({ text: r, on: () => this.cancelBooking(r) })),
+
+      scopeOpts, showScope: zoneIds.length > 1,
+      blockTitle: (s.blockScope === 'zone' ? 'Зона «' + (bTab ? bTab.zone : '') + '»' : 'Стол ' + s.blockTable) +
+        (blockedNow ? ' — закрыто' : ''),
+      blockImpact: blockedNow ? 'Не участвует в подборе. Откройте, когда снова можно сажать гостей.'
+        : affected > 0 ? 'Здесь ' + affected + ' ' + this.plural(affected,'бронь','брони','броней') +
+          ' — попробуем пересадить их автоматически и покажем, что изменилось.'
+        : 'Броней здесь нет — закрытие ни на кого не повлияет.',
+      blockIsOpen: !blockedNow, blockIsClosed: blockedNow,
+      blockReasons: ['Сломан / залит','Дождь','Частное мероприятие','Держим для своих'].map(r => ({ text: r, on: () => this.blockTable(r) })),
+      unblock: () => { this.setState({ blocks: s.blocks.filter(b => !(bIds.indexOf(b.tableId) >= 0 && b.day === s.adminDay)), sheet: null });
+        this.toast((s.blockScope === 'zone' ? 'Зона «' + bTab.zone + '»' : 'Стол ' + s.blockTable) + ' снова в подборе.'); },
+
+      openNew: () => this.setState({ sheet: 'new', newName: '', newSize: 2, newTime: null, showNewDay: false }),
+      newName: s.newName, setNewName: e => this.setState({ newName: e.target.value }),
+      newSizes, newSlots, newDaySlots,
+      newDayHidden: !s.showNewDay && newDaySlots.length > 0,
+      newDayShown: s.showNewDay && newDaySlots.length > 0,
+      showNewDay: () => this.setState({ showNewDay: true }),
+      createLabel: canCreate ? 'Записать на ' + this.fmt(s.newTime) : 'Имя и время',
+      createBg: canCreate ? p.btn : p.chipBg, createFg: canCreate ? '#fff' : p.hint,
+      createBooking: () => this.createBooking(),
+
+      toastOn: !!s.toast, toastText: s.toast
+    };
+
+    function freeReady(n, who) {
+      return n === 0 ? 'На этот день нет ни одного окна для такой компании. Попробуйте другой день.'
+        : 'Свободно окон: ' + n + '. Показываем только то, куда действительно сможем посадить ' + who + '.';
+    }
+  }
+
+  firstOpenDay() {
+    for (let i = 0; i < this.cfg().horizon; i++) if (!this.closedOn(i)) return i;
+    return 0;
+  }
+
+  mainAction() {
+    const s = this.state;
+    if (s.screen === 'done') return this.setState({ screen: 'home' });
+    if (s.screen === 'home') {
+      const me = this.mine(), day = this.firstOpenDay();
+      if (me) return this.setState({ screen: 'book', bookSize: me.size, bookDay: me.day, bookTime: null });
+      return this.setState({ screen: 'book', bookDay: day, bookTime: null });
+    }
+    if (s.bookTime === null) return;
+    const me = this.mine();
+    const rest = me ? s.bookings.map(b => b.id === me.id ? {...b, status:'cancelled'} : b) : s.bookings;
+    const t = this.assign(s.bookSize, s.bookTime, s.bookDay, rest, s.blocks, null);
+    if (!t) { this.toast('Это время только что заняли. Выберите другое.'); return; }
+    const id = Math.max(0, ...s.bookings.map(b => b.id)) + 1;
+    this.setState({ bookings: rest.concat([{ id, tableId: t.id, start: s.bookTime, size: s.bookSize,
+      name: 'Алексей', username: 'alexey', status: 'confirmed', tgId: this.ME, day: s.bookDay, source: 'app' }]),
+      screen: 'done' });
+  }
+
+  setStatus(k) {
+    const s = this.state;
+    this.setState({ bookings: s.bookings.map(b => b.id === s.selId ? {...b, status: k} : b) });
+  }
+
+  cancelBooking(reason) {
+    const s = this.state, b = this.byId(s.selId);
+    this.setState({ bookings: s.bookings.map(x => x.id === s.selId ? {...x, status:'cancelled'} : x), sheet: null });
+    this.toast(b.source === 'app'
+      ? 'Бронь отменена. ' + b.name + ' получил сообщение: «' + reason + '». Стол ' + b.tableId + ' свободен.'
+      : 'Бронь отменена. ' + b.name + ' записан вручную — предупредите его сами. Стол ' + b.tableId + ' свободен.');
+  }
+
+  /* Blocking a table orphans its bookings. Rather than leaving them silently double-seated,
+     each is re-assigned through the same allocator; anything that will not fit is reported. */
+  blockIds() {
+    const s = this.state, t = this.tableOf(s.blockTable);
+    return s.blockScope === 'zone' && t
+      ? this.tables().filter(x => x.zone === t.zone).map(x => x.id)
+      : [s.blockTable];
+  }
+
+  /* A zone closes as one action: the whole terrace goes when it rains, and doing it
+     table-by-table means several separate reassignment reports during the busiest moment. */
+  blockTable(reason) {
+    const s = this.state, day = s.adminDay, ids = this.blockIds();
+    const label = s.blockScope === 'zone' ? 'Зона «' + this.tableOf(s.blockTable).zone + '»' : 'Стол ' + s.blockTable;
+    const blocks = s.blocks.concat(ids.filter(id => !this.isBlocked(id, day)).map(id => ({ tableId: id, day, reason })));
+    const affected = s.bookings.filter(b => ids.indexOf(b.tableId) >= 0 && b.day === day && b.status !== 'cancelled');
+    let working = s.bookings.slice();
+    const moved = [], failed = [];
+    affected.forEach(b => {
+      const without = working.filter(x => x.id !== b.id);
+      const t = this.assign(b.size, b.start, day, without, blocks, null);
+      if (t) { working = without.concat([{...b, tableId: t.id}]); moved.push(b.name + ' ' + this.fmt(b.start) + ' → стол ' + t.id); }
+      /* A booking that cannot be seated has no table — say so in the data. Leaving the old
+         tableId would keep it rendering on a closed table's row, which is a lie. */
+      else { working = without.concat([{...b, tableId: null}]); failed.push(b.name + ' ' + this.fmt(b.start)); }
+    });
+    this.setState({ blocks, bookings: working, sheet: null });
+    const parts = [label + ' закрыт' + (this.state.blockScope === 'zone' ? 'а.' : '.')];
+    if (!affected.length) parts.push('Броней там не было.');
+    if (moved.length) parts.push('Пересажены: ' + moved.join(', ') + '.');
+    if (failed.length) parts.push('Остались без стола: ' + failed.join(', ') + '.');
+    this.toast(parts.join(' '));
+  }
+
+  /* Turn length, opening hours and party cap are inputs the existing bookings were placed
+     under. Changing them retroactively can create the exact overlap the allocator exists to
+     prevent, so a change is validated against every live booking and refused with the
+     specific collisions named — the invariant is never allowed to break, even briefly. */
+  conflicts(n) {
+    const out = [], live = this.state.bookings.filter(b => b.status !== 'cancelled' && b.tableId);
+    live.forEach(a => live.forEach(b => {
+      if (a.id >= b.id || a.day !== b.day || a.tableId !== b.tableId) return;
+      if (a.start < b.start + n.turn && b.start < a.start + n.turn)
+        out.push('Стол ' + a.tableId + ': ' + a.name + ' ' + this.fmt(a.start) + ' и ' + b.name + ' ' + this.fmt(b.start) + ' пересекутся');
+    }));
+    this.state.bookings.filter(b => b.status !== 'cancelled').forEach(b => {
+      const w = n.week[this.dateFor(b.day).getDay()];
+      if (w.closed) out.push(b.name + ' ' + this.fmt(b.start) + ' — этот день станет выходным');
+      else if (b.start < w.open || b.start > w.close - n.turn)
+        out.push(b.name + ' ' + this.fmt(b.start) + ' окажется вне часов работы');
+    });
+    return out;
+  }
+
+  /* Single predicate for "is this configuration legal". Both the guard in setDraft and the
+     enabled/disabled state of every stepper are derived from it, so a control can never look
+     live while refusing — the previous clamp-plus-guard pair was two sources for one rule. */
+  valid(d) {
+    const L = this.LIM;
+    if (d.week.some(w => w.open < L.open[0] || w.open > L.open[1])) return false;
+    if (d.week.some(w => w.close < L.close[0] || w.close > L.close[1])) return false;
+    if (d.week.every(w => w.closed)) return false;
+    if (d.turn < L.turn[0] || d.turn > L.turn[1]) return false;
+    if (!d.staff.length) return false;
+    if (!d.reasons.length || !d.templates.length) return false;
+    if (d.horizon < L.horizon[0] || d.horizon > L.horizon[1]) return false;
+    if (d.remindHours < L.remindHours[0] || d.remindHours > L.remindHours[1]) return false;
+    if (d.graceMin < L.graceMin[0] || d.graceMin > L.graceMin[1]) return false;
+    if (!d.tables.length) return false;
+    if (d.tables.some(t => t.seats < L.seats[0] || t.seats > L.seats[1])) return false;
+    if (d.maxParty < L.maxParty[0] || d.maxParty > L.maxParty[1]) return false;
+    /* A party size no table can seat is unserveable by construction: the guest would be
+       offered a size for which every slot is grey. The cap is a fact about the room. */
+    if (d.maxParty > d.tables.reduce((a, t) => Math.max(a, t.seats), 0)) return false;
+    return !d.week.some(w => !w.closed && w.close - d.turn < w.open);
+  }
+
+  setWeek(i, patch) {
+    const week = (this.state.draft || this.defaults()).week.map((w, k) => k === i ? { ...w, ...patch } : w);
+    this.setDraft('week', week);
+  }
+  copyWeekToAll(i) {
+    const src = (this.state.draft || this.defaults()).week[i];
+    this.setDraft('week', (this.state.draft || this.defaults()).week.map(() => ({ ...src })));
+  }
+  setListItem(key, i, v) {
+    const list = (this.state.draft || this.defaults())[key].slice();
+    list[i] = v; this.setDraft(key, list);
+  }
+  addListItem(key, v) { this.setDraft(key, (this.state.draft || this.defaults())[key].concat([v])); }
+  delListItem(key, i) { this.setDraft(key, (this.state.draft || this.defaults())[key].filter((_, k) => k !== i)); }
+
+  setTables(list) { this.setDraft('tables', list); }
+  tableSeats(id, delta) {
+    this.setTables((this.state.draft || this.defaults()).tables
+      .map(t => t.id === id ? { ...t, seats: t.seats + delta } : t));
+  }
+  cycleZone(id) {
+    this.setTables((this.state.draft || this.defaults()).tables.map(t => t.id === id
+      ? { ...t, zone: this.ZONES[(this.ZONES.indexOf(t.zone) + 1) % this.ZONES.length] } : t));
+  }
+  addTable() {
+    const list = (this.state.draft || this.defaults()).tables;
+    this.setTables(list.concat([{ id: list.reduce((a, t) => Math.max(a, t.id), 0) + 1, seats: 4, zone: 'Зал' }]));
+  }
+  delTable(id) { this.setTables((this.state.draft || this.defaults()).tables.filter(t => t.id !== id)); }
+
+  /* Inventory changes describe the room as it now physically is, so they are applied and the
+     bookings reconciled — not refused. Anything that no longer fits goes through the same
+     allocator, and anything unseatable becomes an orphan, exactly as when a table is closed. */
+  reconcile() {
+    const T = this.tables();
+    let working = this.state.bookings.slice();
+    const moved = [], lost = [];
+    working.filter(b => b.status !== 'cancelled' && b.tableId).forEach(b => {
+      const t = T.find(x => x.id === b.tableId);
+      if (t && t.seats >= b.size) return;
+      const without = working.filter(x => x.id !== b.id);
+      const nt = this.assign(b.size, b.start, b.day, without, this.state.blocks, null);
+      if (nt) { working = without.concat([{ ...b, tableId: nt.id }]); moved.push(b.name + ' → стол ' + nt.id); }
+      else { working = without.concat([{ ...b, tableId: null }]); lost.push(b.name + ' ' + this.fmt(b.start)); }
+    });
+    if (moved.length || lost.length) this.setState({ bookings: working });
+    return { moved, lost };
+  }
+
+  setDraft(k, v) {
+    const d = { ...(this.state.draft || this.defaults()), [k]: v };
+    if (!this.valid(d)) return;
+    this.setState({ draft: d });
+  }
+
+  saveSettings() {
+    const d = this.state.draft, bad = this.conflicts(d);
+    if (bad.length) { this.setState({ sheet: 'conflict' }); return; }
+    const over = this.state.bookings.filter(b => b.status !== 'cancelled' && b.size > d.maxParty).length;
+    this.setState({ cfg: d, sheet: null }, () => {
+      const r = this.reconcile();
+      const parts = ['Настройки сохранены.'];
+      if (r.moved.length) parts.push('Пересажены: ' + r.moved.join(', ') + '.');
+      if (r.lost.length) parts.push('Остались без стола: ' + r.lost.join(', ') + '.');
+      if (over) parts.push(over + ' ' + this.plural(over,'бронь','брони','броней') + ' больше нового лимита — они остаются в силе.');
+      this.toast(parts.join(' '));
+    });
+  }
+
+  seatOrphan() {
+    const s = this.state, b = this.byId(s.selId);
+    const t = this.assign(b.size, b.start, b.day, s.bookings.filter(x => x.id !== b.id), s.blocks, null);
+    if (!t) { this.toast('На ' + this.fmt(b.start) + ' нет стола для такой компании. Откройте закрытый стол или предложите другое время.'); return; }
+    this.setState({ sheet: null, bookings: s.bookings.map(x => x.id === b.id ? {...x, tableId: t.id} : x) });
+    this.toast(b.name + ' — стол ' + t.id + '.');
+  }
+
+  createBooking() {
+    const s = this.state;
+    if (!s.newName.trim() || s.newTime === null) return;
+    const t = this.assign(s.newSize, s.newTime, s.adminDay, s.bookings, s.blocks, null);
+    if (!t) { this.toast('На это время нет стола для такой компании.'); return; }
+    const id = Math.max(0, ...s.bookings.map(b => b.id)) + 1;
+    this.setState({ sheet: null, bookings: s.bookings.concat([{ id, tableId: t.id, start: s.newTime,
+      size: s.newSize, name: s.newName.trim(), username: '', status: 'confirmed', tgId: null,
+      day: s.adminDay, source: 'staff' }]) });
+    this.toast(s.newName.trim() + ' записан на ' + this.fmt(s.newTime) + ', стол ' + t.id + '.');
+  }
+}
+</script>
+</body>
+</html>

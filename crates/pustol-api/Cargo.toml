@@ -1,0 +1,50 @@
+[package]
+name = "pustol-api"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+# Two binaries live here — the server and the one-off seeder — so `cargo run -p pustol-api` has to be
+# told which one is the point of the crate.
+default-run = "pustol-api"
+
+[lib]
+name = "pustol_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pustol-api"
+path = "src/main.rs"
+
+[dependencies]
+pustol-db = { workspace = true }
+pustol-domain = { workspace = true }
+pustol-telegram = { workspace = true }
+
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+# `fs` serves the app's static build, `set-status` turns the 404 page into an actual 404, and
+# `set-header` carries the cache policy. The workspace line holds what every user of tower-http
+# needs; these three are wanted here and nowhere else.
+tower-http = { workspace = true, features = ["fs", "set-status", "set-header"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+chrono-tz = { workspace = true }
+http-body-util = "0.1"
+sqlx = { workspace = true }
+pustol-telegram = { workspace = true, features = ["test-signing"] }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true
