@@ -1,0 +1,8 @@
+.git
+.grok
+.tools
+target
+web/node_modules
+web/.next
+web/out
+.github

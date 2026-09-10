@@ -81,7 +81,7 @@ impl Assets {
 
         let rest = Router::new()
             .fallback_service(files(&self.root).not_found_service(SetStatus::new(
-                ServeFile::new(self.root.join(NOT_FOUND)).precompressed_gzip(),
+                ServeFile::new(self.root.join(NOT_FOUND)),
                 // `ServeFile` answers 200 for a file it found, which for this file would be a soft
                 // 404: the truth is that the path does not exist.
                 StatusCode::NOT_FOUND,
@@ -96,8 +96,7 @@ impl Assets {
 }
 
 fn files(root: impl AsRef<Path>) -> ServeDir {
-    // Compression happens once, when the image is built, rather than per request on a shared vCPU.
-    ServeDir::new(root).precompressed_gzip()
+    ServeDir::new(root)
 }
 
 /// How long a client may keep what a content-hashed name gave it.

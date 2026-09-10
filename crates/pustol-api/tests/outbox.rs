@@ -15,8 +15,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use chrono::{DateTime, TimeDelta, Utc};
-use pustol_api::worker;
 use pustol_api::state::Clock;
+use pustol_api::worker;
 use pustol_db::Store;
 use pustol_db::notifications::NotificationKind;
 use pustol_telegram::{Bot, BotToken};
@@ -394,6 +394,33 @@ async fn one_delivery_is_enough_to_learn_that_a_guest_is_reachable() {
     assert_eq!(drain(&app.store, &bot, reminder_due()).await, 1);
     let session = app.get("/api/session", &guest).await.expect_ok().clone();
     assert_eq!(session["reminders"]["deliverable"], true);
+}
+
+#[tokio::test]
+async fn a_stop_drains_the_batch_already_in_flight() {
+    // SIGINT and SIGTERM both flip this flag after the listener stops. Dropping the worker at
+    // that moment would abandon a send mid-flight; finishing the current batch is the drain.
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    let _guest = booked_and_opted_in(&app).await;
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(worker::run(
+        app.store.clone(),
+        bot,
+        Clock::Fixed(reminder_due()),
+        shutdown_rx,
+    ));
+    let _ = shutdown_tx.send(true);
+    tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+        .await
+        .expect("the worker did not stop")
+        .expect("the worker panicked");
+    assert_eq!(
+        stub.calls.load(Ordering::Relaxed),
+        1,
+        "a stop must not skip the batch the worker was already on"
+    );
 }
 
 #[tokio::test]

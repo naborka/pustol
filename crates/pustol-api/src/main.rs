@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use pustol_api::{AppState, Assets, Clock, router, worker};
+use pustol_api::{AppState, Assets, Clock, bind_address, interrupt_signal, router, worker};
 use pustol_db::Store;
 use pustol_telegram::{Bot, BotToken};
 
@@ -21,10 +21,7 @@ async fn main() -> Result<()> {
 
     let database_url = required("DATABASE_URL")?;
     let bot_token = BotToken::new(required("TELEGRAM_BOT_TOKEN")?);
-    let bind: SocketAddr = std::env::var("BIND")
-        .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
-        .parse()
-        .context("BIND must be an address like 0.0.0.0:8080")?;
+    let bind: SocketAddr = bind_address(std::env::var("BIND").ok().as_deref())?;
     let pool_size: u32 = std::env::var("DATABASE_MAX_CONNECTIONS")
         .unwrap_or_else(|_| "16".to_owned())
         .parse()
@@ -63,6 +60,7 @@ async fn main() -> Result<()> {
         None => router(state),
     };
 
+    let interrupt = interrupt_signal()?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("could not bind {bind}"))?;
@@ -70,7 +68,7 @@ async fn main() -> Result<()> {
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            interrupt.await;
             tracing::info!("shutting down");
         })
         .await

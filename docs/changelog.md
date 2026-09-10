@@ -3,6 +3,18 @@
 Заметные изменения, новые сверху. Формат — [Keep a Changelog](https://keepachangelog.com), версии —
 [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Added
+
+- Container image `ghcr.io/naborka/pustol` (`:sha-<git>` immutable, `:prod` moving). One process, one origin.
+- `.github/workflows/release-api.yml` builds the image and SSHes the unit name `pustol`. Rollback retags `:prod`.
+
+### Changed
+
+- SIGTERM drains the outbox the same way SIGINT already did. Containers send SIGTERM by default.
+- Static files are no longer pre-gzipped. Caddy encodes.
+
 ## 0.1.0 — 30 июля 2026
 
 Первый выпуск. Бронирование столов для одного бара из Telegram Mini App.
