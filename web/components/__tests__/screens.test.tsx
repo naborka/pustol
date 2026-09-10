@@ -408,7 +408,16 @@ describe("the shift day control", () => {
   it("jumps back to today from another day", async () => {
     const onChange = vi.fn();
     render(<DayNavigator serviceDate="2026-08-02" today="2026-07-30" onChange={onChange} />);
-    await userEvent.click(screen.getByRole("button", { name: "К сегодня" }));
+
+    const viewed = screen.getByText("2 авг");
+    expect(viewed.textContent).toBe("2 авг");
+    expect(viewed.closest("button")).toBeNull();
+    await userEvent.click(viewed);
+    expect(onChange).not.toHaveBeenCalled();
+
+    const jump = screen.getByRole("button", { name: "Сегодня" });
+    expect(jump.textContent).toBe("Сегодня");
+    await userEvent.click(jump);
     expect(onChange).toHaveBeenCalledWith("2026-07-30");
   });
 });
