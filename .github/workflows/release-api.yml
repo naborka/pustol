@@ -1,0 +1,109 @@
+name: release-api
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rollback_sha:
+        description: Git SHA of an existing sha-<git> image to retag as :prod
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-api
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/naborka/pustol
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require NEXT_PUBLIC_BOT_USERNAME
+        if: inputs.rollback_sha == ''
+        run: test -n "${{ vars.NEXT_PUBLIC_BOT_USERNAME }}"
+
+      - name: Build and push
+        if: inputs.rollback_sha == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            NEXT_PUBLIC_BOT_USERNAME=${{ vars.NEXT_PUBLIC_BOT_USERNAME }}
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ env.IMAGE }}:prod
+
+      - name: Retag :prod
+        if: inputs.rollback_sha != ''
+        env:
+          ROLLBACK_SHA: ${{ inputs.rollback_sha }}
+        run: |
+          set -euo pipefail
+          sha="${ROLLBACK_SHA#sha-}"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:prod" \
+            "${IMAGE}:sha-${sha}"
+
+      - name: Prove image contract
+        env:
+          TAG: ${{ inputs.rollback_sha == '' && format('sha-{0}', github.sha) || 'prod' }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}:${TAG}"
+          entrypoint=$(docker inspect --format '{{json .Config.Entrypoint}}' "${IMAGE}:${TAG}")
+          test "$entrypoint" = "null" || test "$entrypoint" = "[]"
+          cmd=$(docker inspect --format '{{json .Config.Cmd}}' "${IMAGE}:${TAG}")
+          test "$cmd" = '["pustol-api"]'
+          docker inspect --format '{{.Config.StopSignal}}' "${IMAGE}:${TAG}" | grep -qx SIGINT
+          docker run --rm --entrypoint /bin/sh "${IMAGE}:${TAG}" -c \
+            'set -e
+             test -x /usr/local/bin/pustol-api
+             test -x /usr/local/bin/seed
+             test -x /usr/bin/curl
+             test -f /var/lib/pustol/web/index.html
+             test -f /etc/ssl/certs/ca-certificates.crt
+             if command -v node >/dev/null 2>&1; then exit 1; fi'
+
+      - name: Deploy
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          host=$(awk '$1 !~ /^#/ && NF { print $1; exit }' "$HOME/.ssh/known_hosts")
+          host="${host%%,*}"
+          if [[ $host == \[* ]]; then
+            host="${host#\[}"
+            host="${host%%]*}"
+          fi
+          user="${DEPLOY_USER:?set repository variable DEPLOY_USER}"
+          ssh \
+            -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o StrictHostKeyChecking=yes \
+            "${user}@${host}" \
+            pustol

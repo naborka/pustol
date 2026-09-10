@@ -133,20 +133,21 @@ async fn a_hashed_asset_that_is_not_there_is_not_cached_at_all() {
 }
 
 #[tokio::test]
-async fn a_precompressed_asset_is_served_as_it_was_built() {
-    // Compression happens once, in the image build, rather than per request on a shared vCPU.
-    // Without this the `.gz` files the build produces would be dead weight.
+async fn gzip_is_left_to_the_proxy() {
+    // Caddy already encodes. A pre-gzipped origin file would either double-compress or hide
+    // the bytes from the proxy's encoder, and a `.gz` next to a hashed chunk is a second
+    // artefact a deploy can forget.
     let served = get_with(
         "/_next/static/chunk.deadbeef.js",
         &[(header::ACCEPT_ENCODING, "gzip")],
     )
     .await;
     assert_eq!(served.status, StatusCode::OK);
-    assert_eq!(served.header(header::CONTENT_ENCODING), Some("gzip"));
-    assert_eq!(
-        &served.body[..2],
-        &[0x1f, 0x8b],
-        "the body should be the gzip member itself"
+    assert_eq!(served.header(header::CONTENT_ENCODING), None);
+    assert!(
+        served.text().contains("the plain chunk"),
+        "{}",
+        served.text()
     );
 }
 

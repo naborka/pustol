@@ -7,6 +7,7 @@
 
 pub mod assets;
 pub mod auth;
+pub mod boot;
 pub mod dto;
 pub mod error;
 pub mod routes;
@@ -19,6 +20,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 pub use assets::Assets;
+pub use boot::{bind_address, interrupt_signal};
 pub use state::{AppState, Clock};
 
 use crate::error::ApiError;

@@ -165,7 +165,11 @@ async fn a_time_somebody_else_has_taken_is_refused_with_a_code_the_app_can_act_o
 
 #[tokio::test]
 async fn a_time_that_has_gone_is_refused_as_past() {
-    let app = harness_at(utc(2026, 7, 30, 20, 0), config_with(common::default_tables())).await;
+    let app = harness_at(
+        utc(2026, 7, 30, 20, 0),
+        config_with(common::default_tables()),
+    )
+    .await;
     let guest = Caller::new("Егор");
     let refused = app
         .post(
@@ -373,7 +377,11 @@ async fn a_day_the_bar_is_shut_is_not_offered_and_cannot_be_booked() {
 #[tokio::test]
 async fn at_one_in_the_morning_tonight_still_means_the_evening_in_progress() {
     // 01:00 Belgrade on the Friday is 23:00 UTC on the Thursday, and the bar shuts at 02:00.
-    let app = harness_at(utc(2026, 7, 30, 23, 0), config_with(common::default_tables())).await;
+    let app = harness_at(
+        utc(2026, 7, 30, 23, 0),
+        config_with(common::default_tables()),
+    )
+    .await;
     let guest = Caller::new("Данила");
     let session = app.get("/api/session", &guest).await.expect_ok().clone();
     assert_eq!(
@@ -387,6 +395,22 @@ async fn health_needs_no_credentials() {
     let app = harness().await;
     let answer = app.get_anonymously("/health").await;
     assert!(answer.status.is_success());
+}
+
+#[tokio::test]
+async fn health_answers_when_the_database_is_gone() {
+    // Liveness, not readiness. Infra's probe is `curl -fsS http://localhost:8080/health` and it
+    // must not wait on Postgres. A check that talked to the database would fail a running
+    // process during a blip and restart it while it still had work.
+    let app = harness().await;
+    app.store.pool().close().await;
+    let answer = app.get_anonymously("/health").await;
+    assert!(
+        answer.status.is_success(),
+        "health checked the database: {} {}",
+        answer.status,
+        answer.body
+    );
 }
 
 #[tokio::test]
