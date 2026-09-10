@@ -38,6 +38,23 @@ function blockBackground(status: ShiftBooking["status"]): string {
   return "rgba(82,136,193,.20)";
 }
 
+const dayHit = {
+  flex: 1,
+  minHeight: 48,
+  minWidth: 72,
+  padding: "10px 8px",
+  borderRadius: 12,
+  background: "var(--sec)",
+  color: "var(--txt)",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 2,
+  fontSize: 13,
+  fontWeight: 600,
+} as const;
+
 export function DayNavigator({
   serviceDate,
   today,
@@ -47,67 +64,60 @@ export function DayNavigator({
   today: string;
   onChange: (date: string) => void;
 }) {
+  const prev = fmt.addDays(serviceDate, -1);
+  const next = fmt.addDays(serviceDate, 1);
+  const isToday = serviceDate === today;
+  const go = (date: string) => {
+    haptics.tap();
+    onChange(date);
+  };
+
   return (
     <div
+      role="group"
+      aria-label="День смены"
       style={{
         display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
+        alignItems: "stretch",
+        gap: 8,
         padding: "12px 12px 8px",
-        gap: 6,
       }}
     >
-      <button
-        type="button"
-        aria-label="Предыдущий день"
-        onClick={() => {
-          haptics.tap();
-          onChange(fmt.addDays(serviceDate, -1));
-        }}
-        style={arrowStyle}
-      >
-        ‹
+      <button type="button" aria-label="Предыдущий день" onClick={() => go(prev)} style={dayHit}>
+        ‹ {fmt.dayDate(prev)}
       </button>
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          lineHeight: 1.2,
-        }}
-      >
-        <span style={{ fontSize: 15, fontWeight: 600, color: "var(--txt)" }}>
-          {fmt.dayName(serviceDate, today)}
-        </span>
-        <span style={{ fontSize: 11, color: "var(--hint)" }}>{fmt.dayDate(serviceDate)}</span>
-      </div>
-      <button
-        type="button"
-        aria-label="Следующий день"
-        onClick={() => {
-          haptics.tap();
-          onChange(fmt.addDays(serviceDate, 1));
-        }}
-        style={arrowStyle}
-      >
-        ›
+      {isToday ? (
+        <div
+          style={{
+            ...dayHit,
+            flex: 1.4,
+            background: "var(--chip)",
+          }}
+        >
+          <span style={{ fontSize: 15 }}>{fmt.dayName(serviceDate, today)}</span>
+          <span style={{ fontSize: 11, fontWeight: 500, color: "var(--hint)" }}>
+            {fmt.dayDate(serviceDate)}
+          </span>
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-label="К сегодня"
+          onClick={() => go(today)}
+          style={{ ...dayHit, flex: 1.4 }}
+        >
+          <span style={{ fontSize: 15 }}>{fmt.dayName(serviceDate, today)}</span>
+          <span style={{ fontSize: 11, fontWeight: 500, color: "var(--hint)" }}>
+            {fmt.dayDate(serviceDate)}
+          </span>
+        </button>
+      )}
+      <button type="button" aria-label="Следующий день" onClick={() => go(next)} style={dayHit}>
+        {fmt.dayDate(next)} ›
       </button>
     </div>
   );
 }
-
-const arrowStyle = {
-  width: 34,
-  height: 34,
-  borderRadius: 9,
-  background: "var(--sec)",
-  color: "var(--txt)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  fontSize: 16,
-} as const;
 
 function Stat({ value, label, tone }: { value: string; label: string; tone?: "alarm" }) {
   return (
@@ -435,7 +445,7 @@ export function Timeline({
           textWrap: "pretty",
         }}
       >
-        Нажмите на бронь — карточка гостя. Нажмите на номер стола слева — закрыть стол.
+        Бронь — карточка. Номер стола — закрыть стол.
       </span>
     </>
   );
@@ -534,9 +544,7 @@ export function ClosedDayCard() {
     <div style={{ margin: "0 12px 14px" }}>
       <Card padding={22} gap={6} style={{ alignItems: "center", textAlign: "center" }}>
         <span style={{ fontSize: 17, fontWeight: 700, color: "var(--txt)" }}>Выходной</span>
-        <Note>
-          В этот день бар закрыт, гостям он не предлагается. Часы работы меняются в настройках.
-        </Note>
+        <Note>Бар закрыт. Часы — в настройках.</Note>
       </Card>
     </div>
   );
@@ -567,8 +575,7 @@ export function OrphanWarning({ count, onFindTables }: { count: number; onFindTa
       <span
         style={{ fontSize: 12, color: "var(--warn)", lineHeight: 1.45, textWrap: "pretty" }}
       >
-        {fmt.bookings(count)} без стола — нажмите, чтобы подобрать заново, или откройте карточку
-        гостя.
+        {fmt.bookings(count)} без стола — нажмите, чтобы подобрать.
       </span>
     </button>
   );

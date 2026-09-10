@@ -9,13 +9,20 @@
  * than read once at start-up.
  */
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 
 import { cssVariables, paletteFrom, type ColorScheme } from "@/lib/theme";
-import { webApp } from "@/lib/telegram";
+import { bootstrapTelegram, webApp, ZERO_INSETS, type Insets } from "@/lib/telegram";
+
+const InsetsContext = createContext<Insets>(ZERO_INSETS);
+
+export function useInsets(): Insets {
+  return useContext(InsetsContext);
+}
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [scheme, setScheme] = useState<ColorScheme>("dark");
+  const [insets, setInsets] = useState<Insets>(ZERO_INSETS);
 
   useEffect(() => {
     const app = webApp();
@@ -33,8 +40,15 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     };
 
     apply();
-    app?.ready();
-    app?.expand();
+    const publishInsets = (next: Insets) => {
+      setInsets(next);
+      const root = document.documentElement;
+      root.style.setProperty("--inset-top", `${next.top}px`);
+      root.style.setProperty("--inset-right", `${next.right}px`);
+      root.style.setProperty("--inset-bottom", `${next.bottom}px`);
+      root.style.setProperty("--inset-left", `${next.left}px`);
+    };
+    const stopSurface = app ? bootstrapTelegram(app, publishInsets) : undefined;
     app?.onEvent("themeChanged", apply);
 
     // Outside Telegram — a browser during development — follow the operating system instead, so the
@@ -43,12 +57,17 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     media?.addEventListener("change", apply);
 
     return () => {
+      stopSurface?.();
       app?.offEvent("themeChanged", apply);
       media?.removeEventListener("change", apply);
     };
   }, []);
 
-  return <div data-color-scheme={scheme}>{children}</div>;
+  return (
+    <InsetsContext.Provider value={insets}>
+      <div data-color-scheme={scheme}>{children}</div>
+    </InsetsContext.Provider>
+  );
 }
 
 function preferredScheme(): ColorScheme {

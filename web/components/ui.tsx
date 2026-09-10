@@ -585,13 +585,13 @@ export function Sheet({
         tabIndex={-1}
         style={{
           position: "fixed",
-          left: 0,
-          right: 0,
+          left: "var(--inset-left, 0px)",
+          right: "var(--inset-right, 0px)",
           bottom: 0,
           zIndex: 11,
           background: "var(--bg)",
           borderRadius: `${RADIUS.sheet}px ${RADIUS.sheet}px 0 0`,
-          padding: "8px 16px 22px",
+          padding: "8px 16px calc(22px + var(--inset-bottom, 0px))",
           maxHeight: "86%",
           overflowY: "auto",
           animation: "sheetUp .24s cubic-bezier(.2,.8,.3,1) both",
@@ -664,9 +664,9 @@ export function Toast({ text }: { text: string | null }) {
       aria-live="polite"
       style={{
         position: "fixed",
-        left: 14,
-        right: 14,
-        bottom: 78,
+        left: "calc(14px + var(--inset-left, 0px))",
+        right: "calc(14px + var(--inset-right, 0px))",
+        bottom: "calc(78px + var(--inset-bottom, 0px))",
         zIndex: 20,
         background: "rgba(20,24,30,.96)",
         border: "1px solid rgba(255,255,255,.1)",

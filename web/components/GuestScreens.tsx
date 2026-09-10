@@ -248,6 +248,7 @@ export function BookScreen({
   onServiceDate,
   onPick,
   onShowDaytime,
+  onBack,
 }: {
   bar: BarView;
   bookableDays: string[];
@@ -260,6 +261,7 @@ export function BookScreen({
   onServiceDate: (date: string) => void;
   onPick: (minutes: number) => void;
   onShowDaytime: () => void;
+  onBack?: () => void;
 }) {
   const slots = availability?.slots ?? [];
   const daytime = slots.filter((slot) => !slot.evening);
@@ -268,6 +270,22 @@ export function BookScreen({
     <div
       style={{ padding: "14px 16px 20px", display: "flex", flexDirection: "column", gap: 22 }}
     >
+      {onBack ? (
+        <button
+          type="button"
+          aria-label="Назад"
+          onClick={onBack}
+          style={{
+            fontSize: 14,
+            color: "var(--link)",
+            fontWeight: 500,
+            padding: "4px 0 0",
+            alignSelf: "flex-start",
+          }}
+        >
+          ‹ Назад
+        </button>
+      ) : null}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <SectionLabel>Сколько гостей</SectionLabel>
         <PartySizeRow max={bar.max_party} value={partySize} onChange={onPartySize} />
