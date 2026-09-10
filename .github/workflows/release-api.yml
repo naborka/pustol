@@ -24,6 +24,7 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v7
 
@@ -86,7 +87,6 @@ jobs:
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
         run: |
           set -euo pipefail
           umask 077
@@ -99,11 +99,11 @@ jobs:
             host="${host#\[}"
             host="${host%%]*}"
           fi
-          user="${DEPLOY_USER:?set repository variable DEPLOY_USER}"
           ssh \
             -i "$HOME/.ssh/deploy_key" \
             -o IdentitiesOnly=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             -o StrictHostKeyChecking=yes \
-            "${user}@${host}" \
+            -p 7759 \
+            "deploy@${host}" \
             pustol
