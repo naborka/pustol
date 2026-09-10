@@ -152,6 +152,22 @@ fn release_workflow_sshes_exactly_pustol() {
         workflow.contains("rollback_sha"),
         "workflow_dispatch rollback retags :prod to a known sha"
     );
+    assert!(
+        workflow.contains("environment: production"),
+        "the release job must use the production environment so NEXT_PUBLIC_BOT_USERNAME is qbqs_bot"
+    );
+    assert!(
+        !workflow.contains("DEPLOY_USER"),
+        "DEPLOY_USER hides a missing SSH port behind a missing user; SSH as deploy on 7759"
+    );
+    assert!(
+        workflow.contains("-p 7759"),
+        "SSH without -p 7759 hits port 22 and dies"
+    );
+    assert!(
+        workflow.contains("deploy@${host}"),
+        "SSH user is deploy, not a repo variable"
+    );
     // The remote argv is exactly the unit name. A here-doc or `bash -c` would not be the
     // forced command infra installed.
     assert!(
