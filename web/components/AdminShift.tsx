@@ -86,32 +86,33 @@ export function DayNavigator({
       <button type="button" aria-label="Предыдущий день" onClick={() => go(prev)} style={dayHit}>
         ‹ {fmt.dayDate(prev)}
       </button>
-      {isToday ? (
-        <div
-          style={{
-            ...dayHit,
-            flex: 1.4,
-            background: "var(--chip)",
-          }}
-        >
-          <span style={{ fontSize: 15 }}>{fmt.dayName(serviceDate, today)}</span>
-          <span style={{ fontSize: 11, fontWeight: 500, color: "var(--hint)" }}>
-            {fmt.dayDate(serviceDate)}
-          </span>
-        </div>
-      ) : (
-        <button
-          type="button"
-          aria-label="К сегодня"
-          onClick={() => go(today)}
-          style={{ ...dayHit, flex: 1.4 }}
-        >
-          <span style={{ fontSize: 15 }}>{fmt.dayName(serviceDate, today)}</span>
-          <span style={{ fontSize: 11, fontWeight: 500, color: "var(--hint)" }}>
-            {fmt.dayDate(serviceDate)}
-          </span>
-        </button>
-      )}
+      <div
+        style={{
+          ...dayHit,
+          flex: 1.4,
+          background: "var(--chip)",
+        }}
+      >
+        <span style={{ fontSize: 15 }}>{fmt.dayName(serviceDate, today)}</span>
+        <span style={{ fontSize: 11, fontWeight: 500, color: "var(--hint)" }}>
+          {fmt.dayDate(serviceDate)}
+        </span>
+        {isToday ? null : (
+          <button
+            type="button"
+            onClick={() => go(today)}
+            style={{
+              minHeight: 44,
+              padding: "10px 12px",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "var(--link)",
+            }}
+          >
+            Сегодня
+          </button>
+        )}
+      </div>
       <button type="button" aria-label="Следующий день" onClick={() => go(next)} style={dayHit}>
         {fmt.dayDate(next)} ›
       </button>
