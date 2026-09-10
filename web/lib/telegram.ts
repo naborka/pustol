@@ -19,6 +19,23 @@ export interface WebAppUser {
   language_code?: string;
 }
 
+/** Device or Telegram content inset, in CSS pixels. */
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export const ZERO_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+
+const SURFACE_EVENTS = [
+  "safeAreaChanged",
+  "contentSafeAreaChanged",
+  "fullscreenChanged",
+  "fullscreenFailed",
+] as const;
+
 export interface WebApp {
   initData: string;
   initDataUnsafe?: { user?: WebAppUser };
@@ -26,6 +43,7 @@ export interface WebApp {
   themeParams: Record<string, string>;
   version: string;
   isExpanded: boolean;
+  isFullscreen?: boolean;
   viewportStableHeight: number;
   ready: () => void;
   expand: () => void;
@@ -33,6 +51,12 @@ export interface WebApp {
   onEvent: (event: string, handler: () => void) => void;
   offEvent: (event: string, handler: () => void) => void;
   openTelegramLink: (url: string) => void;
+  requestFullscreen?: () => void;
+  exitFullscreen?: () => void;
+  setHeaderColor?: (color: string) => void;
+  setBackgroundColor?: (color: string) => void;
+  safeAreaInset?: Insets;
+  contentSafeAreaInset?: Insets;
   HapticFeedback?: {
     impactOccurred: (style: "light" | "medium" | "heavy") => void;
     notificationOccurred: (type: "error" | "success" | "warning") => void;
@@ -101,4 +125,49 @@ export function openChatWith(username: string): void {
   } else if (typeof window !== "undefined") {
     window.open(url, "_blank", "noopener");
   }
+}
+
+/** Device safe area plus Telegram's remaining chrome. Both are zero on old clients. */
+export function combinedInsets(safe?: Insets, content?: Insets): Insets {
+  const device = safe ?? ZERO_INSETS;
+  const telegram = content ?? ZERO_INSETS;
+  return {
+    top: device.top + telegram.top,
+    right: device.right + telegram.right,
+    bottom: device.bottom + telegram.bottom,
+    left: device.left + telegram.left,
+  };
+}
+
+function readInsets(app: Pick<WebApp, "safeAreaInset" | "contentSafeAreaInset">): Insets {
+  return combinedInsets(app.safeAreaInset, app.contentSafeAreaInset);
+}
+
+/**
+ * Ready, expand, request fullscreen where the client has it, paint header/background, publish insets.
+ *
+ * Fullscreen makes Telegram's header transparent. It does not remove close / collapse / ··· —
+ * those stay platform-owned. Insets keep our chrome out from under them.
+ */
+export function bootstrapTelegram(app: WebApp, onInsets: (insets: Insets) => void): () => void {
+  app.ready();
+  app.expand();
+  app.setHeaderColor?.("bg_color");
+  app.setBackgroundColor?.("bg_color");
+  try {
+    app.requestFullscreen?.();
+  } catch {
+    // Expand-only is the fallback. fullscreenFailed is also listened for below.
+  }
+
+  const publish = () => onInsets(readInsets(app));
+  publish();
+  for (const event of SURFACE_EVENTS) {
+    app.onEvent(event, publish);
+  }
+  return () => {
+    for (const event of SURFACE_EVENTS) {
+      app.offEvent(event, publish);
+    }
+  };
 }

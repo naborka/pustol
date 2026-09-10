@@ -8,7 +8,7 @@
  * is plainly unavailable, and the notes underneath say *why* rather than leaving staff to guess.
  */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { draftOf, type Limits, type SettingsDraft, type SettingsView, type TableDraft } from "@/lib/api";
 import * as fmt from "@/lib/format";
@@ -21,6 +21,7 @@ import {
   wouldBeLegal,
   type Edit,
 } from "@/lib/settingsRules";
+import { haptics } from "@/lib/telegram";
 import {
   CardAction,
   Note,
@@ -34,6 +35,17 @@ import {
 
 /** Monday first, the way a week is read, over an array indexed from Sunday. */
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0] as const;
+
+const GROUPS = [
+  { id: "bar", label: "Бар" },
+  { id: "tables", label: "Столы" },
+  { id: "hours", label: "Часы" },
+  { id: "rules", label: "Правила" },
+  { id: "texts", label: "Тексты" },
+  { id: "staff", label: "Люди" },
+] as const;
+
+type Group = (typeof GROUPS)[number]["id"];
 
 /** Makes a change to the proposal. */
 type Apply = (change: Edit) => void;
@@ -61,6 +73,7 @@ export function SettingsScreen({
   onRevert,
   saving,
 }: Props) {
+  const [group, setGroup] = useState<Group>("bar");
   const limits = settings.limits;
   const dirty = differs(draft, draftOf(settings));
   // One notion of "an edit", built here and handed to every section: a change is described once and
@@ -72,199 +85,66 @@ export function SettingsScreen({
   };
   const allowed: Ask = (change) => wouldBeLegal(draft, change, limits);
 
-  const hours = draft.week[editedWeekday] ?? {
-    open_minutes: 0,
-    close_minutes: 0,
-    closed: true,
-  };
-  const toggleClosed: Edit = (next) => {
-    const day = next.week[editedWeekday];
-    if (day) day.closed = !day.closed;
-  };
-  const canToggleClosed = allowed(toggleClosed);
-  /** Moving one end of the shift by an hour. */
-  const shiftHour =
-    (field: "open_minutes" | "close_minutes", delta: number): Edit =>
-    (next) => {
-      const day = next.week[editedWeekday];
-      if (day) day[field] += delta;
-    };
+  const body = groupBody(group, {
+    draft,
+    settings,
+    limits,
+    editedWeekday,
+    onEditWeekday,
+    edit,
+    allowed,
+  });
 
   return (
     <div
-      style={{ padding: "14px 16px 24px", display: "flex", flexDirection: "column", gap: 22 }}
+      style={{ padding: "12px 16px 16px", display: "flex", flexDirection: "column", gap: 16 }}
     >
-      <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <SectionLabel>Бар</SectionLabel>
-        <TextField
-          value={draft.name}
-          placeholder="Название"
-          onChange={(value) => edit((next) => {
-            next.name = value;
-          })}
-        />
-        <TextField
-          value={draft.address}
-          placeholder="Адрес"
-          onChange={(value) => edit((next) => {
-            next.address = value;
-          })}
-        />
-      </section>
-
-      <TablesSection
-        draft={draft}
-        settings={settings}
-        limits={limits}
-        edit={edit}
-        allowed={allowed}
-      />
-
-      <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <SectionLabel>Часы работы</SectionLabel>
-        <div style={{ display: "flex", gap: 5 }}>
-          {WEEK_ORDER.map((weekday) => {
-            const day = draft.week[weekday];
-            const chosen = weekday === editedWeekday;
-            return (
-              <button
-                key={weekday}
-                type="button"
-                aria-pressed={chosen}
-                onClick={() => onEditWeekday(weekday)}
-                style={{
-                  flex: 1,
-                  height: 48,
-                  borderRadius: RADIUS.small,
-                  background: chosen ? "var(--btn)" : "var(--chip)",
-                  color: chosen
-                    ? "var(--btn-text)"
-                    : day?.closed
-                      ? "var(--hint)"
-                      : "var(--txt)",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 3,
-                  fontSize: 13,
-                  fontWeight: 600,
-                }}
-              >
-                <span>{fmt.weekdayShortByIndex(weekday)}</span>
-                <span
-                  aria-hidden
-                  style={{
-                    width: 4,
-                    height: 4,
-                    borderRadius: 99,
-                    background: day?.closed ? "var(--dest)" : "transparent",
-                  }}
-                />
-              </button>
-            );
-          })}
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "12px 14px",
-            background: "var(--sec)",
-            borderRadius: RADIUS.chip,
-          }}
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ fontSize: 15, fontWeight: 600, color: "var(--txt)" }}>
-              {fmt.weekdayLongByIndex(editedWeekday)}
-            </span>
-            <span
-              style={{ fontSize: 12, color: hours.closed ? "var(--dest)" : "var(--ok)" }}
+      <div
+        role="tablist"
+        aria-label="Разделы настроек"
+        style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
+      >
+        {GROUPS.map((item) => {
+          const chosen = item.id === group;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={chosen}
+              onClick={() => {
+                haptics.tap();
+                setGroup(item.id);
+              }}
+              style={{
+                flex: "none",
+                minHeight: 44,
+                padding: "10px 14px",
+                borderRadius: RADIUS.chip,
+                background: chosen ? "var(--btn)" : "var(--chip)",
+                color: chosen ? "var(--btn-text)" : "var(--txt)",
+                fontSize: 14,
+                fontWeight: 600,
+              }}
             >
-              {hours.closed ? "Выходной" : "Рабочий день"}
-            </span>
-          </div>
-          <button
-            type="button"
-            disabled={!canToggleClosed}
-            onClick={() => edit(toggleClosed)}
-            style={{
-              fontSize: 13,
-              fontWeight: 600,
-              color: canToggleClosed ? "var(--link)" : "var(--hint)",
-              padding: "12px 4px",
-            }}
-          >
-            {hours.closed ? "Сделать рабочим" : "Сделать выходным"}
-          </button>
-        </div>
-
-        {!hours.closed
-          ? (
-              [
-                ["open_minutes", "Открытие"] as const,
-                ["close_minutes", "Закрытие"] as const,
-              ] as const
-            ).map(([field, label]) => (
-              <Stepper
-                key={field}
-                label={label}
-                value={fmt.time(hours[field])}
-                canDecrease={allowed(shiftHour(field, -60))}
-                canIncrease={allowed(shiftHour(field, 60))}
-                onDecrease={() => edit(shiftHour(field, -60))}
-                onIncrease={() => edit(shiftHour(field, 60))}
-              />
-            ))
-          : null}
-
-        {!hours.closed ? (
-          <CardAction
-            label="Применить ко всем дням"
-            onClick={() =>
-              edit((next) => {
-                const source = next.week[editedWeekday];
-                if (!source) return;
-                next.week = next.week.map(() => ({ ...source }));
-              })
-            }
-          />
-        ) : null}
-      </section>
-
-      <RulesSection
-        draft={draft}
-        limits={limits}
-        editedWeekday={editedWeekday}
-        edit={edit}
-        allowed={allowed}
-      />
-
-      <ListSection
-        title="Сообщения гостю"
-        addLabel="+ Сообщение"
-        items={draft.message_templates}
-        placeholder="Новое сообщение"
-        onChange={(items) => edit((next) => {
-          next.message_templates = items;
+              {item.label}
+            </button>
+          );
         })}
-      />
+      </div>
 
-      <ListSection
-        title="Причины отмены"
-        addLabel="+ Причина"
-        items={draft.cancel_reasons}
-        placeholder="Новая причина"
-        onChange={(items) => edit((next) => {
-          next.cancel_reasons = items;
-        })}
-      />
+      <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>{body}</div>
 
-      <StaffSection draft={draft} edit={edit} />
-
-      <div style={{ display: "flex", gap: 8 }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          position: "sticky",
+          bottom: 0,
+          paddingTop: 8,
+          background: "var(--bg)",
+        }}
+      >
         <button
           type="button"
           disabled={!dirty || saving}
@@ -303,6 +183,240 @@ export function SettingsScreen({
   );
 }
 
+function groupBody(
+  group: Group,
+  ctx: {
+    draft: SettingsDraft;
+    settings: SettingsView;
+    limits: Limits;
+    editedWeekday: number;
+    onEditWeekday: (weekday: number) => void;
+    edit: Apply;
+    allowed: Ask;
+  },
+): ReactNode {
+  switch (group) {
+    case "bar":
+      return (
+        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <TextField
+            value={ctx.draft.name}
+            placeholder="Название"
+            onChange={(value) => ctx.edit((next) => {
+              next.name = value;
+            })}
+          />
+          <TextField
+            value={ctx.draft.address}
+            placeholder="Адрес"
+            onChange={(value) => ctx.edit((next) => {
+              next.address = value;
+            })}
+          />
+        </section>
+      );
+    case "tables":
+      return (
+        <TablesSection
+          draft={ctx.draft}
+          settings={ctx.settings}
+          limits={ctx.limits}
+          edit={ctx.edit}
+          allowed={ctx.allowed}
+        />
+      );
+    case "hours":
+      return (
+        <HoursSection
+          draft={ctx.draft}
+          editedWeekday={ctx.editedWeekday}
+          onEditWeekday={ctx.onEditWeekday}
+          edit={ctx.edit}
+          allowed={ctx.allowed}
+        />
+      );
+    case "rules":
+      return (
+        <RulesSection
+          draft={ctx.draft}
+          limits={ctx.limits}
+          editedWeekday={ctx.editedWeekday}
+          edit={ctx.edit}
+          allowed={ctx.allowed}
+        />
+      );
+    case "texts":
+      return (
+        <>
+          <ListSection
+            title="Сообщения гостю"
+            addLabel="+ Сообщение"
+            items={ctx.draft.message_templates}
+            placeholder="Новое сообщение"
+            onChange={(items) => ctx.edit((next) => {
+              next.message_templates = items;
+            })}
+          />
+          <ListSection
+            title="Причины отмены"
+            addLabel="+ Причина"
+            items={ctx.draft.cancel_reasons}
+            placeholder="Новая причина"
+            onChange={(items) => ctx.edit((next) => {
+              next.cancel_reasons = items;
+            })}
+          />
+        </>
+      );
+    case "staff":
+      return <StaffSection draft={ctx.draft} edit={ctx.edit} />;
+  }
+}
+
+function HoursSection({
+  draft,
+  editedWeekday,
+  onEditWeekday,
+  edit,
+  allowed,
+}: {
+  draft: SettingsDraft;
+  editedWeekday: number;
+  onEditWeekday: (weekday: number) => void;
+  edit: Apply;
+  allowed: Ask;
+}) {
+  const hours = draft.week[editedWeekday] ?? {
+    open_minutes: 0,
+    close_minutes: 0,
+    closed: true,
+  };
+  const toggleClosed: Edit = (next) => {
+    const day = next.week[editedWeekday];
+    if (day) day.closed = !day.closed;
+  };
+  const canToggleClosed = allowed(toggleClosed);
+  const shiftHour =
+    (field: "open_minutes" | "close_minutes", delta: number): Edit =>
+    (next) => {
+      const day = next.week[editedWeekday];
+      if (day) day[field] += delta;
+    };
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", gap: 5 }}>
+        {WEEK_ORDER.map((weekday) => {
+          const day = draft.week[weekday];
+          const chosen = weekday === editedWeekday;
+          return (
+            <button
+              key={weekday}
+              type="button"
+              aria-pressed={chosen}
+              onClick={() => onEditWeekday(weekday)}
+              style={{
+                flex: 1,
+                height: 48,
+                borderRadius: RADIUS.small,
+                background: chosen ? "var(--btn)" : "var(--chip)",
+                color: chosen
+                  ? "var(--btn-text)"
+                  : day?.closed
+                    ? "var(--hint)"
+                    : "var(--txt)",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 3,
+                fontSize: 13,
+                fontWeight: 600,
+              }}
+            >
+              <span>{fmt.weekdayShortByIndex(weekday)}</span>
+              <span
+                aria-hidden
+                style={{
+                  width: 4,
+                  height: 4,
+                  borderRadius: 99,
+                  background: day?.closed ? "var(--dest)" : "transparent",
+                }}
+              />
+            </button>
+          );
+        })}
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "12px 14px",
+          background: "var(--sec)",
+          borderRadius: RADIUS.chip,
+        }}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={{ fontSize: 15, fontWeight: 600, color: "var(--txt)" }}>
+            {fmt.weekdayLongByIndex(editedWeekday)}
+          </span>
+          <span style={{ fontSize: 12, color: hours.closed ? "var(--dest)" : "var(--ok)" }}>
+            {hours.closed ? "Выходной" : "Рабочий день"}
+          </span>
+        </div>
+        <button
+          type="button"
+          disabled={!canToggleClosed}
+          onClick={() => edit(toggleClosed)}
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: canToggleClosed ? "var(--link)" : "var(--hint)",
+            padding: "12px 4px",
+          }}
+        >
+          {hours.closed ? "Сделать рабочим" : "Сделать выходным"}
+        </button>
+      </div>
+
+      {!hours.closed
+        ? (
+            [
+              ["open_minutes", "Открытие"] as const,
+              ["close_minutes", "Закрытие"] as const,
+            ] as const
+          ).map(([field, label]) => (
+            <Stepper
+              key={field}
+              label={label}
+              value={fmt.time(hours[field])}
+              canDecrease={allowed(shiftHour(field, -60))}
+              canIncrease={allowed(shiftHour(field, 60))}
+              onDecrease={() => edit(shiftHour(field, -60))}
+              onIncrease={() => edit(shiftHour(field, 60))}
+            />
+          ))
+        : null}
+
+      {!hours.closed ? (
+        <CardAction
+          label="Применить ко всем дням"
+          onClick={() =>
+            edit((next) => {
+              const source = next.week[editedWeekday];
+              if (!source) return;
+              next.week = next.week.map(() => ({ ...source }));
+            })
+          }
+        />
+      ) : null}
+    </section>
+  );
+}
+
 function TablesSection({
   draft,
   settings,
@@ -323,12 +437,9 @@ function TablesSection({
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        <SectionLabel>Столы</SectionLabel>
-        <span style={{ fontSize: 12, color: "var(--hint)" }}>
-          {fmt.tables(draft.tables.length)} · {fmt.seats(totalSeats)} · самый большой на {largest}
-        </span>
-      </div>
+      <span style={{ fontSize: 12, color: "var(--hint)" }}>
+        {fmt.tables(draft.tables.length)} · {fmt.seats(totalSeats)} · до {largest}
+      </span>
 
       {draft.tables.map((table, index) => {
         const existing =
@@ -460,16 +571,10 @@ function TablesSection({
         }
       />
 
-      <Note>
-        Нажмите на название стола, чтобы сменить зону. Номера не переиспользуются: удалили
-        седьмой — восьмой остаётся восьмым, иначе брони начнут ссылаться на чужие столы.
-      </Note>
+      <Note>Название стола меняет зону. Номера не повторяются.</Note>
 
       {draft.max_party >= largest ? (
-        <Note tone="warn">
-          Компанию больше {largest} принять некуда: это самый большой стол. Лимит брони не может
-          быть выше.
-        </Note>
+        <Note tone="warn">Лимит брони не выше самого большого стола ({largest}).</Note>
       ) : null}
     </section>
   );
@@ -538,8 +643,6 @@ function RulesSection({
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <SectionLabel>Правила брони</SectionLabel>
-
       {rules.map((rule) => {
         const by = (delta: number): Edit => (next) => {
           next[rule.field] += delta;
@@ -582,16 +685,12 @@ function RulesSection({
       </div>
 
       <Note>
-        Последняя бронь — в {lastArrival === null ? "—" : fmt.time(lastArrival)}: это закрытие
-        минус время, на которое держим стол. Отдельно не настраивается, чтобы значения не
-        разошлись.
+        Последняя бронь — {lastArrival === null ? "—" : fmt.time(lastArrival)}: закрытие минус
+        время стола.
       </Note>
 
       {turnBlocked && shortest !== null ? (
-        <Note tone="warn">
-          При этих часах держать стол дольше нельзя — самая короткая смена всего{" "}
-          {fmt.hours(shortest)}.
-        </Note>
+        <Note tone="warn">Дольше нельзя: самая короткая смена {fmt.hours(shortest)}.</Note>
       ) : null}
     </section>
   );
@@ -653,7 +752,6 @@ function ListSection({
 function StaffSection({ draft, edit }: { draft: SettingsDraft; edit: Apply }) {
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <SectionLabel>Кто работает в админке</SectionLabel>
       {draft.staff.map((member, index) => (
         <div
           key={member.username}
@@ -698,10 +796,7 @@ function StaffSection({ draft, edit }: { draft: SettingsDraft; edit: Apply }) {
           })
         }
       />
-      <Note>
-        Любой из списка может менять эти настройки и добавлять других. Последнего убрать нельзя —
-        иначе в админку не войдёт никто.
-      </Note>
+      <Note>Последнего убрать нельзя — иначе никто не войдёт.</Note>
     </section>
   );
 }

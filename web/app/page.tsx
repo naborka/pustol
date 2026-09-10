@@ -28,8 +28,10 @@ import { invalidReasons, messageFor, needsRelaunch, type ApiFailure } from "@/li
 import * as fmt from "@/lib/format";
 import { credentials, haptics, openBotChat, webApp } from "@/lib/telegram";
 import { ShiftScreen } from "@/components/AdminShift";
+import { AppShell, InsetFrame, type StaffTab } from "@/components/AppChrome";
 import { BookScreen, DoneScreen, HomeScreen } from "@/components/GuestScreens";
 import { SettingsScreen } from "@/components/Settings";
+import { useInsets } from "@/components/ThemeProvider";
 import {
   BlockSheet,
   BookingSheet,
@@ -39,7 +41,7 @@ import {
 } from "@/components/Sheets";
 import { Failure, MainButton, Spinner, Toast } from "@/components/ui";
 
-type Tab = "client" | "shift" | "settings";
+type Tab = StaffTab;
 type GuestScreen = "home" | "book" | "done";
 
 type OpenSheet =
@@ -77,6 +79,7 @@ export default function Page() {
   const [editedWeekday, setEditedWeekday] = useState(1);
   const [saving, setSaving] = useState(false);
 
+  const insets = useInsets();
   const [sheet, setSheet] = useState<OpenSheet>({ kind: "none" });
   const [newBooking, setNewBooking] = useState({ name: "", partySize: 2, minutes: null as number | null, daytimeShown: false });
   const [newAvailability, setNewAvailability] = useState<Availability | null>(null);
@@ -212,19 +215,29 @@ export default function Page() {
   }, [tab, screen]);
 
   if (token === null) {
-    return <Failure message={messageFor({ code: "no_credentials", message: "" }, "guest")} />;
+    return (
+      <InsetFrame insets={insets}>
+        <Failure message={messageFor({ code: "no_credentials", message: "" }, "guest")} />
+      </InsetFrame>
+    );
   }
   if (fatal) {
     return (
-      <Failure
-        message={messageFor(fatal, "guest")}
-        actionLabel="Попробовать снова"
-        onAction={() => void reload()}
-      />
+      <InsetFrame insets={insets}>
+        <Failure
+          message={messageFor(fatal, "guest")}
+          actionLabel="Попробовать снова"
+          onAction={() => void reload()}
+        />
+      </InsetFrame>
     );
   }
   if (!session || !api || serviceDate === null || shiftDate === null) {
-    return <Spinner />;
+    return (
+      <InsetFrame insets={insets}>
+        <Spinner />
+      </InsetFrame>
+    );
   }
 
   const bar = session.bar;
@@ -446,58 +459,23 @@ export default function Page() {
     }
   };
 
-  // ---- chrome --------------------------------------------------------------------------------
-
-  const title = tab === "shift" ? "Смена" : tab === "settings" ? "Настройки" : bar.name;
-  const subtitle = tab === "shift" ? "админ" : tab === "settings" ? "бар и правила" : bar.address;
-
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "var(--bg)",
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <header
-        style={{
-          flex: "none",
-          padding: "10px 16px 8px",
-          background: "var(--sec)",
-          color: "var(--txt)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-        }}
+    <>
+      <AppShell
+        staff={session.is_staff}
+        tab={tab}
+        onTab={setTab}
+        insets={insets}
+        footer={
+          tab === "client" && sheet.kind === "none" ? (
+            <MainButton
+              label={mainLabel}
+              onClick={mainAction}
+              enabled={!(screen === "book" && chosenMinutes === null)}
+            />
+          ) : undefined
+        }
       >
-        {tab === "client" && screen === "book" ? (
-          <button
-            type="button"
-            onClick={() => setScreen("home")}
-            style={{ fontSize: 14, color: "var(--link)", fontWeight: 500, minWidth: 60 }}
-          >
-            ‹ Назад
-          </button>
-        ) : (
-          <span style={{ minWidth: 60 }} />
-        )}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            lineHeight: 1.15,
-          }}
-        >
-          <span style={{ fontSize: 15, fontWeight: 600 }}>{title}</span>
-          <span style={{ fontSize: 11, color: "var(--hint)" }}>{subtitle}</span>
-        </div>
-        <span style={{ minWidth: 60 }} />
-      </header>
-
-      <main style={{ flex: 1, overflowY: "auto", overflowX: "hidden", position: "relative" }}>
         {tab === "client" && screen === "home" ? (
           <HomeScreen
             session={session}
@@ -527,6 +505,7 @@ export default function Page() {
             }}
             onPick={setChosenMinutes}
             onShowDaytime={() => setDaytimeShown(true)}
+            {...(webApp()?.BackButton ? {} : { onBack: () => setScreen("home") })}
           />
         ) : null}
 
@@ -572,60 +551,7 @@ export default function Page() {
             <Spinner label="Читаем настройки" />
           )
         ) : null}
-      </main>
-
-      {tab === "client" && sheet.kind === "none" ? (
-        <div style={{ flex: "none", padding: "8px 12px", background: "var(--bg)" }}>
-          <MainButton
-            label={mainLabel}
-            onClick={mainAction}
-            enabled={!(screen === "book" && chosenMinutes === null)}
-          />
-        </div>
-      ) : null}
-
-      {session.is_staff ? (
-        <nav
-          style={{
-            flex: "none",
-            display: "flex",
-            borderTop: "1px solid var(--sep)",
-            background: "var(--sec)",
-          }}
-        >
-          {(
-            [
-              ["client", "◍", "Моя бронь"],
-              ["shift", "▤", "Смена"],
-              ["settings", "⚙", "Настройки"],
-            ] as const
-          ).map(([value, glyph, label]) => (
-            <button
-              key={value}
-              type="button"
-              aria-current={tab === value}
-              onClick={() => {
-                haptics.tap();
-                setTab(value);
-              }}
-              style={{
-                flex: 1,
-                padding: "9px 0 14px",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 3,
-                color: tab === value ? "var(--btn)" : "var(--hint)",
-              }}
-            >
-              <span aria-hidden style={{ fontSize: 17, lineHeight: 1 }}>
-                {glyph}
-              </span>
-              <span style={{ fontSize: 10, fontWeight: 600 }}>{label}</span>
-            </button>
-          ))}
-        </nav>
-      ) : null}
+      </AppShell>
 
       <BookingSheet
         open={sheet.kind === "booking"}
@@ -710,6 +636,6 @@ export default function Page() {
       />
 
       <Toast text={toast} />
-    </div>
+    </>
   );
 }
