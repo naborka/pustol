@@ -1,5 +1,5 @@
 /**
- * Telegram surface bootstrap: fullscreen, colours, insets.
+ * Telegram surface bootstrap: expanding, colours, insets, and the height the layout uses.
  *
  * A fake WebApp is passed in. The unit under test is not mocked.
  */
@@ -31,6 +31,7 @@ function fakeWebApp(overrides: Partial<WebApp> = {}): WebApp {
     viewportStableHeight: 700,
     ready: vi.fn(),
     expand: vi.fn(),
+    disableVerticalSwipes: vi.fn(),
     close: vi.fn(),
     onEvent: vi.fn((event: string, handler: () => void) => {
       const set = listeners.get(event) ?? new Set();
@@ -77,45 +78,72 @@ describe("combined insets", () => {
 });
 
 describe("bootstrapTelegram", () => {
-  it("calls ready, expand, then requestFullscreen, and paints header and background", () => {
+  it("makes itself ready, expands, stops the swipe that collapses it, then paints", () => {
+    // The order is the point. A client that has not been told the app is drawn answers some of
+    // these with stale values, and a height measured while collapsed is the wrong height.
     const app = fakeWebApp();
-    const onInsets = vi.fn();
-    bootstrapTelegram(app, onInsets);
+    bootstrapTelegram(app, vi.fn());
 
     expect(app.ready).toHaveBeenCalledOnce();
     expect(app.expand).toHaveBeenCalledOnce();
-    expect(app.requestFullscreen).toHaveBeenCalledOnce();
+    expect(app.disableVerticalSwipes).toHaveBeenCalledOnce();
     expect(app.setHeaderColor).toHaveBeenCalledWith("bg_color");
     expect(app.setBackgroundColor).toHaveBeenCalledWith("bg_color");
     expect(callOrder(app.ready)).toBeLessThan(callOrder(app.expand));
-    expect(callOrder(app.expand)).toBeLessThan(callOrder(app.requestFullscreen));
+    expect(callOrder(app.expand)).toBeLessThan(callOrder(app.disableVerticalSwipes));
+    expect(callOrder(app.disableVerticalSwipes)).toBeLessThan(callOrder(app.setHeaderColor));
   });
 
-  it("still expands when the client has no fullscreen method", () => {
+  it("does not ask for fullscreen, which is the platform's to give", () => {
     const app = fakeWebApp();
-    delete (app as { requestFullscreen?: unknown }).requestFullscreen;
-    const onInsets = vi.fn();
-    expect(() => bootstrapTelegram(app, onInsets)).not.toThrow();
+    bootstrapTelegram(app, vi.fn());
+    expect(app.requestFullscreen).not.toHaveBeenCalled();
+  });
+
+  it("still starts on a client too old to stop the swipe", () => {
+    const app = fakeWebApp();
+    delete (app as { disableVerticalSwipes?: unknown }).disableVerticalSwipes;
+    expect(() => bootstrapTelegram(app, vi.fn())).not.toThrow();
     expect(app.ready).toHaveBeenCalledOnce();
     expect(app.expand).toHaveBeenCalledOnce();
   });
 
-  it("publishes combined insets and republishes when Telegram reports a change", () => {
+  it("publishes the surface and republishes it whenever Telegram moves the ground", () => {
     const app = fakeWebApp({
       safeAreaInset: { top: 10, right: 2, bottom: 20, left: 1 },
       contentSafeAreaInset: { top: 40, right: 0, bottom: 8, left: 0 },
+      viewportStableHeight: 700,
     });
-    const onInsets = vi.fn();
-    const stop = bootstrapTelegram(app, onInsets);
-    expect(onInsets).toHaveBeenCalledWith({ top: 50, right: 2, bottom: 28, left: 1 });
+    const onSurface = vi.fn();
+    const stop = bootstrapTelegram(app, onSurface);
+    expect(onSurface).toHaveBeenCalledWith({
+      insets: { top: 50, right: 2, bottom: 28, left: 1 },
+      stableHeight: 700,
+    });
 
     app.safeAreaInset = { top: 12, right: 2, bottom: 34, left: 1 };
     const emit = (app as WebApp & { emit: (event: string) => void }).emit;
     emit("safeAreaChanged");
-    expect(onInsets).toHaveBeenLastCalledWith({ top: 52, right: 2, bottom: 42, left: 1 });
+    expect(onSurface).toHaveBeenLastCalledWith({
+      insets: { top: 52, right: 2, bottom: 42, left: 1 },
+      stableHeight: 700,
+    });
 
     stop();
     emit("safeAreaChanged");
-    expect(onInsets).toHaveBeenCalledTimes(2);
+    expect(onSurface).toHaveBeenCalledTimes(2);
+  });
+
+  it("hears the viewport change, which is what a keyboard opening looks like", () => {
+    const app = fakeWebApp({ viewportStableHeight: 700 });
+    const onSurface = vi.fn();
+    bootstrapTelegram(app, onSurface);
+
+    app.viewportStableHeight = 420;
+    (app as WebApp & { emit: (event: string) => void }).emit("viewportChanged");
+    expect(onSurface).toHaveBeenLastCalledWith({
+      insets: ZERO_INSETS,
+      stableHeight: 420,
+    });
   });
 });

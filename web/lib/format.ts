@@ -177,3 +177,45 @@ export function dayFull(date: IsoDate, today: IsoDate): string {
 export function whenLabel(date: IsoDate, today: IsoDate, startMinutes: number): string {
   return `${dayFull(date, today)} в ${time(startMinutes)}`;
 }
+
+/**
+ * What one chip on the day rail is called: "Сегодня", "Завтра", or "сб 12".
+ *
+ * The day of the month is on the chip rather than only in a subtitle because a thirty-day rail
+ * contains four Saturdays, and four chips reading "сб" are four chips a guest cannot tell apart.
+ */
+export function dayChip(date: IsoDate, today: IsoDate): string {
+  if (date === today) return "Сегодня";
+  if (date === addDays(today, 1)) return "Завтра";
+  const { day } = parts(date);
+  return `${weekdayShort(date)} ${day}`;
+}
+
+/** "пт, 11 сен" — the line under the day name in the shift header. */
+export function dayStamp(date: IsoDate): string {
+  return `${weekdayShort(date)}, ${dayDate(date)}`;
+}
+
+/** "Открыт до 02:00" or "Закрыт", from the bar's hours and the bar's own clock. */
+export function openLabel(
+  hours: { open_minutes: number; close_minutes: number; closed: boolean },
+  nowMinutes: number,
+): string {
+  if (hours.closed) return "Закрыт";
+  if (nowMinutes < hours.open_minutes) return `Откроется в ${time(hours.open_minutes)}`;
+  if (nowMinutes >= hours.close_minutes) return "Закрыт";
+  return `Открыт до ${time(hours.close_minutes)}`;
+}
+
+/** Whether the bar is serving at this minute — what the dot on the header pill is coloured by. */
+export function isOpenNow(
+  hours: { open_minutes: number; close_minutes: number; closed: boolean },
+  nowMinutes: number,
+): boolean {
+  return !hours.closed && nowMinutes >= hours.open_minutes && nowMinutes < hours.close_minutes;
+}
+
+/** A ratio as a whole percentage: "72 %" reads as a measurement, "72.4 %" as a spreadsheet. */
+export function percent(ratio: number): string {
+  return `${Math.round(ratio * 100)} %`;
+}

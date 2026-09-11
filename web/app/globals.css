@@ -1,8 +1,10 @@
 /*
- * The reset and the motion, taken from the design.
+ * The reset, the shell's ground rules, and the motion.
  *
- * Everything else is set on the elements themselves. Colours come from the custom properties the
- * root element writes from Telegram's theme, so a component never hard-codes one.
+ * Colours are never here: they come from the custom properties the root element writes from
+ * Telegram's theme. What is here is the handful of things inline styles cannot say — a pressed
+ * state, a scrollbar, a keyframe — plus the one rule the whole layout rests on: the page itself
+ * does not scroll.
  */
 
 * {
@@ -15,6 +17,13 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /*
+   * A Mini App is a panel, not a document. The page never scrolls; exactly one element inside each
+   * screen does. Without this, a drag that reaches the body bounces the whole app and, on Android,
+   * hands the gesture to Telegram — which closes it.
+   */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
@@ -22,7 +31,6 @@ body {
   color: var(--txt, #fff);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-  overscroll-behavior-y: none;
 }
 
 button {
@@ -49,7 +57,29 @@ a {
   text-decoration: none;
 }
 
-/* Scrollbars are hidden the way they are on a phone; the timeline still scrolls by touch and wheel. */
+/*
+ * Pressed states.
+ *
+ * `-webkit-tap-highlight-color: transparent` above removes the platform's own feedback, which is
+ * right — it is a grey box in the wrong shape — but it leaves nothing at all, and an app that does
+ * not react to a finger feels broken before it has done anything wrong. Every interactive element
+ * goes through the `Pressable` primitive, which puts one of these classes on.
+ */
+.pressable:active:not(:disabled) {
+  opacity: 0.6;
+}
+
+.pressable-card:active:not(:disabled) {
+  opacity: 0.6;
+  transform: scale(0.99);
+}
+
+.pressable,
+.pressable-card {
+  transition: opacity 0.08s ease, transform 0.08s ease;
+}
+
+/* Scrollbars are hidden the way they are on a phone; lists and the timeline still scroll. */
 ::-webkit-scrollbar {
   width: 0;
   height: 0;

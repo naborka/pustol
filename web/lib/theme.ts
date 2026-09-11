@@ -49,19 +49,27 @@ export interface TelegramThemeParams {
   section_bg_color?: string;
 }
 
+/**
+ * The fallbacks, chosen so that every one of them can be read.
+ *
+ * Each colour that carries meaning clears 4.5:1 against both grounds it is ever drawn on — the
+ * page and a card — in its own scheme. `contrast.test.ts` asserts it, so a colour picked for how
+ * it looks in a mock-up cannot quietly ship at 3:1 and become the thing nobody can read in a dim
+ * bar. The old greys were the worst offenders: `#708499` on a card was under four.
+ */
 const DARK: Palette = {
   bg: "#17212b",
   sec: "#232e3c",
   txt: "#ffffff",
-  hint: "#708499",
+  hint: "#8fa3b8",
   btn: "#5288c1",
   buttonText: "#ffffff",
   link: "#6ab7ff",
   sep: "rgba(255,255,255,.08)",
-  dest: "#ec3942",
+  dest: "#f2666e",
   ok: "#42c767",
   warn: "#eaa13a",
-  tint: "rgba(236,57,66,.14)",
+  tint: "rgba(242,102,110,.14)",
   chip: "#232e3c",
   chipOff: "#1d2733",
 };
@@ -70,15 +78,15 @@ const LIGHT: Palette = {
   bg: "#ffffff",
   sec: "#f2f2f7",
   txt: "#000000",
-  hint: "#8e8e93",
+  hint: "#5f6b7a",
   btn: "#2481cc",
   buttonText: "#ffffff",
   link: "#2481cc",
   sep: "rgba(0,0,0,.09)",
-  dest: "#df3f40",
-  ok: "#2aa14a",
-  warn: "#e08600",
-  tint: "rgba(223,63,64,.10)",
+  dest: "#c9282f",
+  ok: "#207a38",
+  warn: "#985b00",
+  tint: "rgba(201,40,47,.10)",
   chip: "#f2f2f7",
   chipOff: "#f7f7fa",
 };
@@ -86,6 +94,53 @@ const LIGHT: Palette = {
 export function baseline(scheme: ColorScheme): Palette {
   return scheme === "light" ? LIGHT : DARK;
 }
+
+/** `#rrggbb` or `#rgb` as its three channels, or null if it is neither. */
+function channels(color: string): [number, number, number] | null {
+  const hex = color.trim().replace(/^#/, "");
+  const expanded =
+    hex.length === 3
+      ? hex
+          .split("")
+          .map((digit) => digit + digit)
+          .join("")
+      : hex;
+  if (!/^[0-9a-fA-F]{6}$/.test(expanded)) return null;
+  return [
+    Number.parseInt(expanded.slice(0, 2), 16),
+    Number.parseInt(expanded.slice(2, 4), 16),
+    Number.parseInt(expanded.slice(4, 6), 16),
+  ];
+}
+
+/** Relative luminance, as WCAG defines it. */
+function luminance(color: string): number | null {
+  const parts = channels(color);
+  if (!parts) return null;
+  const [red, green, blue] = parts.map((value) => {
+    const channel = value / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+/**
+ * The WCAG contrast ratio between two colours, from 1 to 21, or null for anything not a hex colour.
+ *
+ * Here rather than in a test file because it is the definition of a rule the palette has to obey,
+ * and a rule that lives only in its own test is a rule the next palette will not know about.
+ */
+export function contrastRatio(foreground: string, background: string): number | null {
+  const front = luminance(foreground);
+  const back = luminance(background);
+  if (front === null || back === null) return null;
+  const lighter = Math.max(front, back);
+  const darker = Math.min(front, back);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** The smallest contrast this app will ship: WCAG AA for ordinary text. */
+export const MIN_CONTRAST = 4.5;
 
 /** `#rrggbb` or `#rgb` as an `rgba(...)` with the alpha applied, or null if it is neither. */
 export function withAlpha(color: string, alpha: number): string | null {
