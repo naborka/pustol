@@ -117,6 +117,17 @@ impl From<DbError> for ApiError {
             DbError::TableTakenConcurrently => {
                 Self::new(Code::CONFLICT, "no_table_free", error.to_string())
             }
+            // Its own code, because it asks for its own thing: the room may have plenty of tables,
+            // it is *this* one that has gone, and the answer is to pick another.
+            DbError::ChosenTableNotFree => {
+                Self::new(Code::CONFLICT, "chosen_table_not_free", error.to_string())
+            }
+            DbError::BookingHasStarted => {
+                Self::new(Code::CONFLICT, "booking_started", error.to_string())
+            }
+            DbError::BookingHasFinished => {
+                Self::new(Code::CONFLICT, "booking_finished", error.to_string())
+            }
             DbError::PartyTooLarge {
                 party_size,
                 max_party,

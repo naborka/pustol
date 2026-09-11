@@ -170,6 +170,10 @@ pub async fn harness_at(now: DateTime<Utc>, config: BarConfig) -> Harness {
     let config = ValidConfig::new(config)
         .unwrap_or_else(|errors| panic!("fixture config is illegal: {errors:?}"));
     let bar = store.create_bar(&config).await.expect("bar created");
+    stopped_at(store, bar, config, now)
+}
+
+fn stopped_at(store: Store, bar: BarId, config: ValidConfig, now: DateTime<Utc>) -> Harness {
     // The bot points at an address nothing listens on: no test here exercises delivery, and a stub
     // that silently accepted sends would make a broken outbox look healthy.
     let bot = Bot::new(BotToken::new(TOKEN), reqwest::Client::new())
@@ -278,6 +282,14 @@ impl Answer {
 }
 
 impl Harness {
+    /// The same bar and the same rows, seen at a later moment.
+    ///
+    /// Half of what this system does is only observable once time has passed — a party sits down,
+    /// an hour goes by, they go home — and a clock that cannot move cannot show any of it.
+    pub fn at(&self, now: DateTime<Utc>) -> Self {
+        stopped_at(self.store.clone(), self.bar, self.config.clone(), now)
+    }
+
     async fn call(&self, request: Request<Body>) -> Answer {
         let response = self
             .app

@@ -1,13 +1,13 @@
 //! Taking bookings, moving them, and closing tables.
 
 use chrono::{DateTime, Utc};
-use pustol_domain::allocator::BookingId;
+use pustol_domain::allocator::{Assignment, BookingId};
 use pustol_domain::config::ValidConfig;
 use pustol_domain::schedule::TableId;
 use pustol_domain::service_day::ServiceDay;
 use pustol_domain::slots::{self, Slot, SlotAvailability};
 use pustol_domain::reconcile::{Request as ReconcileRequest, reconcile};
-use pustol_domain::{Interval, Reconciliation, bookable_days};
+use pustol_domain::{Interval, Reconciliation, bookable_days, minutes_within};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
@@ -119,7 +119,13 @@ pub enum Channel {
     },
     /// Staff, taking a booking by telephone or at the door. Not bound by the horizon: a bar takes
     /// a booking for next month over the phone without arguing about it.
-    Staff { guest_name: String },
+    ///
+    /// `table` is the one staff chose; `None` asks the room. It lives here, not on the request,
+    /// so a guest booking has no field for it at all.
+    Staff {
+        guest_name: String,
+        table: Option<TableId>,
+    },
 }
 
 /// A request for a table.
@@ -145,6 +151,17 @@ pub type ReminderWording = fn(&ValidConfig, Interval, i32) -> String;
 
 /// Words the notice a guest gets when staff cancel their booking.
 pub type CancellationWording = fn(&ValidConfig, &BookingRecord, &str) -> String;
+
+/// Words the notice for a moved booking. The record is where it was, the interval where it goes.
+pub type MoveWording = fn(&ValidConfig, &BookingRecord, Interval) -> String;
+
+/// What the bot says when a booking moves: the notice now, and the reminder that would otherwise
+/// still name the old hour. Together, so a move cannot remember one and forget the other.
+#[derive(Clone, Copy, Debug)]
+pub struct MoveWords {
+    pub notice: MoveWording,
+    pub reminder: ReminderWording,
+}
 
 /// A booking that now exists.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -185,6 +202,17 @@ pub struct CancelledBooking {
     ///
     /// Decided here rather than by the caller: it depends on there being both a reason and an
     /// account to send it to, and both are facts this transaction holds.
+    pub guest_notified: bool,
+}
+
+/// A booking that now sits somewhere else, or at some other time.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MovedBooking {
+    pub record: BookingRecord,
+    /// Whatever the table they left allowed the room to settle.
+    pub reconciliation: Reseated,
+    pub config: ValidConfig,
+    /// Only a time change is the guest's to hear about, and only if they have an account.
     pub guest_notified: bool,
 }
 
@@ -370,15 +398,20 @@ impl Store {
 
         let bookings = load_window(&mut transaction, request.bar, request.service_day).await?;
         let blocks = load_blocks(&mut transaction, request.bar, request.service_day).await?;
-        let Seat { table, window } = choose_seat(
-            request,
-            &config,
-            &bookings_of(&bookings),
-            &blocks_of(&blocks),
+        let live = bookings_of(&bookings);
+        let closed = blocks_of(&blocks);
+        let asking = slots::Query {
+            config: &config,
+            service_day: request.service_day,
+            party_size: request.party_size,
+            bookings: &live,
+            blocks: &closed,
             now,
-        )?;
+            ignoring: None,
+        };
+        let window = window_at(&asking, request.start_minutes)?;
 
-        let (source, name, username, user) = match &request.channel {
+        let (source, name, username, user, chosen) = match &request.channel {
             Channel::Guest {
                 user,
                 name,
@@ -388,11 +421,13 @@ impl Store {
                 name.clone(),
                 username.clone(),
                 Some(*user),
+                None,
             ),
-            Channel::Staff { guest_name } => {
-                (BookingSource::Staff, guest_name.clone(), None, None)
+            Channel::Staff { guest_name, table } => {
+                (BookingSource::Staff, guest_name.clone(), None, None, *table)
             }
         };
+        let table = seat_of(&asking.request(window), chosen)?.table_id;
 
         let id = insert_booking(
             &mut transaction,
@@ -433,29 +468,43 @@ impl Store {
         })
     }
 
-    /// The guest's booking, if they have one that has not finished.
+    /// The guest's booking, if they have one that is still running.
     ///
-    /// A guest who is already at their table still sees it, which is what the home screen shows
-    /// them; only a finished or cancelled booking disappears.
+    /// A guest sitting at their table still sees it. A guest whose table has gone back into the
+    /// pool does not — they went home, or they never came and the bar stopped waiting — because
+    /// what a guest holds is a table being held for them, and once that ends there is nothing to
+    /// move and nothing to give back. A booking left on the home screen under «Перенести» and
+    /// «Отменить» after the party walked out is the app offering an evening that is over.
+    ///
+    /// When that is, is [`pustol_domain::Booking::occupancy`] and nothing else. The query narrows
+    /// to the rows that could still be running and the rule decides which one is; restating the
+    /// rule in SQL would give this screen an opinion of its own, and that is precisely how it came
+    /// to disagree with every other reading of the room.
     pub async fn booking_of_guest(
         &self,
         bar: BarId,
         user: TelegramUserId,
         now: DateTime<Utc>,
     ) -> Result<Option<BookingRecord>> {
-        let row = sqlx::query(concat!(
+        let rows = sqlx::query(concat!(
             "select ",
             booking_columns!(),
             " where b.bar_id = $1 and b.telegram_user_id = $2
                 and b.status <> 'cancelled' and b.ends_at > $3
-              order by b.starts_at limit 1"
+              order by b.starts_at"
         ))
         .bind(bar)
         .bind(user.0)
         .bind(now)
-        .fetch_optional(self.pool())
+        .fetch_all(self.pool())
         .await?;
-        row.map(|row| BookingRecord::try_from(row_into(&row)?)).transpose()
+        for row in &rows {
+            let record = BookingRecord::try_from(row_into(row)?)?;
+            if record.booking.occupancy().is_some_and(|held| held.end() > now) {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
     }
 
     /// Everything on one shift: the bookings and the tables that are shut.
@@ -554,6 +603,115 @@ impl Store {
         fetch_booking(&mut connection, bar, booking).await
     }
 
+    /// Moves a booking to another table, another time, or both.
+    ///
+    /// One act, naming both in full: patching one field is how you end up with one changed and
+    /// nobody sure which was meant. The guest hears about it only when the time changed — they
+    /// were never told a table number.
+    ///
+    /// A booking is one row with one table, so the new table must be free for the whole window.
+    /// Table 3 until nine and table 9 after is two rows, and two rows is a different schema.
+    pub async fn move_booking(
+        &self,
+        bar: BarId,
+        booking: BookingId,
+        table: Option<TableId>,
+        start_minutes: i32,
+        words: Option<MoveWords>,
+        now: DateTime<Utc>,
+    ) -> Result<MovedBooking> {
+        let mut transaction = self.pool().begin().await?;
+        lock_bar(&mut transaction, bar).await?;
+        let config = load_config(&mut transaction, bar).await?;
+        let current = fetch_booking(&mut transaction, bar, booking).await?;
+        if !current.booking.status.is_live() {
+            return Err(Error::NotFound { entity: "booking" });
+        }
+        // A party that went home or never came is the record of an evening, not a plan.
+        if current
+            .booking
+            .occupancy()
+            .is_none_or(|held| held.end() <= now)
+        {
+            return Err(Error::BookingHasFinished);
+        }
+
+        let day = current.booking.service_day;
+        let bookings = load_window(&mut transaction, bar, day).await?;
+        let blocks = load_blocks(&mut transaction, bar, day).await?;
+        let live = bookings_of(&bookings);
+        let closed = blocks_of(&blocks);
+        let was = current.booking.window;
+        let asking = slots::Query {
+            config: &config,
+            service_day: day,
+            party_size: current.booking.party_size,
+            bookings: &live,
+            blocks: &closed,
+            now,
+            ignoring: Some(booking),
+        };
+        let window = if start_minutes == minutes_within(day, was.start(), config.timezone) {
+            was
+        } else {
+            if was.start() <= now {
+                return Err(Error::BookingHasStarted);
+            }
+            window_at(&asking, start_minutes)?
+        };
+        let seat = seat_of(&asking.request(window), table)?;
+
+        sqlx::query(
+            "update booking set table_id = $3, starts_at = $4, ends_at = $5
+             where bar_id = $1 and id = $2 and status <> 'cancelled'",
+        )
+        .bind(bar)
+        .bind(booking.0)
+        .bind(seat.table_id.0)
+        .bind(window.start())
+        .bind(window.end())
+        .execute(&mut *transaction)
+        .await
+        .map_err(Error::from_write)?;
+
+        let mut guest_notified = false;
+        if window != was
+            && let (Some(recipient), Some(words)) = (current.telegram_user_id, words)
+        {
+            notifications::enqueue(
+                &mut transaction,
+                bar,
+                booking,
+                recipient,
+                notifications::NotificationKind::Moved,
+                &(words.notice)(&config, &current, window),
+                now,
+            )
+            .await?;
+            guest_notified = true;
+            notifications::reschedule_reminder(
+                &mut transaction,
+                booking,
+                &(words.reminder)(&config, window, current.booking.party_size),
+                window.start() - chrono::Duration::hours(i64::from(config.remind_hours)),
+                now,
+            )
+            .await?;
+        }
+
+        let record = fetch_booking(&mut transaction, bar, booking).await?;
+        // The table they left is capacity appearing, and capacity appearing is offered to whoever
+        // the room could not seat — the same rule a cancellation and a party going home follow.
+        let reconciliation = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
+        transaction.commit().await?;
+        Ok(MovedBooking {
+            record,
+            reconciliation,
+            config,
+            guest_notified,
+        })
+    }
+
     /// Seats a party that walked in, at the minute they sat down.
     ///
     /// Not put through the slot list, and deliberately: a slot list answers "when may somebody
@@ -564,11 +722,16 @@ impl Store {
     ///
     /// It is the same allocator underneath, over the same window the party will actually hold, so
     /// the table this takes is the table the shift's own "who fits" line promised.
+    ///
+    /// `table` is the one staff chose — the bartender can see the room and the allocator cannot.
+    /// Checked against the allocator's own list, in the transaction that writes. `None` asks the
+    /// room to choose.
     pub async fn seat_walk_in(
         &self,
         bar: BarId,
         day: ServiceDay,
         party_size: i32,
+        table: Option<TableId>,
         now: DateTime<Utc>,
     ) -> Result<CreatedBooking> {
         let mut transaction = self.pool().begin().await?;
@@ -584,7 +747,7 @@ impl Store {
         let window = Interval::from_duration(now, config.turn_minutes)?;
         let bookings = load_window(&mut transaction, bar, day).await?;
         let blocks = load_blocks(&mut transaction, bar, day).await?;
-        let seat = pustol_domain::allocator::assign(&pustol_domain::allocator::Request {
+        let request = pustol_domain::allocator::Request {
             party_size,
             window,
             service_day: day,
@@ -592,8 +755,8 @@ impl Store {
             bookings: &bookings_of(&bookings),
             blocks: &blocks_of(&blocks),
             ignoring: None,
-        })
-        .ok_or(Error::NoTableFree { party_size })?;
+        };
+        let seat = seat_of(&request, table)?;
 
         let id = insert_booking(
             &mut transaction,
@@ -664,7 +827,7 @@ impl Store {
         if updated.rows_affected() == 0 {
             return Err(Error::NotFound { entity: "booking" });
         }
-        notifications::abandon_reminder(&mut transaction, booking).await?;
+        notifications::abandon_reminder(&mut transaction, booking, "the booking was cancelled").await?;
         let record = fetch_booking(&mut transaction, bar, booking).await?;
 
         // Queued in the same transaction as the cancellation: a notice that survives a crash the
@@ -817,9 +980,26 @@ impl Store {
 }
 
 /// The table and window a request resolves to.
-struct Seat {
-    table: TableId,
-    window: pustol_domain::Interval,
+/// The table a booking takes: the one staff chose, or the room's own pick when nobody did.
+///
+/// A chosen table is accepted exactly when the allocator could have handed it over itself, so
+/// choosing is as safe as being allocated.
+fn seat_of(
+    request: &pustol_domain::allocator::Request<'_>,
+    chosen: Option<TableId>,
+) -> Result<Assignment> {
+    let free = pustol_domain::free_tables(request);
+    match chosen {
+        Some(id) => free
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == id)
+            .map(Assignment::of)
+            .ok_or(Error::ChosenTableNotFree),
+        None => free.first().copied().map(Assignment::of).ok_or(Error::NoTableFree {
+            party_size: request.party_size,
+        }),
+    }
 }
 
 /// Everything a booking row is made of.
@@ -896,51 +1076,24 @@ fn check_shift_is_offered(
     }
 }
 
-/// Asks the picker's own function which table this arrival time would use.
+/// The window an arrival time would get, or the reason it cannot be taken.
 ///
-/// Going through [`slots::slot_list`] rather than calling the allocator directly is what
-/// guarantees the guest is never refused a time the app had just offered: the two cannot disagree,
-/// because they are the same computation. It also settles for free every reason a time might be
-/// unavailable — outside opening hours, off the time step, already gone, or a wall-clock time the
-/// clock change skipped.
-fn choose_seat(
-    request: &NewBooking,
-    config: &ValidConfig,
-    bookings: &[pustol_domain::Booking],
-    blocks: &[pustol_domain::TableBlock],
-    now: DateTime<Utc>,
-) -> Result<Seat> {
+/// The picker's own function, so nobody is refused a time the app had just offered. Taking the
+/// picker's query means a booking being moved asks with itself set aside.
+fn window_at(query: &slots::Query<'_>, start_minutes: i32) -> Result<Interval> {
     let unavailable = || Error::NotAnArrivalTime {
-        minutes: request.start_minutes,
+        minutes: start_minutes,
     };
-    let offered = slots::slot_list(&slots::Query {
-        config,
-        service_day: request.service_day,
-        party_size: request.party_size,
-        bookings,
-        blocks,
-        now,
-        ignoring: None,
-    });
-    let slot = offered
-        .iter()
-        .find(|slot| slot.start_minutes == request.start_minutes)
-        .ok_or_else(unavailable)?;
+    let slot = slots::slot_at(query, start_minutes).ok_or_else(unavailable)?;
 
-    let table = match slot.availability {
-        SlotAvailability::Free { table } => table,
-        SlotAvailability::Taken => {
-            return Err(Error::NoTableFree {
-                party_size: request.party_size,
-            });
-        }
-        SlotAvailability::Past => return Err(Error::InThePast),
-        SlotAvailability::Nonexistent => return Err(unavailable()),
-    };
-    Ok(Seat {
-        table,
-        window: slot.window.ok_or_else(unavailable)?,
-    })
+    match slot.availability {
+        SlotAvailability::Free => slot.window.ok_or_else(unavailable),
+        SlotAvailability::Taken => Err(Error::NoTableFree {
+            party_size: query.party_size,
+        }),
+        SlotAvailability::Past => Err(Error::InThePast),
+        SlotAvailability::Nonexistent => Err(unavailable()),
+    }
 }
 
 impl Store {
@@ -1295,7 +1448,7 @@ async fn cancel_not_yet_started(
     .await?;
     let Some(row) = row else { return Ok(None) };
     let id = BookingId(row.get("id"));
-    notifications::abandon_reminder(&mut *connection, id).await?;
+    notifications::abandon_reminder(&mut *connection, id, "the guest replaced this booking").await?;
     Ok(Some(id))
 }
 

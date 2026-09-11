@@ -240,7 +240,7 @@ impl Availability {
             .map(|slot| SlotView {
                 start_minutes: slot.start_minutes,
                 state: match slot.availability {
-                    SlotAvailability::Free { .. } => SlotState::Free,
+                    SlotAvailability::Free => SlotState::Free,
                     // A time the clock change jumped over is filtered out above and never reaches a
                     // client. It is matched rather than left to a catch-all so that adding a
                     // variant to the domain is a compile error here rather than a silent default.
@@ -460,12 +460,18 @@ pub struct StaffBookingRequest {
     pub start_minutes: i32,
     pub party_size: i32,
     pub guest_name: String,
+    /// The table staff chose. Absent asks the room to choose.
+    #[serde(default)]
+    pub table_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AvailabilityQuery {
     pub service_date: NaiveDate,
     pub party_size: i32,
+    /// A booking being moved, which must not block its own time.
+    #[serde(default)]
+    pub ignoring: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,10 +490,24 @@ pub struct NoteRequest {
     pub note: Option<String>,
 }
 
+/// Where a booking now sits, and when. Both named in full, so there is no reading in which the
+/// caller meant one and the server changed the other.
+#[derive(Debug, Deserialize)]
+pub struct MoveRequest {
+    pub start_minutes: i32,
+    /// The table staff chose. Absent asks the room to choose, as everywhere else.
+    #[serde(default)]
+    pub table_id: Option<Uuid>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WalkInRequest {
     pub service_date: NaiveDate,
     pub party_size: i32,
+    /// The table staff chose while looking at the room. Absent asks the room to choose, which is
+    /// the same best fit every other booking gets.
+    #[serde(default)]
+    pub table_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]

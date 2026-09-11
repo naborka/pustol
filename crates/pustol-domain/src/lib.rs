@@ -28,8 +28,8 @@ pub mod service_day;
 pub mod slots;
 
 pub use allocator::{
-    Assignment, Booking, BookingId, BookingStatus, TableBlock, largest_party_seatable,
-    seating_is_sound,
+    Assignment, Booking, BookingId, BookingStatus, TableBlock, free_tables,
+    largest_party_seatable, seating_is_sound,
 };
 pub use config::{
     BarConfig, Bounds, ConfigError, DayHours, LIMITS, Limits, ScheduleConflict, Setting,

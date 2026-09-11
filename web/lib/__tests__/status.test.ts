@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { ShiftBooking } from "../api";
 import {
   GROUP_ORDER,
+  hasStarted,
   groupOf,
   isSettled,
   standingOf,
@@ -133,5 +134,14 @@ describe("the groups the shift reads in", () => {
     const stranded = booking({ table_id: null, status: "no_show", released_minutes: 1_275 });
     expect(groupOf(stranded, standingOf(stranded, 1_300, 15))).toBe("settled");
     expect(isSettled(standingOf(stranded, 1_300, 15))).toBe(true);
+  });
+});
+
+describe("whether a booking has begun", () => {
+  it("is false until the minute it starts, and false on any other evening", () => {
+    const at21 = { start_minutes: 1_260 };
+    expect(hasStarted(at21, 1_259)).toBe(false);
+    expect(hasStarted(at21, 1_260)).toBe(true);
+    expect(hasStarted(at21, null)).toBe(false);
   });
 });

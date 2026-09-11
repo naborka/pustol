@@ -233,6 +233,74 @@ async fn a_guest_gives_their_table_back() {
 }
 
 #[tokio::test]
+async fn a_guest_who_has_gone_home_has_nothing_left_to_move_or_cancel() {
+    // Booked at six, sat at eight, left at half past nine — an hour before the two-hour window
+    // they were promised runs out. The bar's evening is over for them, and the home screen has to
+    // say so: a card reading «Стол ваш» over «Перенести» and «Отменить» is the app telling
+    // somebody who is already walking home that they still have a table.
+    let evening = harness_at(
+        utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар")]),
+    )
+    .await;
+    let guest = Caller::new("Полина");
+    let staff = Caller::manager();
+
+    let taken = evening
+        .post(
+            "/api/booking",
+            &guest,
+            serde_json::json!({
+                "service_date": "2026-07-30",
+                "start_minutes": 1200,
+                "party_size": 2,
+            }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    let id = taken["booking"]["id"].as_str().expect("an identifier").to_owned();
+    let attendance = format!("/api/admin/bookings/{id}/attendance");
+
+    let sitting = evening.at(utc(2026, 7, 30, 18, 0));
+    sitting
+        .send(
+            "PATCH",
+            &attendance,
+            &staff,
+            serde_json::json!({ "attendance": "arrived" }),
+        )
+        .await
+        .expect_ok();
+    assert_eq!(
+        sitting.get("/api/session", &guest).await.expect_ok()["booking"]["id"],
+        serde_json::Value::String(id.clone()),
+        "a guest at their table still has their booking"
+    );
+
+    let gone = evening.at(utc(2026, 7, 30, 19, 30));
+    gone.send(
+        "PATCH",
+        &attendance,
+        &staff,
+        serde_json::json!({ "attendance": "left" }),
+    )
+    .await
+    .expect_ok();
+    assert_eq!(
+        gone.get("/api/session", &guest).await.expect_ok()["booking"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        gone.send("DELETE", "/api/booking", &guest, serde_json::Value::Null)
+            .await
+            .status,
+        axum::http::StatusCode::NOT_FOUND,
+        "an evening that happened is not a booking to give back"
+    );
+}
+
+#[tokio::test]
 async fn cancelling_when_there_is_nothing_to_cancel_says_so() {
     let app = harness().await;
     let guest = Caller::new("Настя");

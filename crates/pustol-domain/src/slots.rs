@@ -9,15 +9,13 @@ use chrono::{DateTime, Utc};
 
 use crate::allocator::{self, Booking, TableBlock};
 use crate::config::{EVENING_FROM_MINUTES, ValidConfig};
-use crate::schedule::TableId;
 use crate::service_day::{Interval, ServiceDay, resolve};
 
 /// Why a slot can or cannot be taken.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SlotAvailability {
-    /// A table was found. Which one is an internal detail: guests are never shown a table
-    /// number, and staff see the assignment only once the booking exists.
-    Free { table: TableId },
+    /// A table was found. Which one is settled when the booking is written, from the same list.
+    Free,
     /// Every table that could seat this party is busy or closed.
     Taken,
     /// The time has already passed. Offering it would let a guest book the past.
@@ -29,7 +27,7 @@ pub enum SlotAvailability {
 impl SlotAvailability {
     #[must_use]
     pub const fn is_free(self) -> bool {
-        matches!(self, Self::Free { .. })
+        matches!(self, Self::Free)
     }
 
     /// Whether the slot should be shown to a guest at all.
@@ -75,6 +73,23 @@ pub struct Query<'a> {
     pub ignoring: Option<crate::allocator::BookingId>,
 }
 
+impl<'a> Query<'a> {
+    /// The allocation question this query asks about one window — the same one the grid asks, so
+    /// a caller that seats a booking cannot be looking at a different room from the picker.
+    #[must_use]
+    pub fn request(&self, window: Interval) -> allocator::Request<'a> {
+        allocator::Request {
+            party_size: self.party_size,
+            window,
+            service_day: self.service_day,
+            tables: &self.config.tables,
+            bookings: self.bookings,
+            blocks: self.blocks,
+            ignoring: self.ignoring,
+        }
+    }
+}
+
 /// Every arrival time on `service_day`, each with the reason it can or cannot be taken.
 ///
 /// The last slot is closing time minus one turn, so a booking never runs past the moment the
@@ -85,6 +100,16 @@ pub fn slot_list(query: &Query<'_>) -> Vec<Slot> {
     arrival_minutes(query)
         .map(|minutes| evaluate(query, minutes))
         .collect()
+}
+
+/// One arrival time, judged exactly as the grid judges it, or `None` when the shift has no such
+/// time at all. The same `evaluate` — so taking a booking cannot disagree with the picker that
+/// offered it — without running the allocator over the other forty-odd slots to answer about one.
+#[must_use]
+pub fn slot_at(query: &Query<'_>, start_minutes: i32) -> Option<Slot> {
+    arrival_minutes(query)
+        .find(|minutes| *minutes == start_minutes)
+        .map(|minutes| evaluate(query, minutes))
 }
 
 /// Every wall-clock minute a party may arrive at on this shift, in order.
@@ -137,18 +162,8 @@ fn evaluate(query: &Query<'_>, start_minutes: i32) -> Slot {
         return slot(Some(window), SlotAvailability::Past);
     }
 
-    let assignment = allocator::assign(&allocator::Request {
-        party_size: query.party_size,
-        window,
-        service_day: query.service_day,
-        tables: &query.config.tables,
-        bookings: query.bookings,
-        blocks: query.blocks,
-        ignoring: query.ignoring,
-    });
-
-    match assignment {
-        Some(found) => slot(Some(window), SlotAvailability::Free { table: found.table_id }),
+    match allocator::assign(&query.request(window)) {
+        Some(_) => slot(Some(window), SlotAvailability::Free),
         None => slot(Some(window), SlotAvailability::Taken),
     }
 }

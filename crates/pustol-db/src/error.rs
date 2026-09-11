@@ -26,6 +26,21 @@ pub enum Error {
     #[error("no table is free for a party of {party_size} at that time")]
     NoTableFree { party_size: i32 },
 
+    /// The table staff picked is too small, closed, taken, or gone. Separate from
+    /// [`Error::NoTableFree`]: pick another table, rather than find room another way.
+    #[error("that table is not free for this party")]
+    ChosenTableNotFree,
+
+    /// Moving the time of a booking that has already begun. Its window is history the shift reads
+    /// — timeline, receipt, the one-party-per-table rule — so it is not rewritten. The table may
+    /// still change.
+    #[error("that booking has already started")]
+    BookingHasStarted,
+
+    /// Moving a booking that no longer holds a table. It is the record of an evening now.
+    #[error("that booking is over")]
+    BookingHasFinished,
+
     /// A party larger than the bar accepts through the app.
     #[error("a party of {party_size} is above this bar's limit of {max_party}")]
     PartyTooLarge { party_size: i32, max_party: i32 },

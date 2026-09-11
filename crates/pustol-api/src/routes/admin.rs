@@ -6,7 +6,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use pustol_db::bookings::{Channel, NewBooking};
+use pustol_db::bookings::{Channel, MoveWords, NewBooking};
 use pustol_db::records::{BookingRecord, blocks_of, bookings_of};
 use pustol_domain::config::ValidConfig;
 use pustol_domain::draft::Draft;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::auth::Staff;
 use crate::dto::{
     AttendanceRequest, Availability, AvailabilityQuery, BlockRequest, CancelRequest, Hours,
-    LimitsView, MessageRequest, NoteRequest, ReconcileRequest, ReconciliationView,
+    LimitsView, MessageRequest, MoveRequest, NoteRequest, ReconcileRequest, ReconciliationView,
     SavedSettingsView, SettingsTable, SettingsView, ShiftBooking, ShiftDay, ShiftQuery, ShiftStats,
     ShiftTable, ShiftView, StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest,
 };
@@ -39,6 +39,7 @@ pub fn routes() -> Router<AppState> {
         .route("/bookings", post(create_booking))
         .route("/bookings/{id}/attendance", patch(set_attendance))
         .route("/bookings/{id}/note", patch(set_note))
+        .route("/bookings/{id}/move", patch(move_booking))
         .route("/bookings/{id}/cancel", post(cancel_booking))
         .route("/bookings/{id}/message", post(send_message))
         .route("/walkins", post(seat_walk_in))
@@ -158,7 +159,13 @@ async fn availability(
     let day = ServiceDay::new(query.service_date);
     let reading = state
         .store
-        .availability(state.bar, day, query.party_size, state.now(), None)
+        .availability(
+            state.bar,
+            day,
+            query.party_size,
+            state.now(),
+            query.ignoring.map(BookingId),
+        )
         .await?;
     Ok(Json(Availability::of(
         day,
@@ -189,6 +196,7 @@ async fn create_booking(
                 party_size: request.party_size,
                 channel: Channel::Staff {
                     guest_name: request.guest_name.trim().to_owned(),
+                    table: request.table_id.map(TableId),
                 },
                 // A booking taken at the door has no account behind it, so there is nobody to
                 // remind. The absence is structural, not a setting.
@@ -239,7 +247,56 @@ async fn set_note(
     Ok(Json(ShiftBooking::of(&record, &config)))
 }
 
-/// Seats a party that walked in, at the minute they sat down.
+#[derive(Debug, serde::Serialize)]
+pub struct MovedView {
+    pub booking: ShiftBooking,
+    /// Whatever the table they left let the room settle.
+    pub reconciliation: ReconciliationView,
+    /// Whether the guest was told. Only a time change is theirs to hear about.
+    pub guest_notified: bool,
+}
+
+/// Staff put a booking at another table, another time, or both.
+async fn move_booking(
+    State(state): State<AppState>,
+    _staff: Staff,
+    Path(id): Path<Uuid>,
+    Json(request): Json<MoveRequest>,
+) -> ApiResult<Json<MovedView>> {
+    let moved = state
+        .store
+        .move_booking(
+            state.bar,
+            BookingId(id),
+            request.table_id.map(TableId),
+            request.start_minutes,
+            Some(MoveWords {
+                notice: word_move,
+                reminder: crate::routes::guest::word_reminder,
+            }),
+            state.now(),
+        )
+        .await?;
+    Ok(Json(MovedView {
+        booking: ShiftBooking::of(&moved.record, &moved.config),
+        reconciliation: ReconciliationView::of(&moved.reconciliation),
+        guest_notified: moved.guest_notified,
+    }))
+}
+
+/// The notice a guest gets when their time changes, worded here where the bot's voice lives.
+fn word_move(config: &ValidConfig, record: &BookingRecord, moved_to: Interval) -> String {
+    messages::moved(
+        &config.name,
+        record.booking.window.start(),
+        moved_to.start(),
+        config.timezone,
+        record.booking.party_size,
+    )
+}
+
+
+/// Seats a party that walked in, at the minute they sat down, at the table staff chose.
 async fn seat_walk_in(
     State(state): State<AppState>,
     _staff: Staff,
@@ -251,6 +308,7 @@ async fn seat_walk_in(
             state.bar,
             ServiceDay::new(request.service_date),
             request.party_size,
+            request.table_id.map(TableId),
             state.now(),
         )
         .await?;

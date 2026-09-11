@@ -153,6 +153,13 @@ export interface CancelledByStaff {
   guest_notified: boolean;
 }
 
+export interface MovedBooking {
+  booking: ShiftBooking;
+  reconciliation: Reconciliation;
+  /** Only a time change is the guest's to hear about. A table number they never saw. */
+  guest_notified: boolean;
+}
+
 export interface Bounds {
   min: number;
   max: number;
@@ -273,10 +280,10 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
-function query(params: Record<string, string | number>): string {
+function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    search.set(key, String(value));
+    if (value !== undefined) search.set(key, String(value));
   }
   return search.toString();
 }
@@ -315,9 +322,14 @@ export function client(credentials: string) {
     shift: (serviceDate: IsoDate) =>
       get<ShiftView>(`/api/admin/shift?${query({ service_date: serviceDate })}`),
 
-    staffAvailability: (serviceDate: IsoDate, partySize: number) =>
+    /** `ignoring` is a booking being moved, which must not block its own time. */
+    staffAvailability: (serviceDate: IsoDate, partySize: number, ignoring?: string) =>
       get<Availability>(
-        `/api/admin/availability?${query({ service_date: serviceDate, party_size: partySize })}`,
+        `/api/admin/availability?${query({
+          service_date: serviceDate,
+          party_size: partySize,
+          ignoring,
+        })}`,
       ),
 
     createStaffBooking: (
@@ -325,18 +337,28 @@ export function client(credentials: string) {
       startMinutes: number,
       partySize: number,
       guestName: string,
+      tableId: string,
     ) =>
       send<ShiftBooking>("POST", "/api/admin/bookings", {
         service_date: serviceDate,
         start_minutes: startMinutes,
         party_size: partySize,
         guest_name: guestName,
+        table_id: tableId,
       }),
 
-    seatWalkIn: (serviceDate: IsoDate, partySize: number) =>
+    moveBooking: (bookingId: string, startMinutes: number, tableId: string | null) =>
+      send<MovedBooking>("PATCH", `/api/admin/bookings/${bookingId}/move`, {
+        start_minutes: startMinutes,
+        table_id: tableId,
+      }),
+
+    /** `tableId` is the table staff chose; `null` asks the room for its own best fit. */
+    seatWalkIn: (serviceDate: IsoDate, partySize: number, tableId: string | null) =>
       send<ShiftBooking>("POST", "/api/admin/walkins", {
         service_date: serviceDate,
         party_size: partySize,
+        table_id: tableId,
       }),
 
     setAttendance: (bookingId: string, attendance: Attendance) =>

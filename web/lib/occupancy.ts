@@ -78,6 +78,49 @@ export function freeTablesDuring(
     .sort((left, right) => left.seats - right.seats || left.number - right.number);
 }
 
+/** A table standing empty, and whether the party at the door actually fits at it. */
+export interface TableOffer {
+  table: ShiftTable;
+  fits: boolean;
+}
+
+/**
+ * Every table free for the whole of `[from, to)`, the ones that fit the party first.
+ *
+ * The fitting half is the allocator's own list, in its own order, so the top is the table the room
+ * would have chosen. The server checks again inside the transaction and has the last word.
+ *
+ * The rest are free tables this party is too large for, drawn rather than dropped: an empty room
+ * under «свободного стола нет» reads like a broken app, and the reason is the answer.
+ *
+ * `ignoring` is a booking being moved, which must not block its own new place.
+ */
+export function tableOffers(
+  shift: ShiftView,
+  partySize: number,
+  from: number,
+  to: number,
+  ignoring?: string,
+): TableOffer[] {
+  const others = shift.bookings.filter((booking) => booking.id !== ignoring);
+  const offers = freeTablesDuring(shift.tables, others, from, to).map((table) => ({
+    table,
+    fits: table.seats >= partySize,
+  }));
+  return [...offers.filter((offer) => offer.fits), ...offers.filter((offer) => !offer.fits)];
+}
+
+/** The tables a party at the door can be put at: free for a whole turn from now. */
+export function walkInOffers(
+  shift: ShiftView,
+  partySize: number,
+  turnMinutes: number,
+): TableOffer[] {
+  const now = shift.now_minutes;
+  if (now === null) return [];
+  return tableOffers(shift, partySize, now, now + turnMinutes);
+}
+
 /** Tables with nobody at them and nothing closing them, at this minute. */
 export function freeTablesAt(
   tables: ShiftTable[],
