@@ -21,6 +21,13 @@
 - Container image `ghcr.io/naborka/pustol` (`:sha-<git>` immutable, `:prod` moving). One process, one origin.
 - `.github/workflows/release-api.yml` builds the image and SSHes the unit name `pustol`. Rollback retags `:prod`.
 
+### Fixed
+
+- **Вечер, который уже прошёл, больше не предлагают.** Гость, которого персонал отметил как ушедшего,
+  до конца обещанного окна видел «Стол ваш» с кнопками «Перенести» и «Отменить». Бронь у гостя живёт
+  ровно столько, сколько бар держит стол, — по тому же `occupancy`, что и всё остальное. То же и для
+  `no_show`, с конца времени ожидания опоздавших.
+
 ### Changed
 
 - **Одно правило занятости.** Стол занят от начала брони до `released_at`, и из этого выведено всё:

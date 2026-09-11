@@ -791,6 +791,118 @@ async fn cancelling_frees_the_table_and_records_the_reason_given() {
 }
 
 #[tokio::test]
+async fn a_booking_is_the_guests_for_exactly_as_long_as_it_holds_their_table() {
+    // The one occupancy rule, asked of the guest's own screen. What a guest has is a table being
+    // held for them; the moment it goes back into the pool — they went home, or they never came
+    // and the bar stopped waiting — the evening is over and there is nothing left to move.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+
+    for (attendance, settled, still_theirs, over) in [
+        // Left at half past nine, an hour before the window they were promised ran out.
+        (Attendance::Left, 1290, 1289, 1290),
+        // Never came. The bar holds the table through the fifteen-minute grace and no longer.
+        (Attendance::NoShow, 1205, 1214, 1215),
+    ] {
+        let account = fresh_account("Полина");
+        store.identify(bar, &account, morning()).await.expect("ok");
+        let created = store
+            .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+            .await
+            .expect("free");
+        store
+            .set_attendance(
+                bar,
+                created.record.booking.id,
+                attendance,
+                at(thursday(), settled),
+            )
+            .await
+            .expect("recorded");
+
+        assert!(
+            store
+                .booking_of_guest(bar, account.id, at(thursday(), still_theirs))
+                .await
+                .expect("reads")
+                .is_some(),
+            "{attendance:?}: the table is still being held at {still_theirs}"
+        );
+        assert_eq!(
+            store
+                .booking_of_guest(bar, account.id, at(thursday(), over))
+                .await
+                .expect("reads"),
+            None,
+            "{attendance:?}: the table went back into the pool at {over}"
+        );
+        assert!(
+            matches!(
+                store
+                    .cancel_booking_of_guest(bar, account.id, at(thursday(), over))
+                    .await,
+                Err(Error::NotFound { .. })
+            ),
+            "{attendance:?}: an evening that happened is not a booking to give back"
+        );
+    }
+}
+
+#[tokio::test]
+async fn leaving_tonight_hands_the_guest_back_the_evening_they_booked_next() {
+    // A guest may hold two at once: the table they are sitting at, and a booking for another
+    // evening taken while sitting at it. When tonight ends, what they have is the other one — so
+    // the question "which booking is mine" cannot be answered by the earliest row and a filter
+    // after it.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let account = fresh_account("Ксения");
+    store.identify(bar, &account, morning()).await.expect("ok");
+
+    let tonight = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let sat_down = at(thursday(), 1200);
+    store
+        .set_attendance(bar, tonight.record.booking.id, Attendance::Arrived, sat_down)
+        .await
+        .expect("recorded");
+
+    let mut next = guest_booking(bar, &account, 1200, 2);
+    next.service_day = thursday().checked_add_days(2).expect("in range");
+    let saturday = store
+        .create_booking(&next, sat_down)
+        .await
+        .expect("a table on Saturday");
+
+    assert_eq!(
+        store
+            .booking_of_guest(bar, account.id, at(thursday(), 1250))
+            .await
+            .expect("reads")
+            .map(|record| record.booking.id),
+        Some(tonight.record.booking.id),
+        "while they are sitting, what they have is the table they are at"
+    );
+
+    let went_home = at(thursday(), 1290);
+    store
+        .set_attendance(bar, tonight.record.booking.id, Attendance::Left, went_home)
+        .await
+        .expect("recorded");
+    assert_eq!(
+        store
+            .booking_of_guest(bar, account.id, went_home)
+            .await
+            .expect("reads")
+            .map(|record| record.booking.id),
+        Some(saturday.record.booking.id),
+        "tonight is over, and Saturday is still theirs"
+    );
+}
+
+#[tokio::test]
 async fn cancelling_twice_is_refused_rather_than_silently_repeated() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;

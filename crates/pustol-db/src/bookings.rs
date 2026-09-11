@@ -433,29 +433,43 @@ impl Store {
         })
     }
 
-    /// The guest's booking, if they have one that has not finished.
+    /// The guest's booking, if they have one that is still running.
     ///
-    /// A guest who is already at their table still sees it, which is what the home screen shows
-    /// them; only a finished or cancelled booking disappears.
+    /// A guest sitting at their table still sees it. A guest whose table has gone back into the
+    /// pool does not — they went home, or they never came and the bar stopped waiting — because
+    /// what a guest holds is a table being held for them, and once that ends there is nothing to
+    /// move and nothing to give back. A booking left on the home screen under «Перенести» and
+    /// «Отменить» after the party walked out is the app offering an evening that is over.
+    ///
+    /// When that is, is [`pustol_domain::Booking::occupancy`] and nothing else. The query narrows
+    /// to the rows that could still be running and the rule decides which one is; restating the
+    /// rule in SQL would give this screen an opinion of its own, and that is precisely how it came
+    /// to disagree with every other reading of the room.
     pub async fn booking_of_guest(
         &self,
         bar: BarId,
         user: TelegramUserId,
         now: DateTime<Utc>,
     ) -> Result<Option<BookingRecord>> {
-        let row = sqlx::query(concat!(
+        let rows = sqlx::query(concat!(
             "select ",
             booking_columns!(),
             " where b.bar_id = $1 and b.telegram_user_id = $2
                 and b.status <> 'cancelled' and b.ends_at > $3
-              order by b.starts_at limit 1"
+              order by b.starts_at"
         ))
         .bind(bar)
         .bind(user.0)
         .bind(now)
-        .fetch_optional(self.pool())
+        .fetch_all(self.pool())
         .await?;
-        row.map(|row| BookingRecord::try_from(row_into(&row)?)).transpose()
+        for row in &rows {
+            let record = BookingRecord::try_from(row_into(row)?)?;
+            if record.booking.occupancy().is_some_and(|held| held.end() > now) {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
     }
 
     /// Everything on one shift: the bookings and the tables that are shut.
