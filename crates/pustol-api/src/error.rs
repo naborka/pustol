@@ -129,6 +129,16 @@ impl From<DbError> for ApiError {
             DbError::MissingBlockReason => {
                 Self::bad_request("missing_block_reason", error.to_string())
             }
+            DbError::NoteTooLong { limit } => {
+                Self::bad_request("note_too_long", error.to_string())
+                    .with_detail(serde_json::json!({ "limit": limit }))
+            }
+            DbError::NotTheRunningShift { service_day } => Self::new(
+                Code::CONFLICT,
+                "not_the_running_shift",
+                error.to_string(),
+            )
+            .with_detail(serde_json::json!({ "service_date": service_day })),
             DbError::UnknownCancelReason => {
                 Self::bad_request("unknown_cancel_reason", error.to_string())
             }

@@ -4,7 +4,7 @@ import {
   invalidReasons,
   messageFor,
   needsRelaunch,
-  strandedBookingIds,
+  strandedBookings,
   type ApiFailure,
 } from "../errors";
 
@@ -64,23 +64,39 @@ describe("which failures the app can fix by relaunching", () => {
 });
 
 describe("the detail a refused settings save carries", () => {
-  it("lists the bookings a change would strand", () => {
+  it("names the bookings a change would strand, with their times", () => {
+    // "Эти брони уже приняты" on its own leaves a manager to work out which of thirty evenings is
+    // in the way. The API has always sent the names; the screen has to use them.
     expect(
-      strandedBookingIds(
+      strandedBookings(
         failure("would_strand_bookings", {
-          conflicts: [{ booking_id: "one" }, { booking_id: "two" }],
+          conflicts: [
+            { booking_id: "one", guest_name: "Саша", start_minutes: 1260 },
+            { booking_id: "two", guest_name: "Тимур", start_minutes: 1320 },
+          ],
         }),
       ),
-    ).toEqual(["one", "two"]);
+    ).toEqual([
+      { guestName: "Саша", startMinutes: 1260 },
+      { guestName: "Тимур", startMinutes: 1320 },
+    ]);
+  });
+
+  it("keeps a booking whose time the detail did not carry", () => {
+    expect(
+      strandedBookings(
+        failure("would_strand_bookings", { conflicts: [{ guest_name: "Глеб" }] }),
+      ),
+    ).toEqual([{ guestName: "Глеб", startMinutes: null }]);
   });
 
   it("survives a detail that is not the shape it expected", () => {
-    expect(strandedBookingIds(failure("would_strand_bookings"))).toEqual([]);
-    expect(strandedBookingIds(failure("would_strand_bookings", { conflicts: "none" }))).toEqual([]);
+    expect(strandedBookings(failure("would_strand_bookings"))).toEqual([]);
+    expect(strandedBookings(failure("would_strand_bookings", { conflicts: "none" }))).toEqual([]);
     expect(
-      strandedBookingIds(failure("would_strand_bookings", { conflicts: [null, 7, {}] })),
+      strandedBookings(failure("would_strand_bookings", { conflicts: [null, 7, {}] })),
     ).toEqual([]);
-    expect(strandedBookingIds(failure("no_table_free"))).toEqual([]);
+    expect(strandedBookings(failure("no_table_free"))).toEqual([]);
   });
 
   it("lists the reasons a proposal was illegal", () => {

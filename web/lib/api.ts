@@ -15,9 +15,9 @@ export interface Hours {
   closed: boolean;
 }
 
-export type BookingStatus = "confirmed" | "arrived" | "no_show" | "cancelled";
-export type Attendance = "confirmed" | "arrived" | "no_show";
-export type Source = "app" | "staff";
+export type BookingStatus = "confirmed" | "arrived" | "no_show" | "left" | "cancelled";
+export type Attendance = "confirmed" | "arrived" | "no_show" | "left";
+export type Source = "app" | "staff" | "walk";
 export type SlotState = "free" | "taken" | "past";
 
 export interface GuestBooking {
@@ -41,6 +41,8 @@ export interface BarView {
   today: IsoDate;
   today_hours: Hours;
   last_arrival_minutes: number | null;
+  /** The bar's own clock, in wall-clock minutes into today's shift. */
+  now_minutes: number;
 }
 
 export interface Session {
@@ -50,6 +52,23 @@ export interface Session {
   bar: BarView;
   booking: GuestBooking | null;
   bookable_days: IsoDate[];
+  /** The earliest time tonight still has, or null when it has none. */
+  today_free_from_minutes: number | null;
+  /** The party size that answer speaks for, and the one the picker opens on. */
+  today_free_for_party: number;
+}
+
+/** One chip on the guest's day rail. */
+export interface DayOffer {
+  service_date: IsoDate;
+  closed: boolean;
+  /** The earliest arrival time still free for this party, null when the day holds none. */
+  free_from_minutes: number | null;
+}
+
+export interface DayRail {
+  party_size: number;
+  days: DayOffer[];
 }
 
 export interface Slot {
@@ -77,12 +96,17 @@ export interface ShiftBooking {
   table_number: number | null;
   table_zone: string | null;
   start_minutes: number;
+  /** The end of the window promised to the guest, never shortened by what happened on the night. */
   end_minutes: number;
+  /** The minute the table went back into the pool, null while the booking still holds it. */
+  released_minutes: number | null;
   party_size: number;
   guest_name: string;
   guest_username: string | null;
   status: BookingStatus;
   source: Source;
+  /** What staff wrote on this booking. Never shown to the guest and never sent anywhere. */
+  note: string | null;
   reachable_by_bot: boolean;
 }
 
@@ -94,6 +118,13 @@ export interface ShiftTable {
   blocked_because: string | null;
 }
 
+/** One row of the staff day sheet. */
+export interface ShiftDay {
+  service_date: IsoDate;
+  closed: boolean;
+  bookings: number;
+}
+
 export interface ShiftView {
   service_date: IsoDate;
   hours: Hours;
@@ -101,6 +132,12 @@ export interface ShiftView {
   bookings: ShiftBooking[];
   stats: { bookings: number; guests: number; free_now: number | null };
   now_minutes: number | null;
+  /** The largest party the room could seat this minute; null when none fits or this is not today. */
+  largest_party_seatable_now: number | null;
+  /** Every evening staff can reach, with what is on. Longer than the guest's horizon. */
+  days: ShiftDay[];
+  /** How far ahead guests may book, so the day sheet can say where their horizon ends. */
+  guest_horizon_days: number;
   cancel_reasons: string[];
   message_templates: string[];
 }
@@ -261,6 +298,8 @@ export function client(credentials: string) {
         `/api/availability?${query({ service_date: serviceDate, party_size: partySize })}`,
       ),
 
+    days: (partySize: number) => get<DayRail>(`/api/days?${query({ party_size: partySize })}`),
+
     book: (serviceDate: IsoDate, startMinutes: number, partySize: number) =>
       send<BookingTaken>("POST", "/api/booking", {
         service_date: serviceDate,
@@ -294,10 +333,19 @@ export function client(credentials: string) {
         guest_name: guestName,
       }),
 
+    seatWalkIn: (serviceDate: IsoDate, partySize: number) =>
+      send<ShiftBooking>("POST", "/api/admin/walkins", {
+        service_date: serviceDate,
+        party_size: partySize,
+      }),
+
     setAttendance: (bookingId: string, attendance: Attendance) =>
       send<ShiftBooking>("PATCH", `/api/admin/bookings/${bookingId}/attendance`, {
         attendance,
       }),
+
+    setNote: (bookingId: string, note: string | null) =>
+      send<ShiftBooking>("PATCH", `/api/admin/bookings/${bookingId}/note`, { note }),
 
     cancelAsStaff: (bookingId: string, reason: string) =>
       send<CancelledByStaff>("POST", `/api/admin/bookings/${bookingId}/cancel`, { reason }),

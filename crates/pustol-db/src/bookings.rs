@@ -36,11 +36,17 @@ macro_rules! block_columns {
 macro_rules! booking_columns {
     () => {
         "b.id, b.table_id, t.number as table_number, t.zone as table_zone, b.service_date,
-         b.starts_at, b.ends_at, b.party_size, b.guest_name, b.guest_username,
-         b.telegram_user_id, b.status, b.source, b.cancel_reason
+         b.starts_at, b.ends_at, b.left_at, b.party_size, b.guest_name, b.guest_username,
+         b.telegram_user_id, b.status, b.source, b.note, b.cancel_reason
          from booking b left join bar_table t on t.id = b.table_id"
     };
 }
+
+/// The longest note staff may write on a booking, matching the database's own check.
+///
+/// A note is read at a glance on a row in a list; anything longer is a conversation, and a
+/// conversation belongs in the chat with the guest.
+pub const NOTE_MAX_CHARS: usize = 120;
 
 /// A status staff can set by hand.
 ///
@@ -54,8 +60,40 @@ pub enum Attendance {
     Confirmed,
     /// At the table.
     Arrived,
-    /// Never came. The table stays theirs until somebody cancels it.
+    /// Never came. The table goes back into the pool once the grace period has run out.
     NoShow,
+    /// Came, sat, and went home early. The table is free from this minute.
+    Left,
+}
+
+impl Attendance {
+    /// The minute the table goes back into the pool, or `None` when it stays held.
+    ///
+    /// Each of the two settled statuses answers a different question about *when*. A party that
+    /// has left gave the table back at the moment staff pressed the button. A party that never
+    /// came gave it back when the bar stopped holding it for them — the end of the grace period —
+    /// which is not the same as the moment a bartender got round to noticing. Releasing at "now"
+    /// would take the table from somebody who is merely five minutes late and about to walk in.
+    ///
+    /// The result is clamped into the promised window because that is the only range a booking
+    /// can hold: releasing before it began holds nothing, and releasing after it ended releases
+    /// nothing.
+    #[must_use]
+    pub fn released_at(
+        self,
+        window: Interval,
+        grace_minutes: i32,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        let moment = match self {
+            Self::Confirmed | Self::Arrived => return None,
+            Self::Left => now,
+            Self::NoShow => now.max(
+                window.start() + chrono::Duration::minutes(i64::from(grace_minutes)),
+            ),
+        };
+        Some(moment.clamp(window.start(), window.end()))
+    }
 }
 
 impl From<Attendance> for StoredStatus {
@@ -64,6 +102,7 @@ impl From<Attendance> for StoredStatus {
             Attendance::Confirmed => Self::Confirmed,
             Attendance::Arrived => Self::Arrived,
             Attendance::NoShow => Self::NoShow,
+            Attendance::Left => Self::Left,
         }
     }
 }
@@ -120,6 +159,21 @@ pub struct CreatedBooking {
     pub config: ValidConfig,
 }
 
+/// The name a party with no booking is filed under.
+///
+/// Not a placeholder for a name somebody forgot to type: there is no name, because nobody booked.
+/// Calling it anything else would put a fiction into the shift history.
+pub const WALK_IN_NAME: &str = "Без брони";
+
+/// An attendance change, and whatever the table it freed let the room put right.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AttendanceRecorded {
+    pub record: BookingRecord,
+    /// Parties the released table let the room seat. Empty when nothing moved.
+    pub reconciliation: Reseated,
+    pub config: ValidConfig,
+}
+
 /// A booking that has been released, and whatever the freed table let the room fix.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CancelledBooking {
@@ -152,6 +206,15 @@ impl Reseated {
     pub fn is_empty(&self) -> bool {
         self.outcome.is_empty()
     }
+}
+
+/// What one day holds for one party size.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DayOffer {
+    pub day: ServiceDay,
+    pub closed: bool,
+    /// The earliest arrival time still free, absent when the day holds none.
+    pub free_from_minutes: Option<i32>,
 }
 
 /// Arrival times, and the configuration they were computed from.
@@ -202,6 +265,80 @@ impl Store {
     pub async fn bookable_days(&self, bar: BarId, now: DateTime<Utc>) -> Result<Vec<ServiceDay>> {
         let config = self.config(bar).await?;
         Ok(bookable_days(&config, config.current_service_day(now)))
+    }
+
+    /// What each of `days` holds for a party of this size.
+    ///
+    /// One read of the whole span rather than one per day: a thirty-day rail asked day by day
+    /// would be sixty round trips to answer one screen, and the answers could disagree with each
+    /// other because a booking taken between two of them would be in one and not the next.
+    pub async fn day_offers(
+        &self,
+        bar: BarId,
+        config: &ValidConfig,
+        days: &[ServiceDay],
+        party_size: i32,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<DayOffer>> {
+        let (Some(first), Some(last)) = (days.first(), days.last()) else {
+            return Ok(Vec::new());
+        };
+        let mut connection = self.pool().acquire().await?;
+        // A window can outlast midnight in both directions, so the span reaches one shift either
+        // side of the range being answered — the same neighbourhood the allocator always needs.
+        let from = first.checked_sub_days(1).unwrap_or(*first).date();
+        let to = last.checked_add_days(1).unwrap_or(*last).date();
+        let bookings = bookings_of(&load_between(&mut connection, bar, from, to).await?);
+        let blocks = blocks_of(&load_blocks_between(&mut connection, bar, from, to).await?);
+
+        Ok(days
+            .iter()
+            .map(|day| DayOffer {
+                day: *day,
+                closed: config.week.for_service_day(*day).closed,
+                free_from_minutes: slots::first_free_minutes(&slots::Query {
+                    config,
+                    service_day: *day,
+                    party_size,
+                    bookings: &bookings,
+                    blocks: &blocks,
+                    now,
+                    ignoring: None,
+                }),
+            })
+            .collect())
+    }
+
+    /// How many bookings sit on each of `days` — the count on a row of the staff day sheet.
+    pub async fn bookings_per_day(
+        &self,
+        bar: BarId,
+        days: &[ServiceDay],
+    ) -> Result<Vec<usize>> {
+        let (Some(first), Some(last)) = (days.first(), days.last()) else {
+            return Ok(Vec::new());
+        };
+        let rows = sqlx::query(
+            "select service_date, count(*) as total from booking
+             where bar_id = $1 and status <> 'cancelled' and service_date between $2 and $3
+             group by service_date",
+        )
+        .bind(bar)
+        .bind(first.date())
+        .bind(last.date())
+        .fetch_all(self.pool())
+        .await?;
+
+        let counted: std::collections::HashMap<chrono::NaiveDate, i64> = rows
+            .iter()
+            .map(|row| Ok((row.try_get("service_date")?, row.try_get("total")?)))
+            .collect::<Result<_>>()?;
+        Ok(days
+            .iter()
+            .map(|day| {
+                usize::try_from(counted.get(&day.date()).copied().unwrap_or(0)).unwrap_or(0)
+            })
+            .collect())
     }
 
     /// Takes a booking, or explains why it cannot.
@@ -257,31 +394,28 @@ impl Store {
             }
         };
 
-        let id: Uuid = sqlx::query(
-            "insert into booking (bar_id, table_id, service_date, starts_at, ends_at, party_size,
-                                  guest_name, guest_username, telegram_user_id, source)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning id",
+        let id = insert_booking(
+            &mut transaction,
+            &Written {
+                bar: request.bar,
+                table,
+                service_day: request.service_day,
+                window,
+                party_size: request.party_size,
+                guest_name: &name,
+                guest_username: username.as_deref(),
+                user,
+                source,
+                status: StoredStatus::Confirmed,
+            },
         )
-        .bind(request.bar)
-        .bind(table.0)
-        .bind(request.service_day.date())
-        .bind(window.start())
-        .bind(window.end())
-        .bind(request.party_size)
-        .bind(&name)
-        .bind(&username)
-        .bind(user.map(|user| user.0))
-        .bind(source)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(Error::from_write)
-        .map(|row| row.get("id"))?;
+        .await?;
 
         if let (Some(wording), Some(user)) = (request.reminder, user) {
             notifications::enqueue_reminder(
                 &mut transaction,
                 request.bar,
-                BookingId(id),
+                id,
                 user,
                 &wording(&config, window, request.party_size),
                 window.start() - chrono::Duration::hours(i64::from(config.remind_hours)),
@@ -290,7 +424,7 @@ impl Store {
             .await?;
         }
 
-        let record = fetch_booking(&mut transaction, request.bar, BookingId(id)).await?;
+        let record = fetch_booking(&mut transaction, request.bar, id).await?;
         transaction.commit().await?;
         Ok(CreatedBooking {
             record,
@@ -333,20 +467,84 @@ impl Store {
         })
     }
 
-    /// Records whether a party turned up.
+    /// Records whether a party turned up, and gives their table back when they are done with it.
+    ///
+    /// One transaction, because the three things it does are one fact about the room: the status
+    /// changes, the table is released or taken back, and whoever the room could not seat is given
+    /// another chance at it. Setting the status in one statement and reconciling in another would
+    /// leave an instant in which a table is visibly free and a party is visibly stranded.
+    ///
+    /// Going back to `confirmed` or `arrived` clears the release, which is what makes undo exact:
+    /// the room returns to the arrangement it had, rather than to one that merely looks like it.
     pub async fn set_attendance(
         &self,
         bar: BarId,
         booking: BookingId,
         attendance: Attendance,
-    ) -> Result<BookingRecord> {
-        let updated = sqlx::query(
-            "update booking set status = $3
+        now: DateTime<Utc>,
+    ) -> Result<AttendanceRecorded> {
+        let mut transaction = self.pool().begin().await?;
+        lock_bar(&mut transaction, bar).await?;
+        let config = load_config(&mut transaction, bar).await?;
+        let current = fetch_booking(&mut transaction, bar, booking).await?;
+        if !current.booking.status.is_live() {
+            return Err(Error::NotFound { entity: "booking" });
+        }
+        let released_at =
+            attendance.released_at(current.booking.window, config.grace_minutes, now);
+
+        sqlx::query(
+            "update booking set status = $3, left_at = $4
              where bar_id = $1 and id = $2 and status <> 'cancelled'",
         )
         .bind(bar)
         .bind(booking.0)
         .bind(StoredStatus::from(attendance))
+        .bind(released_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(Error::from_write)?;
+
+        let record = fetch_booking(&mut transaction, bar, booking).await?;
+        let reconciliation = reconcile_shift(
+            &mut transaction,
+            bar,
+            &config,
+            record.booking.service_day,
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(AttendanceRecorded {
+            record,
+            reconciliation,
+            config,
+        })
+    }
+
+    /// Writes what staff want to remember about a booking, or rubs it out.
+    ///
+    /// Staff-facing by construction: nothing sends a note anywhere, and the guest projection has
+    /// no field to put one in.
+    pub async fn set_note(
+        &self,
+        bar: BarId,
+        booking: BookingId,
+        note: Option<&str>,
+    ) -> Result<BookingRecord> {
+        let trimmed = note.map(str::trim).filter(|text| !text.is_empty());
+        if trimmed.is_some_and(|text| text.chars().count() > NOTE_MAX_CHARS) {
+            return Err(Error::NoteTooLong {
+                limit: NOTE_MAX_CHARS,
+            });
+        }
+        let updated = sqlx::query(
+            "update booking set note = $3
+             where bar_id = $1 and id = $2 and status <> 'cancelled'",
+        )
+        .bind(bar)
+        .bind(booking.0)
+        .bind(trimmed)
         .execute(self.pool())
         .await?;
         if updated.rows_affected() == 0 {
@@ -354,6 +552,73 @@ impl Store {
         }
         let mut connection = self.pool().acquire().await?;
         fetch_booking(&mut connection, bar, booking).await
+    }
+
+    /// Seats a party that walked in, at the minute they sat down.
+    ///
+    /// Not put through the slot list, and deliberately: a slot list answers "when may somebody
+    /// arrive", and every one of its answers is either in the future or refused as past. A party
+    /// standing at the door is arriving *now*, which is a time no grid contains. Flooring them
+    /// onto the grid instead would draw the table as occupied from a minute nobody sat down, and
+    /// would hide a table freed mid-step from the very offer that is looking for one.
+    ///
+    /// It is the same allocator underneath, over the same window the party will actually hold, so
+    /// the table this takes is the table the shift's own "who fits" line promised.
+    pub async fn seat_walk_in(
+        &self,
+        bar: BarId,
+        day: ServiceDay,
+        party_size: i32,
+        now: DateTime<Utc>,
+    ) -> Result<CreatedBooking> {
+        let mut transaction = self.pool().begin().await?;
+        lock_bar(&mut transaction, bar).await?;
+        let config = load_config(&mut transaction, bar).await?;
+        check_party_size(party_size, &config)?;
+        if config.current_service_day(now) != day {
+            return Err(Error::NotTheRunningShift {
+                service_day: day.date(),
+            });
+        }
+
+        let window = Interval::from_duration(now, config.turn_minutes)?;
+        let bookings = load_window(&mut transaction, bar, day).await?;
+        let blocks = load_blocks(&mut transaction, bar, day).await?;
+        let seat = pustol_domain::allocator::assign(&pustol_domain::allocator::Request {
+            party_size,
+            window,
+            service_day: day,
+            tables: &config.tables,
+            bookings: &bookings_of(&bookings),
+            blocks: &blocks_of(&blocks),
+            ignoring: None,
+        })
+        .ok_or(Error::NoTableFree { party_size })?;
+
+        let id = insert_booking(
+            &mut transaction,
+            &Written {
+                bar,
+                table: seat.table_id,
+                service_day: day,
+                window,
+                party_size,
+                guest_name: WALK_IN_NAME,
+                guest_username: None,
+                user: None,
+                source: BookingSource::Walk,
+                status: StoredStatus::Arrived,
+            },
+        )
+        .await?;
+
+        let record = fetch_booking(&mut transaction, bar, id).await?;
+        transaction.commit().await?;
+        Ok(CreatedBooking {
+            record,
+            replaced: None,
+            config,
+        })
     }
 
     /// Releases a table and records why.
@@ -557,6 +822,51 @@ struct Seat {
     window: pustol_domain::Interval,
 }
 
+/// Everything a booking row is made of.
+///
+/// One shape, so the two ways a booking comes into existence — somebody chose a time, or somebody
+/// walked in — write the same columns. A second `insert into booking` elsewhere would be a second
+/// chance to forget one.
+struct Written<'a> {
+    bar: BarId,
+    table: TableId,
+    service_day: ServiceDay,
+    window: Interval,
+    party_size: i32,
+    guest_name: &'a str,
+    guest_username: Option<&'a str>,
+    user: Option<TelegramUserId>,
+    source: BookingSource,
+    status: StoredStatus,
+}
+
+/// Writes the row, letting the exclusion constraint have the last word on who got the table.
+async fn insert_booking(
+    connection: &mut PgConnection,
+    written: &Written<'_>,
+) -> Result<BookingId> {
+    sqlx::query(
+        "insert into booking (bar_id, table_id, service_date, starts_at, ends_at, party_size,
+                              guest_name, guest_username, telegram_user_id, source, status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id",
+    )
+    .bind(written.bar)
+    .bind(written.table.0)
+    .bind(written.service_day.date())
+    .bind(written.window.start())
+    .bind(written.window.end())
+    .bind(written.party_size)
+    .bind(written.guest_name)
+    .bind(written.guest_username)
+    .bind(written.user.map(|user| user.0))
+    .bind(written.source)
+    .bind(written.status)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(Error::from_write)
+    .map(|row| BookingId(row.get("id")))
+}
+
 fn check_party_size(party_size: i32, config: &ValidConfig) -> Result<()> {
     if party_size < 1 || party_size > config.max_party {
         return Err(Error::PartyTooLarge {
@@ -705,6 +1015,55 @@ pub(crate) async fn load_window(
     rows.into_iter()
         .map(|row| BookingRecord::try_from(row_into(&row)?))
         .collect()
+}
+
+/// Bookings anywhere in a span of shifts, for a screen that asks about many days at once.
+///
+/// The guest's day rail is the only caller: [`load_window`] answers the allocator's question about
+/// one evening and its neighbours, and running it thirty times would be thirty round trips whose
+/// answers could disagree with one another.
+pub(crate) async fn load_between(
+    connection: &mut PgConnection,
+    bar: BarId,
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+) -> Result<Vec<BookingRecord>> {
+    let rows = sqlx::query(concat!(
+        "select ",
+        booking_columns!(),
+        " where b.bar_id = $1 and b.status <> 'cancelled'
+            and b.service_date between $2 and $3
+          order by b.starts_at, b.id"
+    ))
+    .bind(bar)
+    .bind(from)
+    .bind(to)
+    .fetch_all(connection)
+    .await?;
+    rows.into_iter()
+        .map(|row| BookingRecord::try_from(row_into(&row)?))
+        .collect()
+}
+
+/// Blocks anywhere in a span of shifts. The rail's companion to [`load_between`].
+pub(crate) async fn load_blocks_between(
+    connection: &mut PgConnection,
+    bar: BarId,
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+) -> Result<Vec<BlockRecord>> {
+    let rows = sqlx::query(concat!(
+        "select ",
+        block_columns!(),
+        " where block.bar_id = $1 and block.service_date between $2 and $3
+          order by block.service_date, t.number"
+    ))
+    .bind(bar)
+    .bind(from)
+    .bind(to)
+    .fetch_all(connection)
+    .await?;
+    rows.iter().map(block_into).collect()
 }
 
 /// Every live booking that has not finished yet.
@@ -971,12 +1330,14 @@ fn row_into(row: &sqlx::postgres::PgRow) -> Result<BookingRow> {
         service_date: row.try_get("service_date")?,
         starts_at: row.try_get("starts_at")?,
         ends_at: row.try_get("ends_at")?,
+        left_at: row.try_get("left_at")?,
         party_size: row.try_get("party_size")?,
         guest_name: row.try_get("guest_name")?,
         guest_username: row.try_get("guest_username")?,
         telegram_user_id: row.try_get("telegram_user_id")?,
         status: row.try_get("status")?,
         source: row.try_get("source")?,
+        note: row.try_get("note")?,
         cancel_reason: row.try_get("cancel_reason")?,
     })
 }

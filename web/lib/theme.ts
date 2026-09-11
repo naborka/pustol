@@ -29,11 +29,24 @@ export interface Palette {
   warn: string;
   /** The wash behind a destructive button. */
   tint: string;
+  /**
+   * The washes behind the other three meanings: expected, seated, needs attention.
+   *
+   * Derived from their own colour rather than written out, so a user whose Telegram accent is
+   * green never gets a blue wash behind a booking the bar is waiting for. An `rgba(82,136,193,…)`
+   * hand-expanded in a component is precisely how that happens.
+   */
+  btnWash: string;
+  okWash: string;
+  warnWash: string;
   /** A chip that is available but not chosen. */
   chip: string;
   /** A chip that cannot be chosen at all. */
   chipOff: string;
 }
+
+/** How much of a colour shows through the wash behind it. */
+const WASH_ALPHA = { dark: 0.2, light: 0.14 } as const;
 
 /** Telegram's theme, as much of it as this app reads. */
 export interface TelegramThemeParams {
@@ -49,19 +62,30 @@ export interface TelegramThemeParams {
   section_bg_color?: string;
 }
 
+/**
+ * The fallbacks, chosen so that every one of them can be read.
+ *
+ * Each colour that carries meaning clears 4.5:1 against both grounds it is ever drawn on — the
+ * page and a card — in its own scheme. `contrast.test.ts` asserts it, so a colour picked for how
+ * it looks in a mock-up cannot quietly ship at 3:1 and become the thing nobody can read in a dim
+ * bar. The old greys were the worst offenders: `#708499` on a card was under four.
+ */
 const DARK: Palette = {
   bg: "#17212b",
   sec: "#232e3c",
   txt: "#ffffff",
-  hint: "#708499",
+  hint: "#8fa3b8",
   btn: "#5288c1",
   buttonText: "#ffffff",
   link: "#6ab7ff",
   sep: "rgba(255,255,255,.08)",
-  dest: "#ec3942",
+  dest: "#f2666e",
   ok: "#42c767",
   warn: "#eaa13a",
-  tint: "rgba(236,57,66,.14)",
+  tint: "rgba(242,102,110,.14)",
+  btnWash: "rgba(82,136,193,0.2)",
+  okWash: "rgba(66,199,103,0.2)",
+  warnWash: "rgba(234,161,58,0.2)",
   chip: "#232e3c",
   chipOff: "#1d2733",
 };
@@ -70,15 +94,18 @@ const LIGHT: Palette = {
   bg: "#ffffff",
   sec: "#f2f2f7",
   txt: "#000000",
-  hint: "#8e8e93",
+  hint: "#5f6b7a",
   btn: "#2481cc",
   buttonText: "#ffffff",
   link: "#2481cc",
   sep: "rgba(0,0,0,.09)",
-  dest: "#df3f40",
-  ok: "#2aa14a",
-  warn: "#e08600",
-  tint: "rgba(223,63,64,.10)",
+  dest: "#c9282f",
+  ok: "#207a38",
+  warn: "#985b00",
+  tint: "rgba(201,40,47,.10)",
+  btnWash: "rgba(36,129,204,0.14)",
+  okWash: "rgba(32,122,56,0.14)",
+  warnWash: "rgba(152,91,0,0.14)",
   chip: "#f2f2f7",
   chipOff: "#f7f7fa",
 };
@@ -87,8 +114,8 @@ export function baseline(scheme: ColorScheme): Palette {
   return scheme === "light" ? LIGHT : DARK;
 }
 
-/** `#rrggbb` or `#rgb` as an `rgba(...)` with the alpha applied, or null if it is neither. */
-export function withAlpha(color: string, alpha: number): string | null {
+/** `#rrggbb` or `#rgb` as its three channels, or null if it is neither. */
+function channels(color: string): [number, number, number] | null {
   const hex = color.trim().replace(/^#/, "");
   const expanded =
     hex.length === 3
@@ -98,9 +125,47 @@ export function withAlpha(color: string, alpha: number): string | null {
           .join("")
       : hex;
   if (!/^[0-9a-fA-F]{6}$/.test(expanded)) return null;
-  const red = Number.parseInt(expanded.slice(0, 2), 16);
-  const green = Number.parseInt(expanded.slice(2, 4), 16);
-  const blue = Number.parseInt(expanded.slice(4, 6), 16);
+  return [
+    Number.parseInt(expanded.slice(0, 2), 16),
+    Number.parseInt(expanded.slice(2, 4), 16),
+    Number.parseInt(expanded.slice(4, 6), 16),
+  ];
+}
+
+/** Relative luminance, as WCAG defines it. */
+function luminance(color: string): number | null {
+  const parts = channels(color);
+  if (!parts) return null;
+  const [red, green, blue] = parts.map((value) => {
+    const channel = value / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+/**
+ * The WCAG contrast ratio between two colours, from 1 to 21, or null for anything not a hex colour.
+ *
+ * Here rather than in a test file because it is the definition of a rule the palette has to obey,
+ * and a rule that lives only in its own test is a rule the next palette will not know about.
+ */
+export function contrastRatio(foreground: string, background: string): number | null {
+  const front = luminance(foreground);
+  const back = luminance(background);
+  if (front === null || back === null) return null;
+  const lighter = Math.max(front, back);
+  const darker = Math.min(front, back);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** The smallest contrast this app will ship: WCAG AA for ordinary text. */
+export const MIN_CONTRAST = 4.5;
+
+/** `#rrggbb` or `#rgb` as an `rgba(...)` with the alpha applied, or null if it is neither. */
+export function withAlpha(color: string, alpha: number): string | null {
+  const parts = channels(color);
+  if (!parts) return null;
+  const [red, green, blue] = parts;
   return `rgba(${red},${green},${blue},${alpha})`;
 }
 
@@ -119,14 +184,16 @@ export function paletteFrom(
 
   const dest = theme.destructive_text_color ?? base.dest;
   const tintAlpha = scheme === "light" ? 0.1 : 0.14;
+  const washAlpha = WASH_ALPHA[scheme];
   const sec = theme.secondary_bg_color ?? theme.section_bg_color ?? base.sec;
+  const btn = theme.button_color ?? base.btn;
 
   return {
     bg: theme.bg_color ?? base.bg,
     sec,
     txt: theme.text_color ?? base.txt,
     hint: theme.hint_color ?? base.hint,
-    btn: theme.button_color ?? base.btn,
+    btn,
     buttonText: theme.button_text_color ?? base.buttonText,
     link: theme.link_color ?? base.link,
     sep: theme.section_separator_color ?? base.sep,
@@ -136,6 +203,11 @@ export function paletteFrom(
     ok: base.ok,
     warn: base.warn,
     tint: withAlpha(dest, tintAlpha) ?? base.tint,
+    // Each wash from its own colour, so a user's accent reaches the block on the timeline as well
+    // as the button. A colour Telegram sent in a form this cannot read falls back to the design's.
+    btnWash: withAlpha(btn, washAlpha) ?? base.btnWash,
+    okWash: withAlpha(base.ok, washAlpha) ?? base.okWash,
+    warnWash: withAlpha(base.warn, washAlpha) ?? base.warnWash,
     chip: sec,
     chipOff: base.chipOff,
   };
@@ -156,6 +228,9 @@ export function cssVariables(palette: Palette): Record<string, string> {
     "--ok": palette.ok,
     "--warn": palette.warn,
     "--tint": palette.tint,
+    "--btn-wash": palette.btnWash,
+    "--ok-wash": palette.okWash,
+    "--warn-wash": palette.warnWash,
     "--chip": palette.chip,
     "--chip-off": palette.chipOff,
   };

@@ -5,12 +5,14 @@ mod common;
 use chrono::{NaiveDate, Weekday};
 use pustol_domain::config::DayHours;
 use pustol_domain::service_day::ServiceDay;
-use pustol_domain::slots::{PartOfDay, Query, SlotAvailability, slot_list};
+use pustol_domain::slots::{
+    PartOfDay, Query, SlotAvailability, first_free_minutes, horizon_days, slot_list,
+};
 use pustol_domain::{WeekSchedule, bookable_days};
 
 use common::{
-    DEFAULT_HOURS, at, block, booking, default_config, force, in_force, numbered, thursday, utc,
-    zone,
+    DEFAULT_HOURS, at, block, booking, default_config, force, in_force, numbered, table, thursday,
+    utc, zone,
 };
 
 /// Early morning on the Thursday, before any of the fixture bookings.
@@ -306,6 +308,122 @@ fn the_day_strip_skips_days_off_and_stops_at_the_horizon() {
             thursday().checked_add_days(3).unwrap(),
         ],
         "the closed Saturday is left out but still counts against the horizon"
+    );
+}
+
+#[test]
+fn the_day_rail_is_exactly_as_long_as_the_horizon_the_manager_set() {
+    // The rail a guest scrolls is the horizon itself, whatever the week does. A closed Saturday
+    // is a chip that says `выходной`, not a gap that makes the rail a different length each week.
+    for length in [1, 4, 30] {
+        let mut draft = default_config();
+        draft.horizon_days = length;
+        draft.week = draft.week.with(
+            Weekday::Sat,
+            DayHours {
+                closed: true,
+                ..DEFAULT_HOURS
+            },
+        );
+        let config = force(draft);
+        let rail = horizon_days(&config, thursday());
+        assert_eq!(
+            i32::try_from(rail.len()).expect("short rail"),
+            length,
+            "horizon of {length} days"
+        );
+        assert_eq!(rail.first(), Some(&thursday()));
+    }
+}
+
+#[test]
+fn a_one_day_horizon_reaches_today_and_nothing_else() {
+    let mut draft = default_config();
+    draft.horizon_days = 1;
+    let config = force(draft);
+    assert_eq!(horizon_days(&config, thursday()), vec![thursday()]);
+    assert_eq!(bookable_days(&config, thursday()), vec![thursday()]);
+}
+
+#[test]
+fn a_chip_says_the_first_time_that_day_still_has() {
+    let config = in_force();
+    assert_eq!(
+        first_free_minutes(&couple_at!(config, thursday(), morning())),
+        Some(DEFAULT_HOURS.open_minutes),
+        "an empty room offers its first arrival time"
+    );
+}
+
+#[test]
+fn a_chip_offers_nothing_on_a_day_the_week_schedule_closes() {
+    let mut draft = default_config();
+    draft.week = draft.week.with(
+        Weekday::Thu,
+        DayHours {
+            closed: true,
+            ..DEFAULT_HOURS
+        },
+    );
+    let config = force(draft);
+    assert_eq!(
+        first_free_minutes(&couple_at!(config, thursday(), morning())),
+        None
+    );
+}
+
+#[test]
+fn a_chip_offers_nothing_once_the_party_is_larger_than_the_room() {
+    let mut draft = default_config();
+    draft.tables = vec![table(1, 2, "Бар")];
+    draft.max_party = 2;
+    let config = force(draft);
+    let query = Query {
+        party_size: 4,
+        ..couple_at!(config, thursday(), morning())
+    };
+    assert_eq!(first_free_minutes(&query), None);
+}
+
+#[test]
+fn a_chip_skips_the_hours_already_sold_and_names_the_first_that_is_not() {
+    let mut draft = default_config();
+    draft.tables = vec![table(1, 2, "Бар")];
+    draft.max_party = 2;
+    let config = force(draft);
+    let taken = booking(1, thursday(), 600, 2, Some(&config.tables[0]), 120);
+    let query = Query {
+        bookings: std::slice::from_ref(&taken),
+        ..couple_at!(config, thursday(), morning())
+    };
+    assert_eq!(
+        first_free_minutes(&query),
+        Some(720),
+        "the only table is busy 10:00–12:00, so the first free arrival is 12:00"
+    );
+}
+
+#[test]
+fn slot_generation_follows_each_weekday_rather_than_one_pair_of_hours() {
+    let mut draft = default_config();
+    draft.week = draft.week.with(
+        Weekday::Fri,
+        DayHours {
+            open_minutes: 1_080,
+            close_minutes: 1_560,
+            closed: false,
+        },
+    );
+    let config = force(draft);
+    let friday = thursday().checked_add_days(1).expect("in range");
+    assert_eq!(
+        first_free_minutes(&couple_at!(config, friday, morning())),
+        Some(1_080),
+        "Friday opens at 18:00 even though Thursday opens at 10:00"
+    );
+    assert_eq!(
+        first_free_minutes(&couple_at!(config, thursday(), morning())),
+        Some(600)
     );
 }
 

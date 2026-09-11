@@ -425,3 +425,107 @@ async fn an_unknown_api_path_fails_the_way_the_api_fails() {
         assert_eq!(answer.error_code(), Some("not_found"), "{path}");
     }
 }
+
+#[tokio::test]
+async fn the_day_rail_is_the_horizon_itself_and_every_chip_says_what_it_holds() {
+    // Four days from a Thursday, with the Saturday shut. The rail is four chips long, not three:
+    // a day a guest cannot have is a day the rail has to answer, not one it may quietly drop.
+    let mut config = config_with(vec![table(1, 2, "Бар")]);
+    config.horizon_days = 4;
+    config.week = config.week.with(
+        chrono::Weekday::Sat,
+        pustol_domain::DayHours {
+            closed: true,
+            ..config.week.on(chrono::Weekday::Sat)
+        },
+    );
+    let app = harness_at(morning(), config).await;
+    let guest = Caller::new("Алексей");
+
+    let body = app
+        .get("/api/days?party_size=2", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    let days = body["days"].as_array().expect("a rail");
+    assert_eq!(days.len(), 4);
+    assert_eq!(days[0]["service_date"], "2026-07-30");
+    assert_eq!(days[0]["closed"], false);
+    assert_eq!(days[0]["free_from_minutes"], 600);
+    assert_eq!(days[2]["service_date"], "2026-08-01");
+    assert_eq!(days[2]["closed"], true);
+    assert!(
+        days[2]["free_from_minutes"].is_null(),
+        "a day off offers nothing to anybody"
+    );
+}
+
+#[tokio::test]
+async fn a_horizon_of_one_day_reaches_tonight_and_nowhere_else() {
+    let mut config = config_with(vec![table(1, 2, "Бар")]);
+    config.horizon_days = 1;
+    let app = harness_at(morning(), config).await;
+    let guest = Caller::new("Вера");
+    let body = app
+        .get("/api/days?party_size=2", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(body["days"].as_array().expect("a rail").len(), 1);
+    assert_eq!(body["days"][0]["service_date"], "2026-07-30");
+}
+
+#[tokio::test]
+async fn a_day_with_nothing_left_says_so_before_it_is_tapped() {
+    // One table, one couple, and the only table busy from opening to closing.
+    let mut config = config_with(vec![table(1, 2, "Бар")]);
+    config.horizon_days = 2;
+    config.turn_minutes = 240;
+    config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
+        open_minutes: 1_080,
+        close_minutes: 1_320,
+        closed: false,
+    });
+    let app = harness_at(morning(), config).await;
+    let guest = Caller::new("Тимур");
+    let other = Caller::new("Глеб");
+
+    app.post(
+        "/api/booking",
+        &other,
+        serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1080, "party_size": 2 }),
+    )
+    .await
+    .expect_ok();
+
+    let body = app
+        .get("/api/days?party_size=2", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert!(
+        body["days"][0]["free_from_minutes"].is_null(),
+        "the evening is sold out and the chip says so"
+    );
+    assert_eq!(body["days"][1]["free_from_minutes"], 1_080);
+
+    // And the home screen learns the same thing from the same function.
+    let session = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert!(session["today_free_from_minutes"].is_null());
+}
+
+#[tokio::test]
+async fn the_first_screen_says_when_tonight_opens_up() {
+    let app = harness().await;
+    let guest = Caller::new("Алексей");
+    let body = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(body["today_free_from_minutes"], 600);
+    assert_eq!(
+        body["today_free_for_party"], 2,
+        "the party that sentence speaks for, sent rather than agreed by comment"
+    );
+    assert_eq!(
+        body["bar"]["now_minutes"], 480,
+        "eight in the morning, in the bar's own timezone rather than the phone's"
+    );
+}

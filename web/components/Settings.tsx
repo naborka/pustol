@@ -1,33 +1,40 @@
 "use client";
 
 /**
- * The settings screen.
+ * The settings screen: an index of six rows, each pushing a section.
  *
- * Every control asks the same question before it lets itself be pressed: would the bar still be
- * legal if this change were made? A control that looks live and then refuses is worse than one that
- * is plainly unavailable, and the notes underneath say *why* rather than leaving staff to guess.
+ * The draft-and-save model underneath is unchanged and was always right — one proposal, edited
+ * locally, saved or reverted as a whole. What was wrong was the shape: six groups of controls laid
+ * out flat behind a row of tabs, so the answer to "what are the hours" was four taps and a scroll.
+ * Now every row on the index shows its own current value, and the section is one tap away.
+ *
+ * Every control still asks the same question before it lets itself be pressed: would the bar still
+ * be legal if this change were made? A control that looks live and then refuses is worse than one
+ * that is plainly unavailable, and the notes underneath say *why* rather than leaving staff to
+ * guess.
  */
 
 import { useState, type ReactNode } from "react";
 
-import { draftOf, type Limits, type SettingsDraft, type SettingsView, type TableDraft } from "@/lib/api";
+import type { Limits, SettingsDraft, SettingsView, TableDraft } from "@/lib/api";
 import * as fmt from "@/lib/format";
 import {
   copyDraft,
-  differs,
-  lastArrivalMinutes,
   largestTable,
+  lastArrivalMinutes,
   shortestShiftMinutes,
   wouldBeLegal,
   type Edit,
 } from "@/lib/settingsRules";
-import { haptics } from "@/lib/telegram";
+import { RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
 import {
+  Card,
   CardAction,
   Note,
-  RADIUS,
+  Pressable,
   SectionLabel,
   Segmented,
+  Separator,
   Stepper,
   StepperButton,
   TextField,
@@ -36,31 +43,52 @@ import {
 /** Monday first, the way a week is read, over an array indexed from Sunday. */
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0] as const;
 
-const GROUPS = [
+export const SECTIONS = [
   { id: "bar", label: "Бар" },
-  { id: "tables", label: "Столы" },
-  { id: "hours", label: "Часы" },
-  { id: "rules", label: "Правила" },
-  { id: "texts", label: "Тексты" },
-  { id: "staff", label: "Люди" },
+  { id: "room", label: "Зал" },
+  { id: "hours", label: "Часы работы" },
+  { id: "rules", label: "Правила бронирования" },
+  { id: "texts", label: "Сообщения и причины отмены" },
+  { id: "staff", label: "Персонал" },
 ] as const;
 
-type Group = (typeof GROUPS)[number]["id"];
+export type Section = (typeof SECTIONS)[number]["id"];
 
 /** Makes a change to the proposal. */
 type Apply = (change: Edit) => void;
 /** Asks whether a change would leave the bar legal. */
 type Ask = (change: Edit) => boolean;
 
-interface Props {
-  settings: SettingsView;
+interface Context {
   draft: SettingsDraft;
+  settings: SettingsView;
+  limits: Limits;
   editedWeekday: number;
-  onDraft: (next: SettingsDraft) => void;
   onEditWeekday: (weekday: number) => void;
-  onSave: () => void;
-  onRevert: () => void;
-  saving: boolean;
+  edit: Apply;
+  allowed: Ask;
+}
+
+/** What each row of the index says it holds, so the value is readable without opening it. */
+export function sectionValue(section: Section, draft: SettingsDraft, weekday: number): string {
+  switch (section) {
+    case "bar":
+      return `${draft.name} · ${draft.address}`;
+    case "room":
+      return `${fmt.tables(draft.tables.length)} · ${draft.zones.join(", ")}`;
+    case "hours": {
+      const hours = draft.week[weekday];
+      const name = fmt.weekdayShortByIndex(weekday);
+      if (!hours) return name;
+      return hours.closed ? `${name} выходной` : `${name} ${fmt.hoursLabel(hours)}`;
+    }
+    case "rules":
+      return `бронь ${fmt.hours(draft.turn_minutes)} · до ${draft.max_party} гостей · шаг ${draft.slot_step_minutes} мин`;
+    case "texts":
+      return `${draft.message_templates.length} и ${draft.cancel_reasons.length} — персонал выбирает только из них`;
+    case "staff":
+      return draft.staff.map((member) => `@${member.username}`).join(" · ");
+  }
 }
 
 export function SettingsScreen({
@@ -69,13 +97,16 @@ export function SettingsScreen({
   editedWeekday,
   onDraft,
   onEditWeekday,
-  onSave,
-  onRevert,
-  saving,
-}: Props) {
-  const [group, setGroup] = useState<Group>("bar");
+}: {
+  settings: SettingsView;
+  draft: SettingsDraft;
+  editedWeekday: number;
+  onDraft: (next: SettingsDraft) => void;
+  onEditWeekday: (weekday: number) => void;
+}) {
+  const [section, setSection] = useState<Section | null>(null);
   const limits = settings.limits;
-  const dirty = differs(draft, draftOf(settings));
+
   // One notion of "an edit", built here and handed to every section: a change is described once and
   // then both asked about and made, rather than written out twice in two shapes.
   const edit: Apply = (change) => {
@@ -83,168 +114,140 @@ export function SettingsScreen({
     change(next);
     onDraft(next);
   };
-  const allowed: Ask = (change) => wouldBeLegal(draft, change, limits);
-
-  const body = groupBody(group, {
+  const context: Context = {
     draft,
     settings,
     limits,
     editedWeekday,
     onEditWeekday,
     edit,
-    allowed,
-  });
+    allowed: (change) => wouldBeLegal(draft, change, limits),
+  };
 
-  return (
-    <div
-      style={{ padding: "12px 16px 16px", display: "flex", flexDirection: "column", gap: 16 }}
-    >
-      <div
-        role="tablist"
-        aria-label="Разделы настроек"
-        style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
-      >
-        {GROUPS.map((item) => {
-          const chosen = item.id === group;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={chosen}
-              onClick={() => {
-                haptics.tap();
-                setGroup(item.id);
-              }}
-              style={{
-                flex: "none",
-                minHeight: 44,
-                padding: "10px 14px",
-                borderRadius: RADIUS.chip,
-                background: chosen ? "var(--btn)" : "var(--chip)",
-                color: chosen ? "var(--btn-text)" : "var(--txt)",
-                fontSize: 14,
-                fontWeight: 600,
-              }}
-            >
-              {item.label}
-            </button>
-          );
-        })}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>{body}</div>
-
+  if (section === null) {
+    return (
       <div
         style={{
+          padding: `${SPACE[3]}px ${SPACE[4]}px ${SPACE[5]}px`,
           display: "flex",
-          gap: 8,
-          position: "sticky",
-          bottom: 0,
-          paddingTop: 8,
-          background: "var(--bg)",
+          flexDirection: "column",
+          gap: SPACE[2],
         }}
       >
-        <button
-          type="button"
-          disabled={!dirty || saving}
-          onClick={onSave}
-          style={{
-            flex: 1,
-            padding: 15,
-            borderRadius: RADIUS.chip,
-            background: dirty ? "var(--btn)" : "var(--chip)",
-            color: dirty ? "var(--btn-text)" : "var(--hint)",
-            fontSize: 16,
-            fontWeight: 600,
-            textAlign: "center",
-          }}
-        >
-          {saving ? "Сохраняем…" : dirty ? "Сохранить" : "Всё сохранено"}
-        </button>
-        {dirty ? (
-          <button
-            type="button"
-            onClick={onRevert}
+        {SECTIONS.map((item) => (
+          <Pressable
+            key={item.id}
+            onClick={() => setSection(item.id)}
+            tone="card"
             style={{
-              padding: "15px 18px",
-              borderRadius: RADIUS.chip,
+              minHeight: 62,
+              padding: `${SPACE[2] + 2}px ${SPACE[3] + 2}px`,
+              borderRadius: RADIUS.md,
               background: "var(--sec)",
-              color: "var(--hint)",
-              fontSize: 15,
-              fontWeight: 600,
+              justifyContent: "space-between",
+              gap: SPACE[3],
             }}
           >
-            Отмена
-          </button>
-        ) : null}
+            <span
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                minWidth: 0,
+                textAlign: "left",
+              }}
+            >
+              <span style={{ fontSize: TEXT.lg, fontWeight: 600, color: "var(--txt)" }}>
+                {item.label}
+              </span>
+              <span
+                style={{
+                  fontSize: TEXT.sm,
+                  color: "var(--hint)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {sectionValue(item.id, draft, editedWeekday)}
+              </span>
+            </span>
+            <span aria-hidden style={{ flex: "none", fontSize: TEXT.xl, color: "var(--hint)" }}>
+              ›
+            </span>
+          </Pressable>
+        ))}
+      </div>
+    );
+  }
+
+  const current = SECTIONS.find((item) => item.id === section);
+  return (
+    <div
+      style={{
+        padding: `${SPACE[3]}px ${SPACE[4]}px ${SPACE[5]}px`,
+        display: "flex",
+        flexDirection: "column",
+        gap: SPACE[4],
+      }}
+    >
+      <Pressable
+        ariaLabel="Назад"
+        onClick={() => setSection(null)}
+        style={{
+          alignSelf: "flex-start",
+          fontSize: TEXT.base,
+          color: "var(--link)",
+          fontWeight: 600,
+          padding: `0 ${SPACE[2]}px 0 0`,
+        }}
+      >
+        ‹ Настройки
+      </Pressable>
+      <span style={{ fontSize: TEXT.h2, fontWeight: 700, color: "var(--txt)" }}>
+        {current?.label}
+      </span>
+      <div style={{ display: "flex", flexDirection: "column", gap: SPACE[5] }}>
+        {sectionBody(section, context)}
       </div>
     </div>
   );
 }
 
-function groupBody(
-  group: Group,
-  ctx: {
-    draft: SettingsDraft;
-    settings: SettingsView;
-    limits: Limits;
-    editedWeekday: number;
-    onEditWeekday: (weekday: number) => void;
-    edit: Apply;
-    allowed: Ask;
-  },
-): ReactNode {
-  switch (group) {
+function sectionBody(section: Section, ctx: Context): ReactNode {
+  switch (section) {
     case "bar":
       return (
-        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
           <TextField
             value={ctx.draft.name}
             placeholder="Название"
-            onChange={(value) => ctx.edit((next) => {
-              next.name = value;
-            })}
+            onChange={(value) =>
+              ctx.edit((next) => {
+                next.name = value;
+              })
+            }
           />
           <TextField
             value={ctx.draft.address}
             placeholder="Адрес"
-            onChange={(value) => ctx.edit((next) => {
-              next.address = value;
-            })}
+            onChange={(value) =>
+              ctx.edit((next) => {
+                next.address = value;
+              })
+            }
           />
+          <Note>
+            Часовой пояс — {ctx.draft.timezone}. Все времена в приложении показаны по нему.
+          </Note>
         </section>
       );
-    case "tables":
-      return (
-        <TablesSection
-          draft={ctx.draft}
-          settings={ctx.settings}
-          limits={ctx.limits}
-          edit={ctx.edit}
-          allowed={ctx.allowed}
-        />
-      );
+    case "room":
+      return <RoomSection ctx={ctx} />;
     case "hours":
-      return (
-        <HoursSection
-          draft={ctx.draft}
-          editedWeekday={ctx.editedWeekday}
-          onEditWeekday={ctx.onEditWeekday}
-          edit={ctx.edit}
-          allowed={ctx.allowed}
-        />
-      );
+      return <HoursSection ctx={ctx} />;
     case "rules":
-      return (
-        <RulesSection
-          draft={ctx.draft}
-          limits={ctx.limits}
-          editedWeekday={ctx.editedWeekday}
-          edit={ctx.edit}
-          allowed={ctx.allowed}
-        />
-      );
+      return <RulesSection ctx={ctx} />;
     case "texts":
       return (
         <>
@@ -253,39 +256,33 @@ function groupBody(
             addLabel="+ Сообщение"
             items={ctx.draft.message_templates}
             placeholder="Новое сообщение"
-            onChange={(items) => ctx.edit((next) => {
-              next.message_templates = items;
-            })}
+            onChange={(items) =>
+              ctx.edit((next) => {
+                next.message_templates = items;
+              })
+            }
           />
           <ListSection
             title="Причины отмены"
             addLabel="+ Причина"
             items={ctx.draft.cancel_reasons}
             placeholder="Новая причина"
-            onChange={(items) => ctx.edit((next) => {
-              next.cancel_reasons = items;
-            })}
+            onChange={(items) =>
+              ctx.edit((next) => {
+                next.cancel_reasons = items;
+              })
+            }
           />
+          <Note>Персонал выбирает только из этих списков — свободного текста гостю не уходит.</Note>
         </>
       );
     case "staff":
-      return <StaffSection draft={ctx.draft} edit={ctx.edit} />;
+      return <StaffSection ctx={ctx} />;
   }
 }
 
-function HoursSection({
-  draft,
-  editedWeekday,
-  onEditWeekday,
-  edit,
-  allowed,
-}: {
-  draft: SettingsDraft;
-  editedWeekday: number;
-  onEditWeekday: (weekday: number) => void;
-  edit: Apply;
-  allowed: Ask;
-}) {
+function HoursSection({ ctx }: { ctx: Context }) {
+  const { draft, editedWeekday, onEditWeekday, edit, allowed } = ctx;
   const hours = draft.week[editedWeekday] ?? {
     open_minutes: 0,
     close_minutes: 0,
@@ -302,35 +299,31 @@ function HoursSection({
       const day = next.week[editedWeekday];
       if (day) day[field] += delta;
     };
+  const lastArrival = lastArrivalMinutes(draft, editedWeekday);
 
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", gap: 5 }}>
+    <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
+      <div style={{ display: "flex", gap: SPACE[1] + 1 }}>
         {WEEK_ORDER.map((weekday) => {
           const day = draft.week[weekday];
           const chosen = weekday === editedWeekday;
           return (
-            <button
+            <Pressable
               key={weekday}
-              type="button"
-              aria-pressed={chosen}
+              ariaPressed={chosen}
+              ariaLabel={fmt.weekdayLongByIndex(weekday)}
               onClick={() => onEditWeekday(weekday)}
               style={{
                 flex: 1,
-                height: 48,
-                borderRadius: RADIUS.small,
+                minHeight: 48,
+                borderRadius: RADIUS.sm,
                 background: chosen ? "var(--btn)" : "var(--chip)",
-                color: chosen
-                  ? "var(--btn-text)"
-                  : day?.closed
-                    ? "var(--hint)"
-                    : "var(--txt)",
-                display: "flex",
+                color: chosen ? "var(--btn-text)" : day?.closed ? "var(--hint)" : "var(--txt)",
                 flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
                 gap: 3,
-                fontSize: 13,
+                fontSize: TEXT.md,
                 fontWeight: 600,
               }}
             >
@@ -340,11 +333,11 @@ function HoursSection({
                 style={{
                   width: 4,
                   height: 4,
-                  borderRadius: 99,
+                  borderRadius: RADIUS.pill,
                   background: day?.closed ? "var(--dest)" : "transparent",
                 }}
               />
-            </button>
+            </Pressable>
           );
         })}
       </div>
@@ -354,32 +347,35 @@ function HoursSection({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "12px 14px",
+          padding: `${SPACE[2]}px ${SPACE[3] + 2}px`,
           background: "var(--sec)",
-          borderRadius: RADIUS.chip,
+          borderRadius: RADIUS.md,
+          gap: SPACE[2],
         }}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <span style={{ fontSize: 15, fontWeight: 600, color: "var(--txt)" }}>
+          <span style={{ fontSize: TEXT.lg, fontWeight: 600, color: "var(--txt)" }}>
             {fmt.weekdayLongByIndex(editedWeekday)}
           </span>
-          <span style={{ fontSize: 12, color: hours.closed ? "var(--dest)" : "var(--ok)" }}>
+          <span
+            style={{ fontSize: TEXT.sm, color: hours.closed ? "var(--dest)" : "var(--ok)" }}
+          >
             {hours.closed ? "Выходной" : "Рабочий день"}
           </span>
         </div>
-        <button
-          type="button"
+        <Pressable
           disabled={!canToggleClosed}
           onClick={() => edit(toggleClosed)}
           style={{
-            fontSize: 13,
+            fontSize: TEXT.md,
             fontWeight: 600,
             color: canToggleClosed ? "var(--link)" : "var(--hint)",
-            padding: "12px 4px",
+            padding: `0 ${SPACE[1]}px`,
+            justifyContent: "flex-end",
           }}
         >
           {hours.closed ? "Сделать рабочим" : "Сделать выходным"}
-        </button>
+        </Pressable>
       </div>
 
       {!hours.closed
@@ -401,6 +397,11 @@ function HoursSection({
           ))
         : null}
 
+      <Note>
+        Последняя бронь — {lastArrival === null ? "—" : fmt.time(lastArrival)}: закрытие минус
+        время стола.
+      </Note>
+
       {!hours.closed ? (
         <CardAction
           label="Применить ко всем дням"
@@ -417,29 +418,18 @@ function HoursSection({
   );
 }
 
-function TablesSection({
-  draft,
-  settings,
-  limits,
-  edit,
-  allowed,
-}: {
-  draft: SettingsDraft;
-  settings: SettingsView;
-  limits: Limits;
-  edit: Apply;
-  allowed: Ask;
-}) {
+function RoomSection({ ctx }: { ctx: Context }) {
+  const { draft, settings, limits, edit, allowed } = ctx;
   const totalSeats = draft.tables.reduce((total, table) => total + table.seats, 0);
   const largest = largestTable(draft);
   /** The number a row that has only just been tapped into being will be given. */
   let provisional = settings.next_table_number;
 
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <span style={{ fontSize: 12, color: "var(--hint)" }}>
-        {fmt.tables(draft.tables.length)} · {fmt.seats(totalSeats)} · до {largest}
-      </span>
+    <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
+      <Note>
+        {fmt.tables(draft.tables.length)} · {fmt.seats(totalSeats)} · самый большой на {largest}
+      </Note>
 
       {draft.tables.map((table, index) => {
         const existing =
@@ -449,7 +439,8 @@ function TablesSection({
         const number = existing?.number ?? provisional++;
         const bookingsToday = existing?.bookings_today ?? 0;
         const zoneIndex = draft.zones.indexOf(table.zone);
-        const nextZone = draft.zones[(zoneIndex + 1) % Math.max(1, draft.zones.length)] ?? table.zone;
+        const nextZone =
+          draft.zones[(zoneIndex + 1) % Math.max(1, draft.zones.length)] ?? table.zone;
 
         const resize =
           (delta: number): Edit =>
@@ -468,14 +459,14 @@ function TablesSection({
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 8,
-              padding: "6px 6px 6px 12px",
+              gap: SPACE[2],
+              padding: `${SPACE[1] + 2}px ${SPACE[1] + 2}px ${SPACE[1] + 2}px ${SPACE[3]}px`,
               background: "var(--sec)",
-              borderRadius: RADIUS.chip,
+              borderRadius: RADIUS.md,
             }}
           >
-            <button
-              type="button"
+            <Pressable
+              ariaLabel={`Стол ${number}: сменить зону`}
               onClick={() =>
                 edit((next) => {
                   const target = next.tables[index];
@@ -485,23 +476,22 @@ function TablesSection({
               style={{
                 flex: 1,
                 minWidth: 0,
-                height: 44,
-                display: "flex",
                 flexDirection: "column",
+                alignItems: "flex-start",
                 justifyContent: "center",
                 gap: 1,
               }}
             >
-              <span style={{ fontSize: 14, fontWeight: 600, color: "var(--txt)" }}>
+              <span style={{ fontSize: TEXT.base, fontWeight: 600, color: "var(--txt)" }}>
                 Стол {number}
               </span>
-              <span style={{ fontSize: 11, color: "var(--link)" }}>{table.zone}</span>
-            </button>
+              <span style={{ fontSize: TEXT.xs, color: "var(--link)" }}>{table.zone}</span>
+            </Pressable>
 
             {bookingsToday > 0 ? (
               <span
                 style={{
-                  fontSize: 10,
+                  fontSize: TEXT.xs,
                   fontWeight: 600,
                   color: "var(--warn)",
                   whiteSpace: "nowrap",
@@ -520,7 +510,7 @@ function TablesSection({
               />
               <span
                 style={{
-                  fontSize: 14,
+                  fontSize: TEXT.base,
                   fontWeight: 600,
                   color: "var(--txt)",
                   minWidth: 26,
@@ -538,24 +528,21 @@ function TablesSection({
               />
             </div>
 
-            <button
-              type="button"
-              aria-label={`Убрать стол ${number}`}
+            <Pressable
+              ariaLabel={`Убрать стол ${number}`}
               disabled={!canRemove}
               onClick={() => edit(remove)}
               style={{
-                width: 38,
-                height: 44,
-                borderRadius: RADIUS.small,
+                width: TAP,
+                minHeight: TAP,
+                borderRadius: RADIUS.sm,
                 color: canRemove ? "var(--dest)" : "var(--hint)",
-                display: "flex",
-                alignItems: "center",
                 justifyContent: "center",
-                fontSize: 17,
+                fontSize: TEXT.xl,
               }}
             >
               ×
-            </button>
+            </Pressable>
           </div>
         );
       })}
@@ -571,28 +558,16 @@ function TablesSection({
         }
       />
 
-      <Note>Название стола меняет зону. Номера не повторяются.</Note>
-
-      {draft.max_party >= largest ? (
-        <Note tone="warn">Лимит брони не выше самого большого стола ({largest}).</Note>
-      ) : null}
+      <Note>
+        Название стола меняет зону. Убранный стол уходит из подбора, но остаётся в истории смен, и
+        его номер больше никому не достанется.
+      </Note>
     </section>
   );
 }
 
-function RulesSection({
-  draft,
-  limits,
-  editedWeekday,
-  edit,
-  allowed,
-}: {
-  draft: SettingsDraft;
-  limits: Limits;
-  editedWeekday: number;
-  edit: Apply;
-  allowed: Ask;
-}) {
+function RulesSection({ ctx }: { ctx: Context }) {
+  const { draft, limits, editedWeekday, edit, allowed } = ctx;
   const rules: {
     field: "turn_minutes" | "max_party" | "grace_minutes" | "horizon_days" | "remind_hours";
     label: string;
@@ -605,24 +580,14 @@ function RulesSection({
       step: 30,
       display: fmt.hours(draft.turn_minutes),
     },
-    {
-      field: "max_party",
-      label: "Компания до",
-      step: 1,
-      display: `${draft.max_party} чел.`,
-    },
+    { field: "max_party", label: "Компания до", step: 1, display: `${draft.max_party} чел.` },
     {
       field: "grace_minutes",
       label: "Ждём опоздавших",
       step: 5,
       display: `${draft.grace_minutes} мин`,
     },
-    {
-      field: "horizon_days",
-      label: "Бронь вперёд",
-      step: 1,
-      display: `${draft.horizon_days} дн.`,
-    },
+    { field: "horizon_days", label: "Бронь вперёд", step: 1, display: `${draft.horizon_days} дн.` },
     {
       field: "remind_hours",
       label: "Напомнить за",
@@ -632,7 +597,7 @@ function RulesSection({
   ];
 
   // The day being edited, not whatever day it happens to be on the device reading this: the note
-  // explains the hours in the panel above it.
+  // explains the hours in the section above it.
   const lastArrival = lastArrivalMinutes(draft, editedWeekday);
   const shortest = shortestShiftMinutes(draft);
   const turnBlocked =
@@ -642,11 +607,13 @@ function RulesSection({
     });
 
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+    <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
       {rules.map((rule) => {
-        const by = (delta: number): Edit => (next) => {
-          next[rule.field] += delta;
-        };
+        const by =
+          (delta: number): Edit =>
+          (next) => {
+            next[rule.field] += delta;
+          };
         return (
           <Stepper
             key={rule.field}
@@ -660,29 +627,23 @@ function RulesSection({
         );
       })}
 
-      <div
-        style={{
-          padding: "12px 14px",
-          background: "var(--sec)",
-          borderRadius: RADIUS.chip,
-          display: "flex",
-          flexDirection: "column",
-          gap: 9,
-        }}
-      >
-        <span style={{ fontSize: 15, color: "var(--txt)" }}>Шаг времени</span>
+      <Card padding={SPACE[3] + 2} gap={SPACE[2] + 1} style={{ background: "var(--sec)" }}>
+        <span style={{ fontSize: TEXT.lg, color: "var(--txt)" }}>Шаг времени</span>
         <Segmented
           background="var(--bg)"
+          label="Шаг времени"
           options={limits.slot_step_minutes.map((step) => ({
             value: step,
             label: `${step} мин`,
           }))}
           value={draft.slot_step_minutes}
-          onChange={(step) => edit((next) => {
-            next.slot_step_minutes = step;
-          })}
+          onChange={(step) =>
+            edit((next) => {
+              next.slot_step_minutes = step;
+            })
+          }
         />
-      </div>
+      </Card>
 
       <Note>
         Последняя бронь — {lastArrival === null ? "—" : fmt.time(lastArrival)}: закрытие минус
@@ -710,10 +671,10 @@ function ListSection({
   onChange: (items: string[]) => void;
 }) {
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+    <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
       <SectionLabel>{title}</SectionLabel>
       {items.map((text, index) => (
-        <div key={index} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <div key={index} style={{ display: "flex", alignItems: "center", gap: SPACE[1] + 2 }}>
           <TextField
             value={text}
             ariaLabel={`${title}: ${index + 1}`}
@@ -722,26 +683,23 @@ function ListSection({
               next[index] = value;
               onChange(next);
             }}
-            style={{ flex: 1, minWidth: 0, fontSize: 14 }}
+            style={{ flex: 1, minWidth: 0, fontSize: TEXT.base }}
           />
-          <button
-            type="button"
-            aria-label="Убрать"
+          <Pressable
+            ariaLabel="Убрать"
             disabled={items.length <= 1}
             onClick={() => onChange(items.filter((_, position) => position !== index))}
             style={{
-              width: 38,
-              height: 44,
-              borderRadius: RADIUS.small,
+              width: TAP,
+              minHeight: TAP,
+              borderRadius: RADIUS.sm,
               color: items.length > 1 ? "var(--dest)" : "var(--hint)",
-              display: "flex",
-              alignItems: "center",
               justifyContent: "center",
-              fontSize: 17,
+              fontSize: TEXT.xl,
             }}
           >
             ×
-          </button>
+          </Pressable>
         </div>
       ))}
       <CardAction label={addLabel} onClick={() => onChange([...items, placeholder])} />
@@ -749,25 +707,27 @@ function ListSection({
   );
 }
 
-function StaffSection({ draft, edit }: { draft: SettingsDraft; edit: Apply }) {
+function StaffSection({ ctx }: { ctx: Context }) {
+  const { draft, edit } = ctx;
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+    <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
       {draft.staff.map((member, index) => (
         <div
           key={member.username}
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 6,
-            padding: "0 0 0 14px",
+            gap: SPACE[1] + 2,
+            padding: `0 0 0 ${SPACE[3] + 2}px`,
             background: "var(--sec)",
-            borderRadius: RADIUS.chip,
+            borderRadius: RADIUS.md,
           }}
         >
-          <span style={{ flex: 1, fontSize: 15, color: "var(--txt)" }}>@{member.username}</span>
-          <button
-            type="button"
-            aria-label={`Убрать @${member.username}`}
+          <span style={{ flex: 1, fontSize: TEXT.lg, color: "var(--txt)" }}>
+            @{member.username}
+          </span>
+          <Pressable
+            ariaLabel={`Убрать @${member.username}`}
             disabled={draft.staff.length <= 1}
             onClick={() =>
               edit((next) => {
@@ -775,18 +735,16 @@ function StaffSection({ draft, edit }: { draft: SettingsDraft; edit: Apply }) {
               })
             }
             style={{
-              width: 44,
-              height: 48,
-              borderRadius: RADIUS.small,
+              width: TAP,
+              minHeight: 48,
+              borderRadius: RADIUS.sm,
               color: draft.staff.length > 1 ? "var(--dest)" : "var(--hint)",
-              display: "flex",
-              alignItems: "center",
               justifyContent: "center",
-              fontSize: 17,
+              fontSize: TEXT.xl,
             }}
           >
             ×
-          </button>
+          </Pressable>
         </div>
       ))}
       <AddStaff
@@ -796,7 +754,10 @@ function StaffSection({ draft, edit }: { draft: SettingsDraft; edit: Apply }) {
           })
         }
       />
-      <Note>Последнего убрать нельзя — иначе никто не войдёт.</Note>
+      <Note>
+        Доступ привязывается к аккаунту при первом входе. Последнего убрать нельзя — иначе никто не
+        войдёт.
+      </Note>
     </section>
   );
 }
@@ -807,31 +768,94 @@ function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
   const [pending, setPending] = useState("");
   const cleaned = pending.trim().replace(/^@/, "");
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: SPACE[1] + 2 }}>
       <TextField
         value={pending}
         placeholder="@username"
         onChange={setPending}
         style={{ flex: 1, minWidth: 0 }}
       />
-      <button
-        type="button"
+      <Pressable
         disabled={cleaned.length === 0}
         onClick={() => {
           onAdd(cleaned);
           setPending("");
         }}
         style={{
-          padding: "13px 18px",
-          borderRadius: RADIUS.chip,
+          padding: `0 ${SPACE[4] + 2}px`,
+          minHeight: TAP,
+          borderRadius: RADIUS.md,
           background: cleaned.length > 0 ? "var(--btn)" : "var(--chip)",
           color: cleaned.length > 0 ? "var(--btn-text)" : "var(--hint)",
-          fontSize: 14,
+          fontSize: TEXT.base,
           fontWeight: 600,
+          justifyContent: "center",
         }}
       >
         Добавить
-      </button>
+      </Pressable>
     </div>
   );
 }
+
+/**
+ * The bar that appears when the draft differs from what is saved.
+ *
+ * Only then: a save button that is always there and usually inert teaches people to ignore it. When
+ * the draft is illegal the button is inert and the line beside it names the first reason, so the
+ * refusal arrives before the request rather than after it.
+ */
+export function SaveBar({
+  reason,
+  saving,
+  onSave,
+  onRevert,
+}: {
+  reason: string | null;
+  saving: boolean;
+  onSave: () => void;
+  onRevert: () => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
+      {reason ? <Note tone="dest">Так сохранить нельзя. {reason}</Note> : null}
+      <div style={{ display: "flex", gap: SPACE[2] }}>
+        <Pressable
+          onClick={onRevert}
+          style={{
+            padding: `0 ${SPACE[4] + 2}px`,
+            minHeight: 50,
+            borderRadius: RADIUS.md,
+            background: "var(--sec)",
+            color: "var(--hint)",
+            fontSize: TEXT.lg,
+            fontWeight: 600,
+            justifyContent: "center",
+          }}
+        >
+          Вернуть
+        </Pressable>
+        <div style={{ flex: 1 }}>
+          <Pressable
+            disabled={reason !== null || saving}
+            onClick={onSave}
+            tone="card"
+            style={{
+              width: "100%",
+              minHeight: 50,
+              borderRadius: RADIUS.md,
+              background: reason === null ? "var(--btn)" : "var(--chip)",
+              color: reason === null ? "var(--btn-text)" : "var(--hint)",
+              fontSize: 16,
+              fontWeight: 600,
+              justifyContent: "center",
+            }}
+          >
+            {saving ? "Сохраняем…" : "Сохранить"}
+          </Pressable>
+        </div>
+      </div>
+    </div>
+  );
+}
+

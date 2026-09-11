@@ -207,3 +207,81 @@ export function shortestShiftMinutes(draft: SettingsDraft): number | null {
 export function differs(left: SettingsDraft, right: SettingsDraft): boolean {
   return JSON.stringify(left) !== JSON.stringify(right);
 }
+
+const WEEKDAY = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
+
+const SETTING_NAME: Record<NumericSetting, string> = {
+  turn_minutes: "Время стола",
+  max_party: "Размер компании",
+  horizon_days: "Горизонт брони",
+  remind_hours: "Напоминание",
+  grace_minutes: "Ожидание опоздавших",
+};
+
+function hoursWord(minutes: number): string {
+  const value = minutes / 60;
+  return Number.isInteger(value) ? `${value} ч` : `${value.toFixed(1)} ч`;
+}
+
+/**
+ * Why this proposal cannot be saved, in one sentence a manager can act on.
+ *
+ * Named reasons rather than "проверьте значения": a settings screen that refuses without saying
+ * which of fifteen controls is at fault is a screen people stop using. The wording lives here
+ * beside the rule it explains, so adding a rule and forgetting its sentence is a type error.
+ */
+export function reasonSentence(reason: Reason, draft: SettingsDraft): string {
+  switch (reason.kind) {
+    case "blank_name":
+      return "У бара нет названия.";
+    case "blank_address":
+      return "У бара нет адреса.";
+    case "open_out_of_range":
+      return `${WEEKDAY[reason.weekday] ?? "День"} открывается в час, который бар не принимает.`;
+    case "close_out_of_range":
+      return `${WEEKDAY[reason.weekday] ?? "День"} закрывается в час, который бар не принимает.`;
+    case "every_day_closed":
+      return "Бар не может быть закрыт всю неделю.";
+    case "shift_shorter_than_turn": {
+      const shortest = shortestShiftMinutes(draft);
+      const shortestText = shortest === null ? "—" : hoursWord(shortest);
+      return `Бронь ${hoursWord(draft.turn_minutes)} не помещается в самую короткую смену — ${shortestText}.`;
+    }
+    case "setting_out_of_range":
+      return `${SETTING_NAME[reason.setting]} вне допустимых значений.`;
+    case "slot_step_not_offered":
+      return "Такого шага времени бар не предлагает.";
+    case "no_zones":
+      return "Нужна хотя бы одна зона.";
+    case "duplicate_zone":
+      return `Зона «${reason.zone}» указана дважды.`;
+    case "no_tables":
+      return "Нужен хотя бы один стол.";
+    case "seats_out_of_range":
+      return `Стол ${reason.index + 1}: столько мест не бывает.`;
+    case "unknown_zone":
+      return `Стол ${reason.index + 1} стоит в зоне, которой нет.`;
+    case "max_party_exceeds_largest_table":
+      return `Компания до ${draft.max_party} не поместится: самый большой стол на ${reason.largest}.`;
+    case "no_message_templates":
+      return "Нужно хотя бы одно сообщение гостю.";
+    case "blank_message_template":
+      return "Пустое сообщение отправить нельзя.";
+    case "no_cancel_reasons":
+      return "Нужна хотя бы одна причина отмены.";
+    case "blank_cancel_reason":
+      return "Пустая причина отмены ничего не объясняет.";
+    case "no_staff":
+      return "Последнего из списка убрать нельзя — иначе никто не войдёт.";
+    case "malformed_staff_username":
+      return `@${reason.username} — не похоже на ник в Telegram.`;
+    case "duplicate_staff_username":
+      return `@${reason.username} в списке дважды.`;
+  }
+}
+
+/** The first thing wrong with this proposal, or null when nothing is. */
+export function firstReason(draft: SettingsDraft, limits: Limits): string | null {
+  const [reason] = reasonsAgainst(draft, limits);
+  return reason ? reasonSentence(reason, draft) : null;
+}

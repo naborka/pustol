@@ -29,7 +29,15 @@ export interface Insets {
 
 export const ZERO_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
 
+/**
+ * Every event that can move the ground under the layout.
+ *
+ * `viewportChanged` is the one that matters most and the one that was missing: the Android
+ * keyboard resizes the webview, and a shell sized from a height read once at start-up puts its
+ * main button under the keyboard and leaves it there.
+ */
 const SURFACE_EVENTS = [
+  "viewportChanged",
   "safeAreaChanged",
   "contentSafeAreaChanged",
   "fullscreenChanged",
@@ -44,15 +52,31 @@ export interface WebApp {
   version: string;
   isExpanded: boolean;
   isFullscreen?: boolean;
+  /**
+   * The height that stays put — the expanded viewport minus whatever Telegram might yet cover.
+   *
+   * The only height this app lays out against. `viewportHeight` grows and shrinks as the client
+   * animates, and `window.innerHeight` in the Telegram webview is taller than the part the user
+   * can actually see, which is what puts the main button under Telegram's own chrome.
+   */
   viewportStableHeight: number;
+  viewportHeight?: number;
   ready: () => void;
   expand: () => void;
+  /** Bot API 7.7 and later. Absent on older clients, where a vertical drag still collapses. */
+  disableVerticalSwipes?: () => void;
   close: () => void;
   onEvent: (event: string, handler: () => void) => void;
   offEvent: (event: string, handler: () => void) => void;
   openTelegramLink: (url: string) => void;
+  /**
+   * Declared but never called, and a test holds it that way.
+   *
+   * Fullscreen is the platform's to give: the user asks for it from Telegram's own menu, and this
+   * app follows along through `fullscreenChanged`. Requesting it on start-up made the app taller
+   * than the room it was given and was part of why its bottom bar ended up under Telegram's chrome.
+   */
   requestFullscreen?: () => void;
-  exitFullscreen?: () => void;
   setHeaderColor?: (color: string) => void;
   setBackgroundColor?: (color: string) => void;
   safeAreaInset?: Insets;
@@ -143,24 +167,40 @@ function readInsets(app: Pick<WebApp, "safeAreaInset" | "contentSafeAreaInset">)
   return combinedInsets(app.safeAreaInset, app.contentSafeAreaInset);
 }
 
+/** Everything about the surface the layout has to fit inside. */
+export interface Surface {
+  insets: Insets;
+  /** The height that stays put, in CSS pixels. Zero before Telegram has answered. */
+  stableHeight: number;
+}
+
+export const NO_SURFACE: Surface = { insets: ZERO_INSETS, stableHeight: 0 };
+
+/** The surface as Telegram currently reports it. */
+export function surfaceOf(app: WebApp): Surface {
+  return {
+    insets: readInsets(app),
+    stableHeight: Math.round(app.viewportStableHeight) || 0,
+  };
+}
+
 /**
- * Ready, expand, request fullscreen where the client has it, paint header/background, publish insets.
+ * Ready, expand, stop vertical swipes collapsing us, paint the chrome, publish the surface.
  *
- * Fullscreen makes Telegram's header transparent. It does not remove close / collapse / ··· —
- * those stay platform-owned. Insets keep our chrome out from under them.
+ * The order matters. `ready` before anything else, because a client that has not been told the app
+ * is drawn answers some of these with stale values. `expand` before measuring, because the height
+ * measured while collapsed is the wrong one. `disableVerticalSwipes` is feature-detected rather
+ * than version-sniffed: an older client simply does not have it, and a drag down a long list will
+ * collapse the app there — which is the platform's behaviour, not a bug we can paper over.
  */
-export function bootstrapTelegram(app: WebApp, onInsets: (insets: Insets) => void): () => void {
+export function bootstrapTelegram(app: WebApp, onSurface: (surface: Surface) => void): () => void {
   app.ready();
   app.expand();
+  app.disableVerticalSwipes?.();
   app.setHeaderColor?.("bg_color");
   app.setBackgroundColor?.("bg_color");
-  try {
-    app.requestFullscreen?.();
-  } catch {
-    // Expand-only is the fallback. fullscreenFailed is also listened for below.
-  }
 
-  const publish = () => onInsets(readInsets(app));
+  const publish = () => onSurface(surfaceOf(app));
   publish();
   for (const event of SURFACE_EVENTS) {
     app.onEvent(event, publish);

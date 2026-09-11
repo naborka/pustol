@@ -48,6 +48,7 @@ pub enum Status {
     Confirmed,
     Arrived,
     NoShow,
+    Left,
     Cancelled,
 }
 
@@ -57,6 +58,7 @@ impl From<BookingStatus> for Status {
             BookingStatus::Confirmed => Self::Confirmed,
             BookingStatus::Arrived => Self::Arrived,
             BookingStatus::NoShow => Self::NoShow,
+            BookingStatus::Left => Self::Left,
             BookingStatus::Cancelled => Self::Cancelled,
         }
     }
@@ -96,10 +98,16 @@ pub struct BarView {
     pub today_hours: Hours,
     /// The last wall-clock minute a party may arrive today, absent on a day off.
     pub last_arrival_minutes: Option<i32>,
+    /// The bar's own clock, in wall-clock minutes into today's shift.
+    ///
+    /// Sent rather than read off the device, because the phone in the guest's hand may be in a
+    /// different timezone from the bar and is under nobody's control. "Открыт до 02:00" is a claim
+    /// about the bar, so it is answered by the bar.
+    pub now_minutes: i32,
 }
 
 impl BarView {
-    pub fn of(config: &ValidConfig, today: ServiceDay) -> Self {
+    pub fn of(config: &ValidConfig, today: ServiceDay, now: chrono::DateTime<chrono::Utc>) -> Self {
         let hours = config.week.for_service_day(today);
         Self {
             name: config.name.clone(),
@@ -113,6 +121,7 @@ impl BarView {
             today: today.date(),
             today_hours: hours.into(),
             last_arrival_minutes: config.last_arrival_minutes(today.weekday()),
+            now_minutes: minutes_within(today, now, config.timezone),
         }
     }
 }
@@ -126,6 +135,17 @@ pub struct Session {
     pub bar: BarView,
     pub booking: Option<GuestBooking>,
     pub bookable_days: Vec<NaiveDate>,
+    /// The earliest arrival time tonight still has, absent when it has none.
+    ///
+    /// The home screen's one honest sentence about this evening — "Сегодня свободно с 21:30" —
+    /// answered here so the first screen still costs one request.
+    pub today_free_from_minutes: Option<i32>,
+    /// The party size that sentence speaks for, and the size the picker opens on.
+    ///
+    /// Sent rather than agreed by comment. A promise has to be about a definite party, and if the
+    /// two ends picked their own number the card would promise a time the very next screen did not
+    /// keep.
+    pub today_free_for_party: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +207,26 @@ pub struct Availability {
     pub free_count: usize,
 }
 
+/// One chip on the guest's day rail.
+///
+/// A day says what it holds before it is tapped, because a day that turns out to be empty *after*
+/// a tap has cost the guest a screen to find out. The rail is every day of the booking horizon,
+/// shut ones included: a rail that silently dropped them would be a different length every week.
+#[derive(Debug, Serialize)]
+pub struct DayOffer {
+    pub service_date: NaiveDate,
+    pub closed: bool,
+    /// The earliest arrival time still free for this party, absent when the day holds none.
+    pub free_from_minutes: Option<i32>,
+}
+
+/// The whole rail, for one party size.
+#[derive(Debug, Serialize)]
+pub struct DayRail {
+    pub party_size: i32,
+    pub days: Vec<DayOffer>,
+}
+
 impl Availability {
     pub fn of(
         day: ServiceDay,
@@ -232,12 +272,23 @@ pub struct ShiftBooking {
     pub table_number: Option<i32>,
     pub table_zone: Option<String>,
     pub start_minutes: i32,
+    /// The end of the window promised to the guest. What "Когда 21:00 — 23:00" reads from, and
+    /// never shortened by what happened on the night.
     pub end_minutes: i32,
+    /// The minute the table went back into the pool, absent while the booking still holds it.
+    ///
+    /// The screen's half of the one occupancy rule: the block on the timeline stops here, the
+    /// status line says "Ушли в 21:20", and the shift's occupancy figure counts up to here. A
+    /// screen that drew the promised window instead would show a table as busy that the server
+    /// has already sold to somebody else.
+    pub released_minutes: Option<i32>,
     pub party_size: i32,
     pub guest_name: String,
     pub guest_username: Option<String>,
     pub status: Status,
     pub source: Source,
+    /// What staff wrote on this booking. Staff-facing only: nothing sends it anywhere.
+    pub note: Option<String>,
     /// Whether the bot could ever message this guest. False for a booking taken at the door, which
     /// has no Telegram account behind it at all.
     pub reachable_by_bot: bool,
@@ -248,6 +299,7 @@ pub struct ShiftBooking {
 pub enum Source {
     App,
     Staff,
+    Walk,
 }
 
 impl From<BookingSource> for Source {
@@ -255,6 +307,7 @@ impl From<BookingSource> for Source {
         match source {
             BookingSource::App => Self::App,
             BookingSource::Staff => Self::Staff,
+            BookingSource::Walk => Self::Walk,
         }
     }
 }
@@ -269,11 +322,16 @@ impl ShiftBooking {
             table_zone: record.table_zone.clone(),
             start_minutes: minutes_within(day, record.booking.window.start(), config.timezone),
             end_minutes: minutes_within(day, record.booking.window.end(), config.timezone),
+            released_minutes: record
+                .booking
+                .released_at
+                .map(|released| minutes_within(day, released, config.timezone)),
             party_size: record.booking.party_size,
             guest_name: record.guest_name.clone(),
             guest_username: record.guest_username.clone(),
             status: record.booking.status.into(),
             source: record.source.into(),
+            note: record.note.clone(),
             reachable_by_bot: record.has_telegram_account(),
         }
     }
@@ -298,6 +356,14 @@ pub struct ShiftStats {
     pub free_now: Option<usize>,
 }
 
+/// One row of the staff day sheet.
+#[derive(Debug, Serialize)]
+pub struct ShiftDay {
+    pub service_date: NaiveDate,
+    pub closed: bool,
+    pub bookings: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ShiftView {
     pub service_date: NaiveDate,
@@ -307,6 +373,18 @@ pub struct ShiftView {
     pub stats: ShiftStats,
     /// Where to draw the "now" line, absent for a shift that is not running.
     pub now_minutes: Option<i32>,
+    /// The largest party the room could seat this minute, absent when none fits — and absent on
+    /// any shift but the one running, where "now" means nothing.
+    ///
+    /// Answered here, by the allocator, rather than inferred from a count of free tables: seven
+    /// free two-tops do not seat the four people at the door, and a bartender who is sent to
+    /// another view to find that out has been failed by the one he was on.
+    pub largest_party_seatable_now: Option<i32>,
+    /// Every day staff can reach from here, with what is on. Longer than the guest's horizon on
+    /// purpose: a telephone booking for next month is not a thing to argue about.
+    pub days: Vec<ShiftDay>,
+    /// How far ahead guests may book, so the day sheet can say where their horizon ends.
+    pub guest_horizon_days: i32,
     pub cancel_reasons: Vec<String>,
     pub message_templates: Vec<String>,
 }
@@ -398,6 +476,23 @@ pub struct ShiftQuery {
 #[derive(Debug, Deserialize)]
 pub struct AttendanceRequest {
     pub attendance: Attendance,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NoteRequest {
+    /// What staff want to remember, or `null` to rub it out.
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalkInRequest {
+    pub service_date: NaiveDate,
+    pub party_size: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DayRailQuery {
+    pub party_size: i32,
 }
 
 #[derive(Debug, Deserialize)]

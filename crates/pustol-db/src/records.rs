@@ -26,6 +26,8 @@ pub enum BookingSource {
     App,
     /// Staff entered it: by phone, or at the door.
     Staff,
+    /// Nobody booked it. Staff sat a party that walked in, at the minute they sat down.
+    Walk,
 }
 
 /// Storage's mirror of [`BookingStatus`].
@@ -39,6 +41,7 @@ pub enum StoredStatus {
     Confirmed,
     Arrived,
     NoShow,
+    Left,
     Cancelled,
 }
 
@@ -48,6 +51,7 @@ impl From<BookingStatus> for StoredStatus {
             BookingStatus::Confirmed => Self::Confirmed,
             BookingStatus::Arrived => Self::Arrived,
             BookingStatus::NoShow => Self::NoShow,
+            BookingStatus::Left => Self::Left,
             BookingStatus::Cancelled => Self::Cancelled,
         }
     }
@@ -59,6 +63,7 @@ impl From<StoredStatus> for BookingStatus {
             StoredStatus::Confirmed => Self::Confirmed,
             StoredStatus::Arrived => Self::Arrived,
             StoredStatus::NoShow => Self::NoShow,
+            StoredStatus::Left => Self::Left,
             StoredStatus::Cancelled => Self::Cancelled,
         }
     }
@@ -74,12 +79,14 @@ pub(crate) struct BookingRow {
     pub service_date: NaiveDate,
     pub starts_at: DateTime<Utc>,
     pub ends_at: DateTime<Utc>,
+    pub left_at: Option<DateTime<Utc>>,
     pub party_size: i32,
     pub guest_name: String,
     pub guest_username: Option<String>,
     pub telegram_user_id: Option<i64>,
     pub status: StoredStatus,
     pub source: BookingSource,
+    pub note: Option<String>,
     pub cancel_reason: Option<String>,
 }
 
@@ -95,6 +102,8 @@ pub struct BookingRecord {
     pub guest_username: Option<String>,
     pub telegram_user_id: Option<TelegramUserId>,
     pub source: BookingSource,
+    /// What staff wrote on this booking: "День рождения", "У окна". Never sent to the guest.
+    pub note: Option<String>,
     pub cancel_reason: Option<String>,
 }
 
@@ -117,6 +126,7 @@ impl TryFrom<BookingRow> for BookingRecord {
                 table_id: row.table_id.map(TableId),
                 service_day: ServiceDay::new(row.service_date),
                 window: Interval::new(row.starts_at, row.ends_at)?,
+                released_at: row.left_at,
                 party_size: row.party_size,
                 status: row.status.into(),
             },
@@ -126,6 +136,7 @@ impl TryFrom<BookingRow> for BookingRecord {
             guest_username: row.guest_username,
             telegram_user_id: row.telegram_user_id.map(TelegramUserId),
             source: row.source,
+            note: row.note,
             cancel_reason: row.cancel_reason,
         })
     }
@@ -161,10 +172,15 @@ impl From<BlockRow> for BlockRecord {
 }
 
 /// The domain views of a set of records, for handing to the allocator.
-pub(crate) fn bookings_of(records: &[BookingRecord]) -> Vec<Booking> {
+///
+/// Public because the API asks the allocator its own questions — "who fits right now" is one — and
+/// a second hand-rolled projection up there would be a second chance to leave something out.
+#[must_use]
+pub fn bookings_of(records: &[BookingRecord]) -> Vec<Booking> {
     records.iter().map(|record| record.booking.clone()).collect()
 }
 
-pub(crate) fn blocks_of(records: &[BlockRecord]) -> Vec<TableBlock> {
+#[must_use]
+pub fn blocks_of(records: &[BlockRecord]) -> Vec<TableBlock> {
     records.iter().map(|record| record.block.clone()).collect()
 }

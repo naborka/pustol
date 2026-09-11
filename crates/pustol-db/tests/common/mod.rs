@@ -205,6 +205,11 @@ pub fn morning() -> DateTime<Utc> {
     utc(2026, 7, 30, 6, 0)
 }
 
+/// The instant a wall-clock minute of `day` happens, in the fixture bar's timezone.
+pub fn at(day: ServiceDay, minutes: i32) -> DateTime<Utc> {
+    pustol_domain::resolve(day, minutes, BELGRADE).expect("fixture times exist")
+}
+
 pub fn numbered(tables: &[BarTable], number: i32) -> &BarTable {
     tables
         .iter()
