@@ -239,7 +239,7 @@ async fn set_note(
     Ok(Json(ShiftBooking::of(&record, &config)))
 }
 
-/// Seats a party that walked in, at the minute they sat down.
+/// Seats a party that walked in, at the minute they sat down, at the table staff chose.
 async fn seat_walk_in(
     State(state): State<AppState>,
     _staff: Staff,
@@ -251,6 +251,7 @@ async fn seat_walk_in(
             state.bar,
             ServiceDay::new(request.service_date),
             request.party_size,
+            request.table_id.map(TableId),
             state.now(),
         )
         .await?;

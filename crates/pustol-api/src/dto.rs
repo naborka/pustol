@@ -488,6 +488,10 @@ pub struct NoteRequest {
 pub struct WalkInRequest {
     pub service_date: NaiveDate,
     pub party_size: i32,
+    /// The table staff chose while looking at the room. Absent asks the room to choose, which is
+    /// the same best fit every other booking gets.
+    #[serde(default)]
+    pub table_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]

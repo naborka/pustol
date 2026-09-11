@@ -157,6 +157,9 @@ export default function Page() {
   const [manualAvailability, setManualAvailability] = useState<Availability | null>(null);
   const [manualFailed, setManualFailed] = useState(false);
   const [walkInParty, setWalkInParty] = useState(DEFAULT_PARTY);
+  // A preference, not the decision: the sheet resolves it against the tables actually free, so a
+  // table that has stopped fitting cannot be the one the button then asks for.
+  const [walkInTable, setWalkInTable] = useState<string | null>(null);
 
   /**
    * Shows an outcome and clears it.
@@ -591,9 +594,9 @@ export default function Page() {
     );
   };
 
-  const seatWalkIn = async () => {
+  const seatWalkIn = async (tableId: string) => {
     try {
-      const created = await api.seatWalkIn(shiftDate, walkInParty);
+      const created = await api.seatWalkIn(shiftDate, walkInParty, tableId);
       haptics.success();
       closeSheet();
       await afterShiftChange({ text: `Посадили за стол ${created.table_number}.` });
@@ -659,6 +662,7 @@ export default function Page() {
         isToday={isToday}
         onWalkIn={() => {
           setWalkInParty(DEFAULT_PARTY);
+          setWalkInTable(null);
           setSheet({ kind: "walkIn" });
         }}
         onManual={() => setSheet({ kind: "manual" })}
@@ -769,9 +773,11 @@ export default function Page() {
             maxParty={bar.max_party}
             turnMinutes={bar.turn_minutes}
             partySize={walkInParty}
+            chosenTableId={walkInTable}
             onClose={closeSheet}
             onPartySize={setWalkInParty}
-            onSeat={() => void seatWalkIn()}
+            onChooseTable={setWalkInTable}
+            onSeat={(tableId) => void seatWalkIn(tableId)}
           />
 
           <ManualBookingSheet

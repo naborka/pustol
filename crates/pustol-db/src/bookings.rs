@@ -1,7 +1,7 @@
 //! Taking bookings, moving them, and closing tables.
 
 use chrono::{DateTime, Utc};
-use pustol_domain::allocator::BookingId;
+use pustol_domain::allocator::{Assignment, BookingId};
 use pustol_domain::config::ValidConfig;
 use pustol_domain::schedule::TableId;
 use pustol_domain::service_day::ServiceDay;
@@ -564,11 +564,18 @@ impl Store {
     ///
     /// It is the same allocator underneath, over the same window the party will actually hold, so
     /// the table this takes is the table the shift's own "who fits" line promised.
+    ///
+    /// `table` is the one staff chose while looking at the room — the bartender can see that the
+    /// couple asked for the window seat, and the allocator cannot. It is checked against the same
+    /// list the allocator picks from, inside the same transaction, so a chosen table is exactly as
+    /// safe as an allocated one: two bartenders tapping the same table at the same moment is a
+    /// race one of them loses, not a table sold twice. Leaving it out asks the room to choose.
     pub async fn seat_walk_in(
         &self,
         bar: BarId,
         day: ServiceDay,
         party_size: i32,
+        table: Option<TableId>,
         now: DateTime<Utc>,
     ) -> Result<CreatedBooking> {
         let mut transaction = self.pool().begin().await?;
@@ -584,7 +591,7 @@ impl Store {
         let window = Interval::from_duration(now, config.turn_minutes)?;
         let bookings = load_window(&mut transaction, bar, day).await?;
         let blocks = load_blocks(&mut transaction, bar, day).await?;
-        let seat = pustol_domain::allocator::assign(&pustol_domain::allocator::Request {
+        let request = pustol_domain::allocator::Request {
             party_size,
             window,
             service_day: day,
@@ -592,8 +599,21 @@ impl Store {
             bookings: &bookings_of(&bookings),
             blocks: &blocks_of(&blocks),
             ignoring: None,
-        })
-        .ok_or(Error::NoTableFree { party_size })?;
+        };
+        let free = pustol_domain::free_tables(&request);
+        let seat = match table {
+            Some(chosen) => free
+                .iter()
+                .copied()
+                .find(|candidate| candidate.id == chosen)
+                .map(Assignment::of)
+                .ok_or(Error::ChosenTableNotFree)?,
+            None => free
+                .first()
+                .copied()
+                .map(Assignment::of)
+                .ok_or(Error::NoTableFree { party_size })?,
+        };
 
         let id = insert_booking(
             &mut transaction,

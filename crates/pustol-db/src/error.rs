@@ -26,6 +26,12 @@ pub enum Error {
     #[error("no table is free for a party of {party_size} at that time")]
     NoTableFree { party_size: i32 },
 
+    /// The table staff picked is not one this party may have: too small, closed, taken, or no
+    /// longer part of the room. Separate from [`Error::NoTableFree`] because the two ask for
+    /// different things — pick another table, against find room another way.
+    #[error("that table is not free for this party")]
+    ChosenTableNotFree,
+
     /// A party larger than the bar accepts through the app.
     #[error("a party of {party_size} is above this bar's limit of {max_party}")]
     PartyTooLarge { party_size: i32, max_party: i32 },

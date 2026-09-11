@@ -118,6 +118,16 @@ pub struct Assignment {
     pub number: i32,
 }
 
+impl Assignment {
+    #[must_use]
+    pub const fn of(table: &BarTable) -> Self {
+        Self {
+            table_id: table.id,
+            number: table.number,
+        }
+    }
+}
+
 /// Everything allocation is allowed to look at.
 #[derive(Clone, Copy, Debug)]
 pub struct Request<'a> {
@@ -136,6 +146,27 @@ pub struct Request<'a> {
     pub ignoring: Option<BookingId>,
 }
 
+/// Every table this party could be seated at, smallest first, ties by printed number.
+///
+/// The one definition of "available" in the system. A table is on this list exactly when the room
+/// may put this party at it: it exists, it seats them, it is open tonight, and nobody holds it for
+/// any part of the window. [`assign`] is the first of them, and staff choosing a table for
+/// themselves are held to membership of the same list — so the room's own pick and the list the
+/// screen offers cannot disagree about what is free.
+#[must_use]
+pub fn free_tables<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
+    let mut candidates: Vec<&BarTable> = request
+        .tables
+        .iter()
+        .filter(|table| table.is_active())
+        .filter(|table| table.seats_party(request.party_size))
+        .filter(|table| !is_blocked(table.id, request.service_day, request.blocks))
+        .filter(|table| free_during(table.id, request))
+        .collect();
+    candidates.sort_unstable_by_key(|table| (table.seats, table.number));
+    candidates
+}
+
 /// Picks the table for a party, or `None` when the room cannot take them.
 ///
 /// Smallest table that fits, ties broken by printed number. Best-fit is what keeps the large
@@ -145,22 +176,7 @@ pub struct Request<'a> {
 /// replayed in a test and in a support conversation.
 #[must_use]
 pub fn assign(request: &Request<'_>) -> Option<Assignment> {
-    let mut candidates: Vec<&BarTable> = request
-        .tables
-        .iter()
-        .filter(|table| table.is_active())
-        .filter(|table| table.seats_party(request.party_size))
-        .filter(|table| !is_blocked(table.id, request.service_day, request.blocks))
-        .collect();
-    candidates.sort_unstable_by_key(|table| (table.seats, table.number));
-
-    candidates
-        .into_iter()
-        .find(|table| free_during(table.id, request))
-        .map(|table| Assignment {
-            table_id: table.id,
-            number: table.number,
-        })
+    free_tables(request).first().copied().map(Assignment::of)
 }
 
 fn is_blocked(table_id: TableId, service_day: ServiceDay, blocks: &[TableBlock]) -> bool {
@@ -333,6 +349,41 @@ mod tests {
         let room = Room::new(vec![table(7, 4), table(3, 4), table(5, 4)]);
         let chosen = assign(&room.request(4, window((18, 0), (20, 0)))).expect("all free");
         assert_eq!(chosen.number, 3);
+    }
+
+    #[test]
+    fn offers_every_table_the_party_could_take_in_the_order_the_room_would_take_them() {
+        let room = Room::new(vec![table(1, 6), table(2, 2), table(3, 4)]);
+        let offered: Vec<i32> = free_tables(&room.request(2, window((18, 0), (20, 0))))
+            .iter()
+            .map(|table| table.number)
+            .collect();
+        assert_eq!(offered, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn offers_nothing_a_party_could_not_actually_be_seated_at() {
+        // Too small, retired, closed for the shift, taken for part of the window: four reasons a
+        // table is not on offer, and the same four the room's own pick obeys.
+        let mut room = Room::new(vec![
+            table(1, 2),
+            retired(2, 4),
+            table(3, 4),
+            table(4, 4),
+            table(5, 4),
+        ]);
+        room.blocks.push(TableBlock {
+            table_id: room.tables[3].id,
+            service_day: day(),
+        });
+        room.bookings
+            .push(booking(Some(&room.tables[4]), window((19, 0), (21, 0)), 4));
+
+        let offered: Vec<i32> = free_tables(&room.request(4, window((18, 0), (20, 0))))
+            .iter()
+            .map(|table| table.number)
+            .collect();
+        assert_eq!(offered, vec![3]);
     }
 
     #[test]

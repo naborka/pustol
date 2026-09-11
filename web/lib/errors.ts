@@ -32,6 +32,7 @@ const GUEST: Record<string, string> = {
 const STAFF: Record<string, string> = {
   ...GUEST,
   no_table_free: "На это время нет свободного стола для такой компании.",
+  chosen_table_not_free: "Этот стол только что заняли или закрыли. Выберите другой.",
   not_an_arrival_time: "Бар в это время не работает.",
   party_too_large: "Компания больше лимита. Поднимите лимит в настройках или посадите вручную.",
   shift_not_bookable: "В этот день бар закрыт.",

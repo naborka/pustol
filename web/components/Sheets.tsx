@@ -23,7 +23,7 @@ import type {
   ShiftView,
 } from "@/lib/api";
 import * as fmt from "@/lib/format";
-import { freeTablesDuring } from "@/lib/occupancy";
+import { walkInOffers } from "@/lib/occupancy";
 import { standingOf, statusLabel } from "@/lib/status";
 import { openChatWith } from "@/lib/telegram";
 import { RADIUS, SPACE, TEXT } from "@/lib/tokens";
@@ -552,9 +552,14 @@ export function DaySheet({
 /**
  * A party that walked in.
  *
- * The app names the table it would use before anybody commits, because the bartender is about to
- * walk somebody across a room and needs to know where to. It is the same allocator that answers
- * the shift's own "who fits" line, so the two can never offer different tables.
+ * The app lists every table the party could be put at and starts on the one the room would have
+ * chosen itself, because the bartender is about to walk somebody across a room and is the only
+ * person who can see that the couple asked for the corner. It is the same rule that answers the
+ * shift's own "who fits" line, so the list and the pulse can never disagree.
+ *
+ * A free table the party is too large for is drawn too, greyed, with the reason on it: a
+ * bartender looking at an empty room and reading «свободного стола нет» would be reading a screen
+ * that has lost the plot.
  */
 export function WalkInSheet({
   open,
@@ -562,8 +567,10 @@ export function WalkInSheet({
   maxParty,
   turnMinutes,
   partySize,
+  chosenTableId,
   onClose,
   onPartySize,
+  onChooseTable,
   onSeat,
 }: {
   open: boolean;
@@ -571,13 +578,21 @@ export function WalkInSheet({
   maxParty: number;
   turnMinutes: number;
   partySize: number;
+  chosenTableId: string | null;
   onClose: () => void;
   onPartySize: (size: number) => void;
-  onSeat: () => void;
+  onChooseTable: (tableId: string) => void;
+  onSeat: (tableId: string) => void;
 }) {
   if (!shift || shift.now_minutes === null) return null;
   const until = shift.now_minutes + turnMinutes;
-  const table = chooseWalkInTable(shift, partySize, turnMinutes);
+  const offers = walkInOffers(shift, partySize, turnMinutes);
+  const seatable = offers.filter((offer) => offer.fits);
+  // Read back off the list rather than kept as state of its own: a table that has stopped being
+  // available — the party grew, somebody else took it — is simply no longer the chosen one, and
+  // there is no stale choice left anywhere to reset.
+  const chosen =
+    seatable.find((offer) => offer.table.id === chosenTableId)?.table ?? seatable[0]?.table ?? null;
 
   return (
     <Sheet
@@ -587,9 +602,11 @@ export function WalkInSheet({
       footer={
         <CardAction
           tone="primary"
-          disabled={table === null}
-          label={table ? `Посадить за стол ${table.number}` : "Посадить некуда"}
-          onClick={onSeat}
+          disabled={chosen === null}
+          label={chosen ? `Посадить за стол ${chosen.number}` : "Посадить некуда"}
+          onClick={() => {
+            if (chosen) onSeat(chosen.id);
+          }}
         />
       }
     >
@@ -601,48 +618,87 @@ export function WalkInSheet({
           <PartySizeGrid max={maxParty} value={partySize} onChange={onPartySize} />
         </div>
 
-        {table ? (
-          <Card gap={SPACE[1] + 2}>
-            <span style={{ fontSize: TEXT.xl, fontWeight: 700, color: "var(--txt)" }}>
-              Стол {table.number} · {table.zone}
-            </span>
-            <Note>
-              {fmt.seats(table.seats)}, занят до {fmt.time(until)}. Самый маленький подходящий —
-              большие остаются для больших компаний.
-            </Note>
-          </Card>
-        ) : (
+        {chosen === null ? (
           <Card gap={SPACE[1] + 2}>
             <span style={{ fontSize: TEXT.xl, fontWeight: 700, color: "var(--warn)" }}>
               Свободного стола нет
             </span>
-            <Note>Все подходящие столы заняты. Освободите стол или предложите подождать.</Note>
+            <Note>
+              {offers.length === 0
+                ? "Все подходящие столы заняты. Освободите стол или предложите подождать."
+                : "Свободные столы малы для такой компании. Освободите стол побольше или предложите подождать."}
+            </Note>
           </Card>
-        )}
+        ) : null}
+
+        {offers.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
+            <SectionLabel>{chosen ? "Куда сажаем" : "Свободные столы"}</SectionLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: SPACE[1] + 2 }}>
+              {offers.map((offer) => (
+                <TableChoice
+                  key={offer.table.id}
+                  table={offer.table}
+                  fits={offer.fits}
+                  chosen={offer.table.id === chosen?.id}
+                  onClick={() => onChooseTable(offer.table.id)}
+                />
+              ))}
+            </div>
+            {chosen ? (
+              <Note>
+                Сверху — самый маленький подходящий: большие столы остаются для больших компаний.
+                Стол будет занят до {fmt.time(until)}.
+              </Note>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </Sheet>
   );
 }
 
-/**
- * The table the walk-in would take: smallest that fits, free for the whole turn from now.
- *
- * The same rule as the server's, so the sheet can name a table before the request is made — a
- * bartender is about to walk somebody across a room and needs to know where to. The server runs it
- * again inside the transaction and has the last word, which is what makes two bartenders tapping
- * at the same moment safe rather than merely unlikely.
- */
-export function chooseWalkInTable(
-  shift: ShiftView,
-  partySize: number,
-  turnMinutes: number,
-): ShiftTable | null {
-  const now = shift.now_minutes;
-  if (now === null) return null;
+/** One table a party could be put at, or one standing empty that they do not fit at. */
+function TableChoice({
+  table,
+  fits,
+  chosen,
+  onClick,
+}: {
+  table: ShiftTable;
+  fits: boolean;
+  chosen: boolean;
+  onClick: () => void;
+}) {
   return (
-    freeTablesDuring(shift.tables, shift.bookings, now, now + turnMinutes).find(
-      (table) => table.seats >= partySize,
-    ) ?? null
+    <Pressable
+      ariaPressed={chosen}
+      disabled={!fits}
+      onClick={onClick}
+      tone="card"
+      style={{
+        justifyContent: "space-between",
+        gap: SPACE[3],
+        padding: `${SPACE[2]}px ${SPACE[3]}px`,
+        borderRadius: RADIUS.sm,
+        background: chosen ? "var(--btn)" : "var(--sec)",
+        color: chosen ? "var(--btn-text)" : "var(--txt)",
+      }}
+    >
+      <span style={{ fontSize: TEXT.base, fontWeight: 600 }}>
+        Стол {table.number} · {table.zone}
+      </span>
+      <span
+        style={{
+          fontSize: TEXT.sm,
+          fontWeight: 600,
+          color: chosen ? "var(--btn-text)" : fits ? "var(--hint)" : "var(--warn)",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {fits ? fmt.seats(table.seats) : `${fmt.seats(table.seats)} · мало мест`}
+      </span>
+    </Pressable>
   );
 }
 

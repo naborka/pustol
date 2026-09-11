@@ -19,8 +19,8 @@ import {
   peakHour,
   seatedGuestsAt,
   shiftTotals,
+  walkInOffers,
 } from "../occupancy";
-import { chooseWalkInTable } from "@/components/Sheets";
 
 function table(id: string, number: number, seats: number): ShiftTable {
   return { id, number, seats, zone: "Зал", blocked_because: null };
@@ -108,10 +108,12 @@ describe("a party that leaves at 21:20", () => {
 
     // The walk-in sheet would not have offered the small table before they left, and does after.
     const before = shift({ bookings: [booking()], now_minutes: 1_279 });
-    expect(chooseWalkInTable(before, 2, 120)?.number).toBe(2);
-    expect(chooseWalkInTable(shift({ bookings: [gone], now_minutes: 1_280 }), 2, 120)?.number).toBe(
-      1,
-    );
+    expect(walkInOffers(before, 2, 120).map((offer) => offer.table.number)).toEqual([2]);
+    expect(
+      walkInOffers(shift({ bookings: [gone], now_minutes: 1_280 }), 2, 120).map(
+        (offer) => offer.table.number,
+      ),
+    ).toEqual([1, 2]);
 
     // And the block on the timeline stops at 21:20 rather than at 22:00.
     expect(occupancyEnd(gone) - gone.start_minutes).toBe(80);
@@ -190,5 +192,40 @@ describe("holding a table over a stretch", () => {
     const first = booking({ start_minutes: 1_200, end_minutes: 1_320 });
     expect(holdsDuring(first, 1_320, 1_440)).toBe(false);
     expect(holdsDuring(first, 1_319, 1_440)).toBe(true);
+  });
+});
+
+describe("the tables offered to a party at the door", () => {
+  it("lists every free table, the ones the party fits at first", () => {
+    // Free-but-too-small tables are still drawn. A bartender looking at an empty room and reading
+    // «свободного стола нет» is being told the app has lost the plot; the reason is the answer.
+    const room = shift({
+      tables: [table("t1", 1, 2), table("t2", 2, 6), table("t3", 3, 4)],
+      now_minutes: 1_280,
+    });
+    expect(walkInOffers(room, 3, 120).map((offer) => [offer.table.number, offer.fits])).toEqual([
+      [3, true],
+      [2, true],
+      [1, false],
+    ]);
+  });
+
+  it("leaves out what nobody can be put at: taken, or closed for the evening", () => {
+    const room = shift({
+      tables: [
+        table("t1", 1, 2),
+        { ...table("t2", 2, 6), blocked_because: "Дождь" },
+        table("t3", 3, 4),
+      ],
+      bookings: [
+        booking({ table_id: "t3", table_number: 3, start_minutes: 1_300, end_minutes: 1_420 }),
+      ],
+      now_minutes: 1_280,
+    });
+    expect(walkInOffers(room, 2, 120).map((offer) => offer.table.number)).toEqual([1]);
+  });
+
+  it("has nothing to offer on an evening that is not running", () => {
+    expect(walkInOffers(shift({ now_minutes: null }), 2, 120)).toEqual([]);
   });
 });

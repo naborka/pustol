@@ -5,7 +5,8 @@ mod common;
 
 use pustol_db::bookings::Attendance;
 use pustol_db::{BookingSource, Error};
-use pustol_domain::{BookingStatus, SlotAvailability};
+use pustol_domain::{BookingStatus, SlotAvailability, TableId};
+use uuid::Uuid;
 
 use common::{at, config_with, default_bar, default_config, fresh_account, guest_booking, morning, staff_booking, store, table, thursday, utc};
 
@@ -573,7 +574,7 @@ async fn a_walk_in_takes_the_table_the_shift_said_would_fit() {
     // Half past eight on the Thursday evening: the shift is running.
     let evening = at(thursday(), 1230);
     let seated = store
-        .seat_walk_in(bar, thursday(), 2, evening)
+        .seat_walk_in(bar, thursday(), 2, None, evening)
         .await
         .expect("a table fits");
 
@@ -590,6 +591,69 @@ async fn a_walk_in_takes_the_table_the_shift_said_would_fit() {
 }
 
 #[tokio::test]
+async fn a_walk_in_sits_where_staff_put_them_rather_than_where_the_room_would() {
+    let store = store().await;
+    let six_top = table(2, 6, "Зал");
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 2, "Бар"), six_top.clone()], "anna_mgr"),
+    )
+    .await;
+    let evening = at(thursday(), 1230);
+
+    let seated = store
+        .seat_walk_in(bar, thursday(), 2, Some(six_top.id), evening)
+        .await
+        .expect("the six top is free");
+
+    assert_eq!(
+        seated.record.table_number,
+        Some(2),
+        "a couple at the six top because somebody looked at the room and decided so"
+    );
+}
+
+#[tokio::test]
+async fn a_table_staff_cannot_have_is_refused_by_its_own_name() {
+    let store = store().await;
+    let two_top = table(1, 2, "Бар");
+    let closed = table(2, 4, "Зал");
+    let taken = table(3, 4, "Зал");
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(
+            vec![two_top.clone(), closed.clone(), taken.clone()],
+            "anna_mgr",
+        ),
+    )
+    .await;
+    let evening = at(thursday(), 1230);
+    store
+        .block_tables(bar, thursday(), &[closed.id], "Дождь", None, evening)
+        .await
+        .expect("closes");
+    store
+        .seat_walk_in(bar, thursday(), 4, Some(taken.id), evening)
+        .await
+        .expect("free until now");
+
+    for (table_id, why) in [
+        (two_top.id, "too small for four"),
+        (closed.id, "closed for the evening"),
+        (taken.id, "somebody is sitting there"),
+        (TableId(Uuid::nil()), "not a table this bar has"),
+    ] {
+        let refused = store
+            .seat_walk_in(bar, thursday(), 4, Some(table_id), evening)
+            .await;
+        assert!(
+            matches!(refused, Err(Error::ChosenTableNotFree)),
+            "{why}, got {refused:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_walk_in_is_refused_on_a_shift_that_is_not_running() {
     let store = store().await;
     let (bar, _) = common::bar_with(
@@ -602,6 +666,7 @@ async fn a_walk_in_is_refused_on_a_shift_that_is_not_running() {
             bar,
             thursday().checked_add_days(2).expect("in range"),
             2,
+            None,
             at(thursday(), 1230),
         )
         .await;
@@ -624,7 +689,7 @@ async fn only_one_of_many_walk_ins_racing_for_the_last_table_gets_it() {
 
     let attempts = (0..8).map(|_| {
         let store = store.clone();
-        tokio::spawn(async move { store.seat_walk_in(bar, thursday(), 2, evening).await })
+        tokio::spawn(async move { store.seat_walk_in(bar, thursday(), 2, None, evening).await })
     });
     let outcomes = futures_lite(attempts).await;
 

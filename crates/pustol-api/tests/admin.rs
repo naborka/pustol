@@ -930,6 +930,70 @@ async fn a_walk_in_is_seated_at_the_minute_they_sat_down() {
 }
 
 #[tokio::test]
+async fn staff_seat_a_walk_in_at_the_table_they_picked_themselves() {
+    // The room would offer the two-top. A bartender who can see the couple asking for the corner
+    // puts them at the six-top instead, and the shift then reads the way the room looks.
+    let app = harness_at(
+        common::utc(2026, 7, 30, 18, 7),
+        config_with(vec![table(1, 2, "Бар"), table(2, 6, "Зал")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let six_top = table_id(&app, &staff, 2).await;
+
+    let seated = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({
+                "service_date": "2026-07-30",
+                "party_size": 2,
+                "table_id": six_top,
+            }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(seated["table_number"], 2);
+
+    let refused = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({
+                "service_date": "2026-07-30",
+                "party_size": 2,
+                "table_id": six_top,
+            }),
+        )
+        .await;
+    assert_eq!(
+        refused.error_code(),
+        Some("chosen_table_not_free"),
+        "the table they are looking at is gone, which is not the same as the room being full"
+    );
+}
+
+/// The identifier the shift gives for a printed table number, so a test names tables the way staff
+/// do rather than carrying a UUID through a fixture.
+async fn table_id(app: &common::Harness, staff: &Caller, number: i64) -> String {
+    let shift = app
+        .get("/api/admin/shift?service_date=2026-07-30", staff)
+        .await
+        .expect_ok()
+        .clone();
+    shift["tables"]
+        .as_array()
+        .expect("the shift lists its tables")
+        .iter()
+        .find(|table| table["number"] == number)
+        .unwrap_or_else(|| panic!("no table {number} in the room"))["id"]
+        .as_str()
+        .expect("an identifier")
+        .to_owned()
+}
+
+#[tokio::test]
 async fn seating_somebody_now_is_refused_on_an_evening_that_is_not_tonight() {
     let app = harness_at(
         common::utc(2026, 7, 30, 18, 0),

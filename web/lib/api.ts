@@ -333,10 +333,12 @@ export function client(credentials: string) {
         guest_name: guestName,
       }),
 
-    seatWalkIn: (serviceDate: IsoDate, partySize: number) =>
+    /** `tableId` is the table staff chose; `null` asks the room for its own best fit. */
+    seatWalkIn: (serviceDate: IsoDate, partySize: number, tableId: string | null) =>
       send<ShiftBooking>("POST", "/api/admin/walkins", {
         service_date: serviceDate,
         party_size: partySize,
+        table_id: tableId,
       }),
 
     setAttendance: (bookingId: string, attendance: Attendance) =>

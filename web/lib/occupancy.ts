@@ -78,6 +78,41 @@ export function freeTablesDuring(
     .sort((left, right) => left.seats - right.seats || left.number - right.number);
 }
 
+/** A table standing empty, and whether the party at the door actually fits at it. */
+export interface TableOffer {
+  table: ShiftTable;
+  fits: boolean;
+}
+
+/**
+ * The tables a party at the door can be put at, the ones that fit first.
+ *
+ * The fitting half is the list the server's allocator picks from, in the same order, so the table
+ * the sheet offers is the table the walk-in endpoint then gives — and the top of the list is the
+ * one the room would have chosen on its own. The server runs the rule again inside the
+ * transaction and has the last word, which is what makes two bartenders tapping the same table at
+ * the same moment safe rather than merely unlikely.
+ *
+ * The rest are free tables this party is too large for, and they are drawn rather than dropped: a
+ * bartender looking at an empty room and reading «свободного стола нет» is being told the app has
+ * lost the plot, and the reason is the answer.
+ */
+export function walkInOffers(
+  shift: ShiftView,
+  partySize: number,
+  turnMinutes: number,
+): TableOffer[] {
+  const now = shift.now_minutes;
+  if (now === null) return [];
+  const offers = freeTablesDuring(
+    shift.tables,
+    shift.bookings,
+    now,
+    now + turnMinutes,
+  ).map((table) => ({ table, fits: table.seats >= partySize }));
+  return [...offers.filter((offer) => offer.fits), ...offers.filter((offer) => !offer.fits)];
+}
+
 /** Tables with nobody at them and nothing closing them, at this minute. */
 export function freeTablesAt(
   tables: ShiftTable[],

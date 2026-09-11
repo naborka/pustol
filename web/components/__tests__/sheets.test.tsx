@@ -10,14 +10,9 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  BookingSheet,
-  ChoiceSheet,
-  DaySheet,
-  TableSheet,
-  WalkInSheet,
-  chooseWalkInTable,
-} from "../Sheets";
+import type { ShiftView } from "@/lib/api";
+
+import { BookingSheet, ChoiceSheet, DaySheet, TableSheet, WalkInSheet } from "../Sheets";
 import { noop, shift, shiftBooking, shiftTable } from "./fixtures";
 
 afterEach(cleanup);
@@ -218,33 +213,72 @@ describe("the day sheet", () => {
 });
 
 describe("a party at the door", () => {
-  it("names the table it would use before anybody commits", () => {
-    render(
+  function walkInSheet(
+    view: ShiftView,
+    partySize: number,
+    chosenTableId: string | null = null,
+    handlers: { onChooseTable?: (tableId: string) => void; onSeat?: (tableId: string) => void } = {},
+  ) {
+    return render(
       <WalkInSheet
         open
-        shift={shift()}
+        shift={view}
         maxParty={6}
         turnMinutes={120}
-        partySize={2}
+        partySize={partySize}
+        chosenTableId={chosenTableId}
         onClose={noop}
         onPartySize={noop}
-        onSeat={noop}
+        onChooseTable={handlers.onChooseTable ?? noop}
+        onSeat={handlers.onSeat ?? noop}
       />,
     );
-    // Table 7 seats two and is busy; table 8 seats four and is the smallest that is free.
-    expect(screen.getByText("Стол 8 · Зал")).toBeDefined();
+  }
+
+  it("lists every table staff could put them at, the room's own pick first", () => {
+    // Table 7 seats two and is busy. Eight and ten are free, and both are offered: which of them
+    // a couple gets is a decision about the room, and only the person in it can make it.
+    walkInSheet(shift(), 2);
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).getByText("Стол 8 · Зал")).toBeDefined();
+    expect(within(sheet).getByText("Стол 10 · Зал")).toBeDefined();
+    expect(within(sheet).queryByText("Стол 7 · Стойка")).toBeNull();
     expect(
-      screen.getByText(
-        "4 места, занят до 23:20. Самый маленький подходящий — большие остаются для больших компаний.",
+      within(sheet).getByText(
+        "Сверху — самый маленький подходящий: большие столы остаются для больших компаний. Стол будет занят до 23:20.",
       ),
     ).toBeDefined();
     expect(screen.getByText("Посадить за стол 8")).toBeDefined();
   });
 
-  it("keeps the large tables for the large parties", () => {
-    expect(chooseWalkInTable(shift({ bookings: [] }), 2, 120)?.number).toBe(7);
-    expect(chooseWalkInTable(shift({ bookings: [] }), 3, 120)?.number).toBe(8);
-    expect(chooseWalkInTable(shift({ bookings: [] }), 7, 120)?.number).toBe(10);
+  it("seats them at the table staff chose rather than at the one it suggested", async () => {
+    const onChooseTable = vi.fn();
+    walkInSheet(shift(), 2, null, { onChooseTable });
+    await userEvent.click(screen.getByText("Стол 10 · Зал"));
+    expect(onChooseTable).toHaveBeenCalledWith("t3");
+
+    cleanup();
+    const onSeat = vi.fn();
+    walkInSheet(shift(), 2, "t3", { onSeat });
+    await userEvent.click(screen.getByText("Посадить за стол 10"));
+    expect(onSeat).toHaveBeenCalledWith("t3");
+  });
+
+  it("falls back to the room's own pick when the chosen table stops fitting", async () => {
+    // Staff picked the four-top, then said the party is six. The button names the table it will
+    // actually use, and asks for that one: the choice is read off the list in one place, so the
+    // label and the request cannot come apart.
+    const onSeat = vi.fn();
+    walkInSheet(shift(), 6, "t2", { onSeat });
+    await userEvent.click(screen.getByText("Посадить за стол 10"));
+    expect(onSeat).toHaveBeenCalledWith("t3");
+  });
+
+  it("shows a free table the party is too large for, and says why it is not on offer", () => {
+    walkInSheet(shift(), 6, null);
+    const tooSmall = screen.getByText("Стол 8 · Зал").closest("button");
+    expect(within(tooSmall as HTMLElement).getByText("4 места · мало мест")).toBeDefined();
+    expect((tooSmall as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("agrees with the shift's own line about who fits", () => {
@@ -252,11 +286,15 @@ describe("a party at the door", () => {
     // rule, which is the only way they can never contradict each other.
     const view = shift();
     expect(view.largest_party_seatable_now).toBe(8);
-    expect(chooseWalkInTable(view, 8, 120)?.number).toBe(10);
-    expect(chooseWalkInTable(view, 9, 120)).toBeNull();
+    walkInSheet(view, 8);
+    expect(screen.getByText("Посадить за стол 10")).toBeDefined();
+
+    cleanup();
+    walkInSheet(view, 9);
+    expect(screen.getByText("Посадить некуда").closest("button")?.disabled).toBe(true);
   });
 
-  it("refuses plainly when nothing fits, with the button inert", () => {
+  it("refuses plainly when every table is taken, with the button inert", () => {
     const full = shift({
       largest_party_seatable_now: null,
       bookings: [
@@ -265,18 +303,7 @@ describe("a party at the door", () => {
         shiftBooking({ id: "c", table_id: "t3", table_number: 10 }),
       ],
     });
-    render(
-      <WalkInSheet
-        open
-        shift={full}
-        maxParty={6}
-        turnMinutes={120}
-        partySize={2}
-        onClose={noop}
-        onPartySize={noop}
-        onSeat={noop}
-      />,
-    );
+    walkInSheet(full, 2);
     expect(screen.getByText("Свободного стола нет")).toBeDefined();
     expect(
       screen.getByText("Все подходящие столы заняты. Освободите стол или предложите подождать."),
@@ -284,19 +311,26 @@ describe("a party at the door", () => {
     expect(screen.getByText("Посадить некуда").closest("button")?.disabled).toBe(true);
   });
 
+  it("says the free tables are too small rather than that there are none", () => {
+    const onlySmall = shift({
+      largest_party_seatable_now: 2,
+      bookings: [
+        shiftBooking({ id: "b", table_id: "t2", table_number: 8 }),
+        shiftBooking({ id: "c", table_id: "t3", table_number: 10 }),
+      ],
+    });
+    walkInSheet(onlySmall, 6);
+    expect(screen.getByText("Свободного стола нет")).toBeDefined();
+    expect(
+      screen.getByText(
+        "Свободные столы малы для такой компании. Освободите стол побольше или предложите подождать.",
+      ),
+    ).toBeDefined();
+    expect(screen.getByText("Стол 7 · Стойка")).toBeDefined();
+  });
+
   it("does not exist at all on an evening that is not tonight", () => {
-    const { container } = render(
-      <WalkInSheet
-        open
-        shift={shift({ now_minutes: null })}
-        maxParty={6}
-        turnMinutes={120}
-        partySize={2}
-        onClose={noop}
-        onPartySize={noop}
-        onSeat={noop}
-      />,
-    );
+    const { container } = walkInSheet(shift({ now_minutes: null }), 2);
     expect(container.firstChild).toBeNull();
   });
 
@@ -308,6 +342,7 @@ describe("a party at the door", () => {
       tables: [shiftTable()],
       bookings: [shiftBooking({ status: "left", released_minutes: 1_280 })],
     });
-    expect(chooseWalkInTable(view, 2, 120)?.number).toBe(7);
+    walkInSheet(view, 2);
+    expect(screen.getByText("Посадить за стол 7")).toBeDefined();
   });
 });
