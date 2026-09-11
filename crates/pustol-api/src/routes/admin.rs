@@ -7,23 +7,31 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use pustol_db::bookings::{Channel, NewBooking};
-use pustol_db::records::BookingRecord;
+use pustol_db::records::{BookingRecord, blocks_of, bookings_of};
 use pustol_domain::config::ValidConfig;
 use pustol_domain::draft::Draft;
 use pustol_domain::schedule::next_table_number;
-use pustol_domain::{BookingId, ServiceDay, TableId, minutes_within};
+use pustol_domain::{BookingId, Interval, ServiceDay, TableId, minutes_within};
 use pustol_telegram::messages;
 use uuid::Uuid;
 
 use crate::auth::Staff;
 use crate::dto::{
     AttendanceRequest, Availability, AvailabilityQuery, BlockRequest, CancelRequest, Hours,
-    LimitsView, MessageRequest, ReconcileRequest, ReconciliationView, SavedSettingsView,
-    SettingsTable, SettingsView, ShiftBooking, ShiftQuery, ShiftStats, ShiftTable, ShiftView,
-    StaffBookingRequest, StaffView, UnblockRequest,
+    LimitsView, MessageRequest, NoteRequest, ReconcileRequest, ReconciliationView,
+    SavedSettingsView, SettingsTable, SettingsView, ShiftBooking, ShiftDay, ShiftQuery, ShiftStats,
+    ShiftTable, ShiftView, StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+
+/// How far ahead the staff day sheet reaches.
+///
+/// The widest booking horizon the bar could ever set for guests, so staff can always see at least
+/// as far as the guests they are answering the phone for — and, as the docs promise, a month out.
+fn staff_horizon_days() -> i32 {
+    pustol_domain::LIMITS.horizon_days.max
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -32,8 +40,10 @@ pub fn routes() -> Router<AppState> {
         .route("/availability", get(availability))
         .route("/bookings", post(create_booking))
         .route("/bookings/{id}/attendance", patch(set_attendance))
+        .route("/bookings/{id}/note", patch(set_note))
         .route("/bookings/{id}/cancel", post(cancel_booking))
         .route("/bookings/{id}/message", post(send_message))
+        .route("/walkins", post(seat_walk_in))
         .route("/blocks", post(block).delete(unblock))
         .route("/settings", get(settings).put(save_settings))
 }
@@ -66,23 +76,46 @@ async fn shift(
         })
         .collect();
 
-    // "Free now" and the now-line are only meaningful on the shift that is actually running. On any
-    // other day an invented number would be worse than a blank.
+    // "Free now", the now-line and "who fits" are only meaningful on the shift that is actually
+    // running. On any other day an invented number would be worse than a blank.
     let is_running = config.current_service_day(now) == day;
+    let walk_in_window = Interval::from_duration(now, config.turn_minutes).ok();
     let free_now = is_running.then(|| {
         tables
             .iter()
             .filter(|table| table.blocked_because.is_none())
             .filter(|table| {
+                // The one occupancy rule, asked of the one function: a party that has left or
+                // never came does not hold a table staff can see standing empty.
                 !shift.bookings.iter().any(|record| {
-                    record.booking.table_id == Some(TableId(table.id))
-                        && record.booking.window.start() <= now
-                        && now < record.booking.window.end()
+                    record
+                        .booking
+                        .occupancy()
+                        .is_some_and(|held| {
+                            record.booking.table_id == Some(TableId(table.id))
+                                && held.start() <= now
+                                && now < held.end()
+                        })
                 })
             })
             .count()
     });
     let now_minutes = is_running.then(|| minutes_within(day, now, config.timezone));
+    let largest_party_seatable_now = is_running
+        .then_some(walk_in_window)
+        .flatten()
+        .and_then(|window| {
+            pustol_domain::largest_party_seatable(
+                &config,
+                day,
+                window,
+                &bookings_of(&shift.bookings),
+                &blocks_of(&shift.blocks),
+            )
+        });
+
+    let reachable = pustol_domain::days_from(config.current_service_day(now), staff_horizon_days());
+    let counts = state.store.bookings_per_day(state.bar, &reachable).await?;
 
     Ok(Json(ShiftView {
         service_date: day.date(),
@@ -103,6 +136,17 @@ async fn shift(
             free_now,
         },
         now_minutes,
+        largest_party_seatable_now,
+        days: reachable
+            .iter()
+            .zip(counts)
+            .map(|(reachable_day, bookings)| ShiftDay {
+                service_date: reachable_day.date(),
+                closed: config.week.for_service_day(*reachable_day).closed,
+                bookings,
+            })
+            .collect(),
+        guest_horizon_days: config.horizon_days,
         cancel_reasons: config.cancel_reasons.clone(),
         message_templates: config.message_templates.clone(),
     }))
@@ -158,18 +202,59 @@ async fn create_booking(
     Ok(Json(ShiftBooking::of(&created.record, &created.config)))
 }
 
+/// Whether a party turned up, sat, or went home.
+///
+/// The room is re-seated inside the same transaction, so a table given back by a party that left
+/// is offered straight to anybody the room could not seat. Nothing is reported about it here: the
+/// screen reloads the shift and the `Без стола` group simply gets shorter, which is the honest
+/// amount of noise for something that fixed itself.
 async fn set_attendance(
     State(state): State<AppState>,
     _staff: Staff,
     Path(id): Path<Uuid>,
     Json(request): Json<AttendanceRequest>,
 ) -> ApiResult<Json<ShiftBooking>> {
+    let recorded = state
+        .store
+        .set_attendance(state.bar, BookingId(id), request.attendance, state.now())
+        .await?;
+    Ok(Json(ShiftBooking::of(&recorded.record, &recorded.config)))
+}
+
+/// What staff want to remember about a booking.
+///
+/// Staff-facing by construction: the guest projection has no field to put a note in, so no future
+/// handler can send one by accident.
+async fn set_note(
+    State(state): State<AppState>,
+    _staff: Staff,
+    Path(id): Path<Uuid>,
+    Json(request): Json<NoteRequest>,
+) -> ApiResult<Json<ShiftBooking>> {
     let config = state.store.config(state.bar).await?;
     let record = state
         .store
-        .set_attendance(state.bar, BookingId(id), request.attendance)
+        .set_note(state.bar, BookingId(id), request.note.as_deref())
         .await?;
     Ok(Json(ShiftBooking::of(&record, &config)))
+}
+
+/// Seats a party that walked in, at the minute they sat down.
+async fn seat_walk_in(
+    State(state): State<AppState>,
+    _staff: Staff,
+    Json(request): Json<WalkInRequest>,
+) -> ApiResult<Json<ShiftBooking>> {
+    let seated = state
+        .store
+        .seat_walk_in(
+            state.bar,
+            ServiceDay::new(request.service_date),
+            request.party_size,
+            state.now(),
+        )
+        .await?;
+    Ok(Json(ShiftBooking::of(&seated.record, &seated.config)))
 }
 
 #[derive(Debug, serde::Serialize)]

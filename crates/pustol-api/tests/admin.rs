@@ -866,6 +866,237 @@ async fn retiring_a_table_moves_its_party_and_reports_it_by_name() {
 }
 
 #[tokio::test]
+async fn the_shift_says_who_could_be_seated_right_now() {
+    // Eight in the evening, an empty room whose largest table seats six.
+    let app = harness_at(common::utc(2026, 7, 30, 18, 0), config_with(vec![
+        table(1, 2, "Бар"),
+        table(2, 6, "Зал"),
+    ]))
+    .await;
+    let staff = manager(&app).await;
+
+    let body = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(body["largest_party_seatable_now"], 6);
+
+    // Seat six of them and only the two-top is left.
+    app.post(
+        "/api/admin/walkins",
+        &staff,
+        serde_json::json!({ "service_date": "2026-07-30", "party_size": 6 }),
+    )
+    .await
+    .expect_ok();
+    let body = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(body["largest_party_seatable_now"], 2);
+    assert_eq!(body["stats"]["free_now"], 1);
+}
+
+#[tokio::test]
+async fn a_walk_in_is_seated_at_the_minute_they_sat_down() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 18, 7),
+        config_with(vec![table(1, 2, "Бар"), table(2, 6, "Зал")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+
+    let seated = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "party_size": 2 }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+
+    assert_eq!(seated["table_number"], 1, "the smallest table that fits");
+    assert_eq!(seated["source"], "walk");
+    assert_eq!(seated["status"], "arrived");
+    assert_eq!(seated["guest_name"], "Без брони");
+    assert_eq!(
+        seated["start_minutes"], 1_207,
+        "20:07 local, not floored onto the half-hour grid"
+    );
+    assert_eq!(seated["reachable_by_bot"], false);
+}
+
+#[tokio::test]
+async fn seating_somebody_now_is_refused_on_an_evening_that_is_not_tonight() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 18, 0),
+        config_with(vec![table(1, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let refused = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-08-01", "party_size": 2 }),
+        )
+        .await;
+    assert_eq!(refused.error_code(), Some("not_the_running_shift"));
+}
+
+#[tokio::test]
+async fn a_party_that_leaves_hands_its_table_back_to_the_room_at_once() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 18, 0),
+        config_with(vec![table(1, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let seated = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "party_size": 2 }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    let id = seated["id"].as_str().expect("an identifier").to_owned();
+
+    let before = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(before["stats"]["free_now"], 0);
+    assert!(before["largest_party_seatable_now"].is_null());
+
+    let gone = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "left" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(gone["status"], "left");
+    assert_eq!(
+        gone["released_minutes"], 1_200,
+        "the table goes back into the pool at the minute they left"
+    );
+
+    let after = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(after["stats"]["free_now"], 1);
+    assert_eq!(after["largest_party_seatable_now"], 2);
+
+    // Undo: the room goes back to exactly where it was.
+    let back = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "arrived" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert!(back["released_minutes"].is_null());
+    let restored = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(restored["stats"]["free_now"], 0);
+    assert!(restored["largest_party_seatable_now"].is_null());
+}
+
+#[tokio::test]
+async fn a_note_belongs_to_the_shift_and_never_reaches_the_guest() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let guest = Caller::new("Тимур");
+    let booked = app
+        .post(
+            "/api/booking",
+            &guest,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    let id = booked["booking"]["id"].as_str().expect("an id").to_owned();
+
+    let noted = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/note"),
+            &staff,
+            serde_json::json!({ "note": "День рождения" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(noted["note"], "День рождения");
+
+    let session = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert!(
+        session["booking"].get("note").is_none(),
+        "a guest's own booking has no field a note could travel in"
+    );
+
+    let rubbed = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/note"),
+            &staff,
+            serde_json::json!({ "note": null }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert!(rubbed["note"].is_null());
+
+    let refused = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/note"),
+            &staff,
+            serde_json::json!({ "note": "я".repeat(121) }),
+        )
+        .await;
+    assert_eq!(refused.error_code(), Some("note_too_long"));
+}
+
+#[tokio::test]
+async fn the_shift_reaches_a_month_ahead_whatever_the_guest_horizon_is() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let body = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+
+    let days = body["days"].as_array().expect("a day sheet");
+    assert_eq!(days.len(), 30);
+    assert_eq!(days[0]["service_date"], "2026-07-30");
+    assert_eq!(days[29]["service_date"], "2026-08-28");
+    assert_eq!(
+        body["guest_horizon_days"], 4,
+        "so the sheet can say where the guest's own horizon ends"
+    );
+}
+
+#[tokio::test]
 async fn every_admin_route_refuses_a_request_with_no_credentials() {
     let app = harness().await;
     for path in [

@@ -55,6 +55,17 @@ pub enum Error {
     #[error("closing a table needs a reason")]
     MissingBlockReason,
 
+    /// A note longer than a row in a list can show.
+    #[error("a note is at most {limit} characters")]
+    NoteTooLong { limit: usize },
+
+    /// Seating somebody "now" on a shift that is not the one running.
+    ///
+    /// There is no now on next Tuesday. Refused here rather than in a handler, because the only
+    /// thing that knows which shift is running is the configuration this layer reads.
+    #[error("{service_day} is not the shift that is running")]
+    NotTheRunningShift { service_day: chrono::NaiveDate },
+
     /// The stored configuration cannot be used. Either somebody wrote around the API, or a
     /// migration left the row in a state the domain refuses.
     #[error("the stored configuration is not usable: {0:?}")]

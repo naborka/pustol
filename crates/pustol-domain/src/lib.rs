@@ -27,7 +27,10 @@ pub mod schedule;
 pub mod service_day;
 pub mod slots;
 
-pub use allocator::{Assignment, Booking, BookingId, BookingStatus, TableBlock, seating_is_sound};
+pub use allocator::{
+    Assignment, Booking, BookingId, BookingStatus, TableBlock, largest_party_seatable,
+    seating_is_sound,
+};
 pub use config::{
     BarConfig, Bounds, ConfigError, DayHours, LIMITS, Limits, ScheduleConflict, Setting,
     StaffMember, ValidConfig, WeekSchedule, is_telegram_username, parties_above_cap,
@@ -37,4 +40,6 @@ pub use draft::{DayHoursDraft, Draft, DraftError, StaffDraft, TableDraft};
 pub use reconcile::{Reconciliation, Reseating};
 pub use schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 pub use service_day::{Interval, ServiceDay, TimeError, minutes_within, resolve};
-pub use slots::{PartOfDay, Slot, SlotAvailability, bookable_days};
+pub use slots::{
+    PartOfDay, Slot, SlotAvailability, bookable_days, days_from, first_free_minutes, horizon_days,
+};

@@ -11,16 +11,24 @@ use pustol_telegram::messages;
 
 use crate::auth::Authenticated;
 use crate::dto::{
-    Availability, AvailabilityQuery, BarView, BookingRequest, GuestBooking, RemindersView, Session,
-    UserView,
+    Availability, AvailabilityQuery, BarView, BookingRequest, DayOffer, DayRail, DayRailQuery,
+    GuestBooking, RemindersView, Session, UserView,
 };
 use crate::error::ApiResult;
 use crate::state::AppState;
+
+/// The party the home screen speaks for.
+///
+/// "Сегодня свободно с 21:30" is a promise, and a promise has to be about a definite party. Two is
+/// the picker's own default and by far the commonest booking, so the sentence on the card is the
+/// one the very next screen will keep.
+const HOME_CARD_PARTY: i32 = 2;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/session", get(session))
         .route("/availability", get(availability))
+        .route("/days", get(days))
         .route("/booking", post(book).delete(cancel))
         .route("/reminders/opt-in", post(opt_in))
         .route("/reminders/dismiss", post(dismiss))
@@ -45,6 +53,10 @@ async fn session(
         .store
         .booking_of_guest(state.bar, caller.user_id(), now)
         .await?;
+    let tonight = state
+        .store
+        .day_offers(state.bar, &config, &[today], HOME_CARD_PARTY, now)
+        .await?;
 
     Ok(Json(Session {
         user: UserView {
@@ -54,13 +66,47 @@ async fn session(
         },
         is_staff: viewer.is_staff,
         reminders: RemindersView::of(&viewer),
-        bar: BarView::of(&config, today),
+        bar: BarView::of(&config, today, now),
         booking: booking
             .as_ref()
             .map(|record| GuestBooking::of(record, &config)),
         bookable_days: pustol_domain::bookable_days(&config, today)
             .into_iter()
             .map(ServiceDay::date)
+            .collect(),
+        today_free_from_minutes: tonight
+            .first()
+            .and_then(|offer| offer.free_from_minutes),
+    }))
+}
+
+/// What every day of the booking horizon holds for a party of this size.
+///
+/// The middle of the guest's three taps. Kept apart from `/availability` because it answers a
+/// different question — *which evening*, not *which time* — and because it changes only when the
+/// party size does: folding it into availability would recompute thirty days every time somebody
+/// tapped a different day on the rail it had just drawn.
+async fn days(
+    State(state): State<AppState>,
+    _caller: Authenticated,
+    Query(query): Query<DayRailQuery>,
+) -> ApiResult<Json<DayRail>> {
+    let now = state.now();
+    let config = state.store.config(state.bar).await?;
+    let horizon = pustol_domain::horizon_days(&config, config.current_service_day(now));
+    let offers = state
+        .store
+        .day_offers(state.bar, &config, &horizon, query.party_size, now)
+        .await?;
+    Ok(Json(DayRail {
+        party_size: query.party_size,
+        days: offers
+            .into_iter()
+            .map(|offer| DayOffer {
+                service_date: offer.day.date(),
+                closed: offer.closed,
+                free_from_minutes: offer.free_from_minutes,
+            })
             .collect(),
     }))
 }

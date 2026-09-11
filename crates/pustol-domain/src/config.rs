@@ -576,7 +576,7 @@ pub fn schedule_conflicts(
 ) -> Vec<ScheduleConflict> {
     bookings
         .iter()
-        .filter(|booking| booking.status.holds_a_table() && booking.window.end() > now)
+        .filter(|booking| booking.occupancy().is_some_and(|held| held.end() > now))
         .filter_map(|booking| conflict_for(config, booking))
         .collect()
 }
@@ -616,7 +616,7 @@ pub fn parties_above_cap(
 ) -> Vec<BookingId> {
     bookings
         .iter()
-        .filter(|booking| booking.status.holds_a_table() && booking.window.end() > now)
+        .filter(|booking| booking.occupancy().is_some_and(|held| held.end() > now))
         .filter(|booking| booking.party_size > config.max_party)
         .map(|booking| booking.id)
         .collect()

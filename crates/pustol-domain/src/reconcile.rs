@@ -67,15 +67,23 @@ pub fn reconcile(request: &Request<'_>) -> Reconciliation {
     let mut working: Vec<Booking> = request
         .bookings
         .iter()
-        .filter(|booking| booking.status.holds_a_table())
+        .filter(|booking| booking.status.is_live())
         .cloned()
         .collect();
 
     // Sorted on the arrival time already in hand, rather than on a key that looks the booking up
     // again for every comparison.
+    //
+    // A booking that has given its table back — a party that left, one that never came — is past
+    // moving even if the window it was promised has not run out. Moving it would rewrite where a
+    // party that has already gone home sat, and the room gains nothing: it is holding no table.
     let mut candidates: Vec<(DateTime<Utc>, BookingId)> = working
         .iter()
-        .filter(|booking| booking.window.end() > request.now)
+        .filter(|booking| {
+            booking
+                .occupancy()
+                .is_some_and(|held| held.end() > request.now)
+        })
         .filter(|booking| !seating_is_sound(booking, request.tables, request.blocks))
         .map(|booking| (booking.window.start(), booking.id))
         .collect();

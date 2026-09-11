@@ -132,6 +132,7 @@ pub fn booking(
         service_day: day,
         window: Interval::from_duration(at(day, minutes), turn_minutes)
             .expect("fixture turns are positive"),
+        released_at: None,
         party_size,
         status: BookingStatus::Confirmed,
     }

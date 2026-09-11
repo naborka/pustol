@@ -141,17 +141,58 @@ fn evaluate(query: &Query<'_>, start_minutes: i32) -> Slot {
     }
 }
 
-/// Service days a guest may book, nearest first.
+/// Every service day inside the bar's booking horizon, nearest first, closed days included.
 ///
-/// Days the bar is shut are left out rather than shown as unavailable: a guest scrolling the day
-/// strip is choosing when to come, and a day that cannot be chosen is noise. The horizon counts
-/// calendar days from today, closed days included, so "four days ahead" means the same thing in a
-/// week with a day off as in one without.
+/// The guest's day rail is exactly this long, because the horizon is a number the manager sets and
+/// a rail that silently dropped the Mondays the bar is shut would be a different length on
+/// different weeks — and would leave a guest wondering where Monday went. A closed day is shown
+/// and says `выходной`; it is answered, not hidden.
+#[must_use]
+pub fn horizon_days(config: &ValidConfig, today: ServiceDay) -> Vec<ServiceDay> {
+    days_from(today, config.horizon_days)
+}
+
+/// `count` service days from `from`, nearest first.
+#[must_use]
+pub fn days_from(from: ServiceDay, count: i32) -> Vec<ServiceDay> {
+    let count = u64::try_from(count).unwrap_or(0);
+    (0..count)
+        .filter_map(|offset| from.checked_add_days(offset))
+        .collect()
+}
+
+/// Service days a guest may actually book, nearest first.
+///
+/// Days the bar is shut are left out: this is the set a booking request is checked against, and a
+/// day the bar is closed is not one of them. It is deliberately *not* what the day rail is drawn
+/// from — see [`horizon_days`].
 #[must_use]
 pub fn bookable_days(config: &ValidConfig, today: ServiceDay) -> Vec<ServiceDay> {
-    let horizon = u64::try_from(config.horizon_days).unwrap_or(0);
-    (0..horizon)
-        .filter_map(|offset| today.checked_add_days(offset))
+    horizon_days(config, today)
+        .into_iter()
         .filter(|day| !config.week.for_service_day(*day).closed)
         .collect()
+}
+
+/// The earliest arrival time still free for this party, or `None` when the day holds none.
+///
+/// What one chip on the day rail says about itself: `с 21:30`, or `мест нет`. Evaluated in order
+/// and stopped at the first free slot, because a rail thirty days long would otherwise run the
+/// allocator over every slot of every day to answer a question that is settled by the first.
+#[must_use]
+pub fn first_free_minutes(query: &Query<'_>) -> Option<i32> {
+    let hours = query.config.week.for_service_day(query.service_day);
+    if hours.closed {
+        return None;
+    }
+    let step = query.config.slot_step_minutes;
+    let last_arrival = hours.close_minutes - query.config.turn_minutes;
+    let mut minutes = hours.open_minutes;
+    while minutes <= last_arrival {
+        if evaluate(query, minutes).availability.is_free() {
+            return Some(minutes);
+        }
+        minutes += step;
+    }
+    None
 }
