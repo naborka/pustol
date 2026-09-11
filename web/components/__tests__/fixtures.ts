@@ -48,6 +48,7 @@ export function session(overrides: Partial<Session> = {}): Session {
     booking: null,
     bookable_days: ["2026-09-11", "2026-09-12"],
     today_free_from_minutes: 1_290,
+    today_free_for_party: 2,
     ...overrides,
   };
 }

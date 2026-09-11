@@ -53,23 +53,38 @@ export function holdsDuring(booking: ShiftBooking, from: number, to: number): bo
 }
 
 /**
- * Tables with nobody at them and nothing closing them, at this minute.
+ * Tables free for the whole of `[from, to)`, smallest first, ties by printed number.
  *
- * Deliberately *not* what the pulse line reads: that number comes from the server, which answers
- * it from the same rule against the whole room. This is here for the questions the screen has to
- * answer alone — which table a party at the door would take, and what a test can hold the two
- * runtimes against.
+ * The same order the allocator uses, so the table this offers is the table the server then gives:
+ * smallest that fits, because a couple at a six-top is how a Friday runs out of six-tops.
+ *
+ * Deliberately *not* what the pulse line reads: the free count comes from the server, which answers
+ * it from the same rule against the whole room.
  */
+export function freeTablesDuring(
+  tables: ShiftTable[],
+  bookings: ShiftBooking[],
+  from: number,
+  to: number,
+): ShiftTable[] {
+  return [...tables]
+    .filter(
+      (table) =>
+        table.blocked_because === null &&
+        !bookings.some(
+          (booking) => booking.table_id === table.id && holdsDuring(booking, from, to),
+        ),
+    )
+    .sort((left, right) => left.seats - right.seats || left.number - right.number);
+}
+
+/** Tables with nobody at them and nothing closing them, at this minute. */
 export function freeTablesAt(
   tables: ShiftTable[],
   bookings: ShiftBooking[],
   minute: number,
 ): ShiftTable[] {
-  return tables.filter(
-    (table) =>
-      table.blocked_because === null &&
-      !bookings.some((booking) => booking.table_id === table.id && holdsAt(booking, minute)),
-  );
+  return freeTablesDuring(tables, bookings, minute, minute + 1);
 }
 
 /**

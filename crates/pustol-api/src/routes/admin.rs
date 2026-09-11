@@ -29,9 +29,7 @@ use crate::state::AppState;
 ///
 /// The widest booking horizon the bar could ever set for guests, so staff can always see at least
 /// as far as the guests they are answering the phone for — and, as the docs promise, a month out.
-fn staff_horizon_days() -> i32 {
-    pustol_domain::LIMITS.horizon_days.max
-}
+const STAFF_HORIZON_DAYS: i32 = pustol_domain::LIMITS.horizon_days.max;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -114,7 +112,7 @@ async fn shift(
             )
         });
 
-    let reachable = pustol_domain::days_from(config.current_service_day(now), staff_horizon_days());
+    let reachable = pustol_domain::days_from(config.current_service_day(now), STAFF_HORIZON_DAYS);
     let counts = state.store.bookings_per_day(state.bar, &reachable).await?;
 
     Ok(Json(ShiftView {
@@ -231,11 +229,13 @@ async fn set_note(
     Path(id): Path<Uuid>,
     Json(request): Json<NoteRequest>,
 ) -> ApiResult<Json<ShiftBooking>> {
-    let config = state.store.config(state.bar).await?;
     let record = state
         .store
         .set_note(state.bar, BookingId(id), request.note.as_deref())
         .await?;
+    // Read after the write, not before: a settings save landing in between would otherwise have
+    // this answer projected through a timezone the booking is no longer kept in.
+    let config = state.store.config(state.bar).await?;
     Ok(Json(ShiftBooking::of(&record, &config)))
 }
 

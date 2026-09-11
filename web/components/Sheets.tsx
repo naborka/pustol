@@ -23,7 +23,7 @@ import type {
   ShiftView,
 } from "@/lib/api";
 import * as fmt from "@/lib/format";
-import { holdsDuring } from "@/lib/occupancy";
+import { freeTablesDuring } from "@/lib/occupancy";
 import { standingOf, statusLabel } from "@/lib/status";
 import { openChatWith } from "@/lib/telegram";
 import { RADIUS, SPACE, TEXT } from "@/lib/tokens";
@@ -153,7 +153,7 @@ export function BookingSheet({
             style={{
               padding: SPACE[3] + 2,
               borderRadius: RADIUS.md,
-              background: "rgba(234,161,58,.16)",
+              background: "var(--warn-wash)",
               display: "flex",
               flexDirection: "column",
               gap: SPACE[2] + 2,
@@ -181,16 +181,28 @@ export function BookingSheet({
                 ["arrived", "За столом"],
                 ["no_show", "Не пришли"],
               ] as const
-            ).map(([value, label]) => (
-              <Chip
-                key={value}
-                label={label}
-                state={booking.status === value ? "chosen" : "available"}
-                style={{ flex: 1 }}
-                fontSize={TEXT.md}
-                onClick={() => onAttendance(value)}
-              />
-            ))}
+            ).map(([value, label]) => {
+              // Seating a party the room has no table for is not a state this app may produce, so
+              // the chip that would produce it is not there to be pressed — the same rule the row's
+              // own action follows.
+              const impossible = value === "arrived" && !seated;
+              return (
+                <Chip
+                  key={value}
+                  label={label}
+                  state={
+                    booking.status === value
+                      ? "chosen"
+                      : impossible
+                        ? "unavailable"
+                        : "available"
+                  }
+                  style={{ flex: 1, textDecoration: "none" }}
+                  fontSize={TEXT.md}
+                  {...(impossible ? {} : { onClick: () => onAttendance(value) })}
+                />
+              );
+            })}
           </div>
           {/* Only where it adds something the chips do not already say. */}
           {standing.kind === "waiting" || standing.kind === "seated" ? null : (
@@ -627,16 +639,9 @@ export function chooseWalkInTable(
 ): ShiftTable | null {
   const now = shift.now_minutes;
   if (now === null) return null;
-  const until = now + turnMinutes;
-  const candidates = [...shift.tables]
-    .filter((table) => table.blocked_because === null && table.seats >= partySize)
-    .sort((left, right) => left.seats - right.seats || left.number - right.number);
   return (
-    candidates.find(
-      (table) =>
-        !shift.bookings.some(
-          (booking) => booking.table_id === table.id && holdsDuring(booking, now, until),
-        ),
+    freeTablesDuring(shift.tables, shift.bookings, now, now + turnMinutes).find(
+      (table) => table.seats >= partySize,
     ) ?? null
   );
 }

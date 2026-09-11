@@ -82,21 +82,33 @@ pub struct Query<'a> {
 /// special case anywhere downstream.
 #[must_use]
 pub fn slot_list(query: &Query<'_>) -> Vec<Slot> {
+    arrival_minutes(query)
+        .map(|minutes| evaluate(query, minutes))
+        .collect()
+}
+
+/// Every wall-clock minute a party may arrive at on this shift, in order.
+///
+/// The one definition of "when the grid runs from and to": opening time, in the configured step,
+/// stopping one turn before closing so no booking runs past the moment the lights go off. Empty on
+/// a day off, which is what makes every caller need no special case for one.
+///
+/// Written once because two callers walk it — the whole grid, and the first free slot on it — and
+/// two copies of the same loop is two chances to disagree about the last arrival time.
+fn arrival_minutes(query: &Query<'_>) -> impl Iterator<Item = i32> {
     let hours = query.config.week.for_service_day(query.service_day);
-    if hours.closed {
-        return Vec::new();
-    }
-    // A validated config guarantees a positive step, so this loop always terminates.
+    // A validated config guarantees a positive step, so this range is always finite.
     let step = query.config.slot_step_minutes;
     let last_arrival = hours.close_minutes - query.config.turn_minutes;
-
-    let mut slots = Vec::new();
-    let mut minutes = hours.open_minutes;
-    while minutes <= last_arrival {
-        slots.push(evaluate(query, minutes));
-        minutes += step;
-    }
-    slots
+    let open = hours.open_minutes;
+    let closed = hours.closed;
+    std::iter::successors(
+        (!closed && open <= last_arrival).then_some(open),
+        move |minutes| {
+            let next = minutes + step;
+            (next <= last_arrival).then_some(next)
+        },
+    )
 }
 
 fn evaluate(query: &Query<'_>, start_minutes: i32) -> Slot {
@@ -181,18 +193,5 @@ pub fn bookable_days(config: &ValidConfig, today: ServiceDay) -> Vec<ServiceDay>
 /// allocator over every slot of every day to answer a question that is settled by the first.
 #[must_use]
 pub fn first_free_minutes(query: &Query<'_>) -> Option<i32> {
-    let hours = query.config.week.for_service_day(query.service_day);
-    if hours.closed {
-        return None;
-    }
-    let step = query.config.slot_step_minutes;
-    let last_arrival = hours.close_minutes - query.config.turn_minutes;
-    let mut minutes = hours.open_minutes;
-    while minutes <= last_arrival {
-        if evaluate(query, minutes).availability.is_free() {
-            return Some(minutes);
-        }
-        minutes += step;
-    }
-    None
+    arrival_minutes(query).find(|minutes| evaluate(query, *minutes).availability.is_free())
 }

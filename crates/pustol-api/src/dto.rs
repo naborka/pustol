@@ -135,10 +135,17 @@ pub struct Session {
     pub bar: BarView,
     pub booking: Option<GuestBooking>,
     pub bookable_days: Vec<NaiveDate>,
-    /// The earliest arrival time tonight still has for an ordinary couple, absent when it has
-    /// none. The home screen's one honest sentence about this evening — "Сегодня свободно с
-    /// 21:30" — answered here so the first screen still costs one request.
+    /// The earliest arrival time tonight still has, absent when it has none.
+    ///
+    /// The home screen's one honest sentence about this evening — "Сегодня свободно с 21:30" —
+    /// answered here so the first screen still costs one request.
     pub today_free_from_minutes: Option<i32>,
+    /// The party size that sentence speaks for, and the size the picker opens on.
+    ///
+    /// Sent rather than agreed by comment. A promise has to be about a definite party, and if the
+    /// two ends picked their own number the card would promise a time the very next screen did not
+    /// keep.
+    pub today_free_for_party: i32,
 }
 
 #[derive(Debug, Serialize)]

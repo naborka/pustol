@@ -15,6 +15,7 @@ import { useEffect, useRef } from "react";
 import { guests as guestsLabel, time as clockLabel } from "@/lib/format";
 import { haptics } from "@/lib/telegram";
 import { RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
+import { useViewport } from "./ThemeProvider";
 
 // ---- the one interactive primitive -------------------------------------------------------------
 
@@ -587,7 +588,7 @@ export function CardAction({
       : tone === "primary"
         ? "var(--btn)"
         : tone === "warn"
-          ? "rgba(234,161,58,.16)"
+          ? "var(--warn-wash)"
           : "var(--sec)";
   return (
     <Pressable
@@ -692,17 +693,30 @@ export function Sheet({
 
   // The keyboard has just changed the height of everything. Keep whatever is being typed into in
   // sight, inside the panel's own scroller.
+  //
+  // Driven by Telegram's own `viewportChanged`, which `useViewport` publishes: the iOS keyboard
+  // moves the visual viewport without firing a window resize, so a resize listener would miss the
+  // one case this exists for. The listener stays for the browsers outside Telegram that only have
+  // that signal.
+  const { stableHeight } = useViewport();
   useEffect(() => {
     if (!open) return undefined;
     const keepFocusVisible = () => {
       const focused = document.activeElement;
-      if (focused instanceof HTMLElement && panel.current?.contains(focused)) {
+      // The panel itself takes focus when it opens, and scrolling a scroller into itself is not
+      // what this is for: only something being typed into needs keeping in sight.
+      if (
+        focused instanceof HTMLElement &&
+        focused !== panel.current &&
+        panel.current?.contains(focused)
+      ) {
         focused.scrollIntoView({ block: "nearest" });
       }
     };
+    keepFocusVisible();
     window.addEventListener("resize", keepFocusVisible);
     return () => window.removeEventListener("resize", keepFocusVisible);
-  }, [open]);
+  }, [open, stableHeight]);
 
   if (!open) return null;
   return (
@@ -713,6 +727,9 @@ export function Sheet({
         style={{
           position: "absolute",
           inset: 0,
+          // The one colour in this file that is not from the theme, and deliberately: a dim is
+          // darkness. Deriving it from the palette would make it white in a light scheme, which
+          // is a fog rather than a dim.
           background: "rgba(0,0,0,.5)",
           zIndex: 10,
           animation: "fadeIn .16s ease both",
@@ -818,6 +835,10 @@ export interface ToastMessage {
  * directly above whichever bars a screen has, so it can never cover the main button on a guest
  * screen or hide behind the tab bar on a staff one. The old hard-coded 78px was the staff tab bar's
  * height, and it was wrong on every other screen.
+ *
+ * Drawn in the theme's own text colour with the page colour on it — inverted, so it stands off the
+ * screen in either scheme and its contrast is the `txt`-on-`bg` pair the palette test already
+ * guarantees. The old one was a fixed dark panel, which in a light theme was a black box.
  */
 export function Toast({ message }: { message: ToastMessage | null }) {
   if (!message) return null;
@@ -831,8 +852,7 @@ export function Toast({ message }: { message: ToastMessage | null }) {
         right: SPACE[3],
         bottom: SPACE[2],
         zIndex: 9,
-        background: "rgba(20,24,30,.96)",
-        border: "1px solid rgba(255,255,255,.14)",
+        background: "var(--txt)",
         borderRadius: RADIUS.md,
         padding: `${SPACE[3]}px ${SPACE[3]}px ${SPACE[3]}px ${SPACE[4]}px`,
         display: "flex",
@@ -845,7 +865,7 @@ export function Toast({ message }: { message: ToastMessage | null }) {
         style={{
           flex: 1,
           fontSize: TEXT.md,
-          color: "#fff",
+          color: "var(--bg)",
           lineHeight: 1.45,
           textWrap: "pretty",
         }}
@@ -859,9 +879,10 @@ export function Toast({ message }: { message: ToastMessage | null }) {
             flex: "none",
             minHeight: TAP,
             padding: `0 ${SPACE[2]}px`,
-            color: "#8fc4ff",
+            color: "var(--bg)",
             fontSize: TEXT.base,
             fontWeight: 700,
+            textDecoration: "underline",
           }}
         >
           {message.undo.label}

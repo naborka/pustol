@@ -67,18 +67,32 @@ export function needsRelaunch(failure: ApiFailure | null): boolean {
   );
 }
 
-/** The named conflicts a refused settings save carries, for the sheet that lists them. */
-export function strandedBookingIds(failure: ApiFailure | null): string[] {
+/** One booking a refused settings save would have stranded. */
+export interface StrandedBooking {
+  guestName: string;
+  startMinutes: number | null;
+}
+
+/**
+ * The bookings a refused settings save names, so the sheet can list them rather than gesture at
+ * them.
+ *
+ * The API has always sent the names and the times; the screen used to throw them away and show one
+ * sentence, which left a manager to work out for themselves which of thirty evenings was in the
+ * way.
+ */
+export function strandedBookings(failure: ApiFailure | null): StrandedBooking[] {
   if (failure?.code !== "would_strand_bookings") return [];
   const conflicts = failure.detail?.["conflicts"];
   if (!Array.isArray(conflicts)) return [];
-  return conflicts
-    .map((conflict) =>
-      typeof conflict === "object" && conflict !== null
-        ? (conflict as Record<string, unknown>)["booking_id"]
-        : undefined,
-    )
-    .filter((id): id is string => typeof id === "string");
+  return conflicts.flatMap((conflict) => {
+    if (typeof conflict !== "object" || conflict === null) return [];
+    const row = conflict as Record<string, unknown>;
+    const guestName = typeof row["guest_name"] === "string" ? row["guest_name"] : "";
+    if (guestName.length === 0) return [];
+    const start = row["start_minutes"];
+    return [{ guestName, startMinutes: typeof start === "number" ? start : null }];
+  });
 }
 
 /** The reasons a settings save was refused, already worded by the domain. */

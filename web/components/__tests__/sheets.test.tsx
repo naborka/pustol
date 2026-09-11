@@ -106,6 +106,19 @@ describe("one booking", () => {
     await userEvent.click(screen.getByText("Найти стол"));
     expect(props.onFindTable).toHaveBeenCalledOnce();
   });
+
+  it("will not seat a party the room has no table for, from here either", async () => {
+    // The row already refuses. The sheet used to offer it anyway, and the toast then read
+    // "Глеб за столом null".
+    const props = bookingSheet(
+      shiftBooking({ guest_name: "Глеб", table_id: null, table_number: null, table_zone: null }),
+    );
+    await userEvent.click(screen.getByText("За столом"));
+    expect(props.onAttendance).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByText("Не пришли"));
+    expect(props.onAttendance).toHaveBeenCalledWith("no_show");
+  });
 });
 
 describe("what cannot be undone", () => {

@@ -12,6 +12,7 @@ import {
   standingOf,
   statusColor,
   statusLabel,
+  statusWash,
   statusWord,
   type Standing,
 } from "../status";
@@ -93,6 +94,9 @@ describe("one vocabulary", () => {
       expect(statusLabel(standing).length).toBeGreaterThan(0);
       expect(statusWord(standing).length).toBeGreaterThan(0);
       expect(statusColor(standing)).toMatch(/^var\(--(btn|dest|ok|hint)\)$/);
+      // Never a literal: the wash behind a booking has to be the user's own accent, not a blue
+      // somebody expanded by hand next to the block that uses it.
+      expect(statusWash(standing)).toMatch(/^var\(--[a-z-]+\)$/);
     }
   });
 

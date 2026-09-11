@@ -52,8 +52,10 @@ export interface Session {
   bar: BarView;
   booking: GuestBooking | null;
   bookable_days: IsoDate[];
-  /** The earliest time tonight still has for an ordinary couple, or null when it has none. */
+  /** The earliest time tonight still has, or null when it has none. */
   today_free_from_minutes: number | null;
+  /** The party size that answer speaks for, and the one the picker opens on. */
+  today_free_for_party: number;
 }
 
 /** One chip on the guest's day rail. */

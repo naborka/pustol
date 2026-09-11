@@ -31,8 +31,20 @@ import {
   type ShiftTable,
   type ShiftView,
 } from "@/lib/api";
-import { invalidReasons, messageFor, needsRelaunch, type ApiFailure } from "@/lib/errors";
+import {
+  invalidReasons,
+  messageFor,
+  needsRelaunch,
+  strandedBookings,
+  type ApiFailure,
+} from "@/lib/errors";
 import * as fmt from "@/lib/format";
+import {
+  attendanceOutcome,
+  previousAttendance,
+  reconciliationReport,
+  strandedLines,
+} from "@/lib/outcomes";
 import { firstReason, differs } from "@/lib/settingsRules";
 import { credentials, haptics, openBotChat, webApp } from "@/lib/telegram";
 import { TIMING } from "@/lib/tokens";
@@ -73,8 +85,42 @@ type OpenSheet =
   | { kind: "manual" }
   | { kind: "guestCancel" };
 
-/** What a party size defaults to: the commonest booking, and what the home card speaks for. */
+/**
+ * What a staff-side party size starts at, and the placeholder the picker holds until it is opened.
+ *
+ * The guest's own default is not this: it is `session.today_free_for_party`, the party the server's
+ * home-screen sentence spoke for, so the card and the picker cannot promise different evenings.
+ */
 const DEFAULT_PARTY = 2;
+
+/**
+ * Fetches, and keeps only the answer to the newest question.
+ *
+ * Tapping 2 then 4 guests fires two requests, and without this the first to come back wins — which
+ * on a bad connection is how a guest is shown the times for a party they are no longer bringing.
+ * Numbered rather than aborted, because an abort still has to be raced against the state update.
+ */
+function useLatest<T>(
+  ask: () => Promise<T | null>,
+  keep: (value: T | null) => void,
+  onFailure: (error: unknown) => void,
+  onSuccess: () => void,
+): () => Promise<void> {
+  const asked = useRef(0);
+  return useCallback(async () => {
+    const question = (asked.current += 1);
+    keep(null);
+    try {
+      const answer = await ask();
+      if (question !== asked.current) return;
+      keep(answer);
+      onSuccess();
+    } catch (error) {
+      if (question !== asked.current) return;
+      onFailure(error);
+    }
+  }, [ask, keep, onFailure, onSuccess]);
+}
 
 export default function Page() {
   const token = useMemo(() => credentials(), []);
@@ -164,28 +210,20 @@ export default function Page() {
     void reload();
   }, [reload]);
 
-  // Answers are numbered so a slow one cannot land on top of a newer question. Tapping 2 then 4
-  // guests fires two requests, and without this the first to come back wins — which on a bad
-  // connection is how a guest is shown the times for a party they are no longer bringing.
-  const answer = useRef({ days: 0, availability: 0, manual: 0 });
-
   // The rail depends only on how many are coming, so it is fetched when that changes and not when
   // a different day on the rail is tapped.
-  const loadDays = useCallback(async () => {
-    if (!api) return;
-    const asked = (answer.current.days += 1);
-    setDayRail(null);
-    try {
-      const rail = (await api.days(partySize)).days;
-      if (asked !== answer.current.days) return;
-      setDayRail(rail);
-      setPickerFailed(false);
-    } catch (error) {
-      if (asked !== answer.current.days) return;
-      setPickerFailed(true);
-      report(error, "guest");
-    }
-  }, [api, partySize, report]);
+  const loadDays = useLatest(
+    useCallback(async () => (await api?.days(partySize))?.days ?? null, [api, partySize]),
+    setDayRail,
+    useCallback(
+      (error: unknown) => {
+        setPickerFailed(true);
+        report(error, "guest");
+      },
+      [report],
+    ),
+    useCallback(() => setPickerFailed(false), []),
+  );
 
   useEffect(() => {
     if (screen !== "book") return;
@@ -194,21 +232,22 @@ export default function Page() {
 
   // The time grid recomputes whenever the question changes. Every answer comes from the server,
   // which has run the real allocator: a time shown as free is a time with a table behind it.
-  const loadAvailability = useCallback(async () => {
-    if (!api || serviceDate === null) return;
-    const asked = (answer.current.availability += 1);
-    setAvailability(null);
-    try {
-      const next = await api.availability(serviceDate, partySize);
-      if (asked !== answer.current.availability) return;
-      setAvailability(next);
-      setPickerFailed(false);
-    } catch (error) {
-      if (asked !== answer.current.availability) return;
-      setPickerFailed(true);
-      report(error, "guest");
-    }
-  }, [api, serviceDate, partySize, report]);
+  const loadAvailability = useLatest(
+    useCallback(
+      async () =>
+        api && serviceDate !== null ? await api.availability(serviceDate, partySize) : null,
+      [api, serviceDate, partySize],
+    ),
+    setAvailability,
+    useCallback(
+      (error: unknown) => {
+        setPickerFailed(true);
+        report(error, "guest");
+      },
+      [report],
+    ),
+    useCallback(() => setPickerFailed(false), []),
+  );
 
   useEffect(() => {
     if (screen !== "book") return;
@@ -254,21 +293,24 @@ export default function Page() {
   }, [tab, shiftDate, loadSettings]);
 
   // The manual-booking sheet asks the same question the guest picker does, for the shift on screen.
-  const loadManualAvailability = useCallback(async () => {
-    if (!api || shiftDate === null) return;
-    const asked = (answer.current.manual += 1);
-    setManualAvailability(null);
-    try {
-      const next = await api.staffAvailability(shiftDate, manual.partySize);
-      if (asked !== answer.current.manual) return;
-      setManualAvailability(next);
-      setManualFailed(false);
-    } catch (error) {
-      if (asked !== answer.current.manual) return;
-      setManualFailed(true);
-      report(error, "staff");
-    }
-  }, [api, shiftDate, manual.partySize, report]);
+  const loadManualAvailability = useLatest(
+    useCallback(
+      async () =>
+        api && shiftDate !== null
+          ? await api.staffAvailability(shiftDate, manual.partySize)
+          : null,
+      [api, shiftDate, manual.partySize],
+    ),
+    setManualAvailability,
+    useCallback(
+      (error: unknown) => {
+        setManualFailed(true);
+        report(error, "staff");
+      },
+      [report],
+    ),
+    useCallback(() => setManualFailed(false), []),
+  );
 
   useEffect(() => {
     if (sheet.kind !== "manual") return;
@@ -323,7 +365,8 @@ export default function Page() {
 
   const openPicker = () => {
     const start = session.booking?.service_date ?? bar.today;
-    setPartySize(session.booking?.party_size ?? DEFAULT_PARTY);
+    // The party the home card spoke for, so the picker opens on the promise the card just made.
+    setPartySize(session.booking?.party_size ?? session.today_free_for_party);
     setServiceDate(
       session.bookable_days.includes(start) ? start : (session.bookable_days[0] ?? start),
     );
@@ -415,64 +458,41 @@ export default function Page() {
     if (message) say(message);
   };
 
-  const describe = (outcome: Reconciliation) => {
-    const parts: string[] = [];
-    if (outcome.moved.length > 0) {
-      parts.push(
-        `Пересажены: ${outcome.moved
-          .map((entry) => `${entry.guest_name} → стол ${entry.to_number}`)
-          .join(", ")}.`,
-      );
-    }
-    if (outcome.orphaned.length > 0) {
-      parts.push(
-        `Всё ещё без стола: ${outcome.orphaned.map((entry) => entry.guest_name).join(", ")}.`,
-      );
-    }
-    return parts.join(" ");
-  };
-
-  /** One tap, applied at once, with the way back attached. */
+  /**
+   * One tap, applied at once, with the way back attached.
+   *
+   * The undo goes back to the status the booking *had*, read off it before the change, so taking
+   * back a mistake restores the room rather than something that resembles it.
+   */
   const setAttendance = async (
     booking: ShiftBooking,
     attendance: Attendance,
-    outcome: (updated: ShiftBooking) => ToastMessage,
+    undoable = true,
   ) => {
+    const before = previousAttendance(booking);
     try {
       const updated = await api.setAttendance(booking.id, attendance);
       haptics.success();
       if (sheet.kind === "booking") setSheet({ kind: "booking", booking: updated });
-      await afterShiftChange(outcome(updated));
+      await afterShiftChange({
+        text: attendanceOutcome(updated, attendance),
+        ...(undoable
+          ? {
+              undo: {
+                label: "Вернуть",
+                run: () => void setAttendance(updated, before, false),
+              },
+            }
+          : {}),
+      });
     } catch (error) {
       report(error, "staff");
     }
   };
 
-  const undoAttendance = (booking: ShiftBooking, back: Attendance) => ({
-    label: "Вернуть",
-    run: () =>
-      void setAttendance(booking, back, (updated) => ({
-        text: `${updated.guest_name}: вернули как было.`,
-      })),
-  });
-
-  const seat = (booking: ShiftBooking) =>
-    void setAttendance(booking, "arrived", (updated) => ({
-      text: `${updated.guest_name} за столом ${updated.table_number}.`,
-      undo: undoAttendance(booking, "confirmed"),
-    }));
-
-  const markLeft = (booking: ShiftBooking) =>
-    void setAttendance(booking, "left", (updated) => ({
-      text: `Стол ${updated.table_number} свободен.`,
-      undo: undoAttendance(booking, "arrived"),
-    }));
-
-  const markNoShow = (booking: ShiftBooking) =>
-    void setAttendance(booking, "no_show", (updated) => ({
-      text: `${updated.guest_name}: не пришли, стол свободен.`,
-      undo: undoAttendance(booking, "confirmed"),
-    }));
+  const seat = (booking: ShiftBooking) => void setAttendance(booking, "arrived");
+  const markLeft = (booking: ShiftBooking) => void setAttendance(booking, "left");
+  const markNoShow = (booking: ShiftBooking) => void setAttendance(booking, "no_show");
 
   const setNote = async (booking: ShiftBooking, note: string | null) => {
     try {
@@ -492,7 +512,7 @@ export default function Page() {
         : `${booking.guest_name} записан вручную — предупредите его сами.`;
       closeSheet();
       await afterShiftChange({
-        text: [`Бронь отменена. ${told}`, describe(outcome.reconciliation)]
+        text: [`Бронь отменена. ${told}`, reconciliationReport(outcome.reconciliation)]
           .filter(Boolean)
           .join(" "),
       });
@@ -519,10 +539,11 @@ export default function Page() {
     run: () => Promise<Reconciliation>,
     lead: string,
     whenNothingMoved: string,
+    orphanLead?: string,
     undo?: ToastMessage["undo"],
   ) => {
     try {
-      const summary = describe(await run());
+      const summary = reconciliationReport(await run(), orphanLead);
       const text = summary.length > 0 ? `${lead} ${summary}`.trim() : whenNothingMoved;
       await afterShiftChange(undo ? { text, undo } : { text });
     } catch (error) {
@@ -536,16 +557,28 @@ export default function Page() {
       () => api.blockTables(shiftDate, tableIds, reason),
       `Стол ${number} закрыт на вечер.`,
       `Стол ${number} закрыт на вечер. Броней там не было.`,
+      "Остались без стола",
       { label: "Вернуть", run: () => void unblockTables(tableIds, number) },
     );
   };
 
-  const unblockTables = (tableIds: string[], number: number) => {
+  /**
+   * Opening a table back up is as reversible as closing it, so it offers the same way back — with
+   * the reason it was closed for, which is the only way re-closing it puts the room where it was.
+   */
+  const unblockTables = (tableIds: string[], number: number, wasClosedFor?: string) => {
     closeSheet();
     return rearrange(
       () => api.unblockTables(shiftDate, tableIds),
       `Стол ${number} снова в подборе.`,
       `Стол ${number} снова в подборе.`,
+      undefined,
+      wasClosedFor === undefined
+        ? undefined
+        : {
+            label: "Вернуть",
+            run: () => void blockTables(tableIds, wasClosedFor, number),
+          },
     );
   };
 
@@ -597,7 +630,7 @@ export default function Page() {
       const saved = await api.saveSettings(shiftDate, draft);
       setSettings(saved.settings);
       setDraft(draftOf(saved.settings));
-      const parts = ["Настройки сохранены.", describe(saved.reconciliation)];
+      const parts = ["Настройки сохранены.", reconciliationReport(saved.reconciliation)];
       if (saved.above_cap > 0) {
         parts.push(`${fmt.bookings(saved.above_cap)} больше нового лимита — они остаются в силе.`);
       }
@@ -606,7 +639,9 @@ export default function Page() {
     } catch (error) {
       const failure = report(error, "staff");
       if (failure.code === "would_strand_bookings") {
-        setSheet({ kind: "conflict", reasons: [messageFor(failure, "staff")] });
+        // Named, with their times. The API has always sent both; showing one general sentence
+        // instead left a manager to work out which of thirty evenings was in the way.
+        setSheet({ kind: "conflict", reasons: strandedLines(strandedBookings(failure)) });
       } else if (failure.code === "settings_invalid") {
         setSheet({ kind: "conflict", reasons: invalidReasons(failure) });
       }
@@ -657,13 +692,7 @@ export default function Page() {
             onClose={closeSheet}
             onAttendance={(attendance) => {
               if (sheet.kind !== "booking") return;
-              if (attendance === "arrived") seat(sheet.booking);
-              else if (attendance === "left") markLeft(sheet.booking);
-              else if (attendance === "no_show") markNoShow(sheet.booking);
-              else
-                void setAttendance(sheet.booking, "confirmed", (updated) => ({
-                  text: `${updated.guest_name}: снова ждём.`,
-                }));
+              void setAttendance(sheet.booking, attendance);
             }}
             onNote={(note) => {
               if (sheet.kind === "booking") void setNote(sheet.booking, note);
@@ -712,7 +741,12 @@ export default function Page() {
               if (sheet.kind === "table") void blockTables(tableIds, reason, sheet.table.number);
             }}
             onUnblock={(tableIds) => {
-              if (sheet.kind === "table") void unblockTables(tableIds, sheet.table.number);
+              if (sheet.kind !== "table") return;
+              void unblockTables(
+                tableIds,
+                sheet.table.number,
+                sheet.table.blocked_because ?? undefined,
+              );
             }}
           />
 

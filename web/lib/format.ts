@@ -166,11 +166,15 @@ export function dayDate(date: IsoDate): string {
   return `${day} ${MONTH_GENITIVE[month - 1] ?? ""}`;
 }
 
-/** The one-line form: "Сегодня", or "чт, 30 июл" once the day needs naming. */
+/**
+ * The one-line form: "Сегодня", or "чт, 30 июл" once the day needs naming.
+ *
+ * Decided on the dates rather than on what `dayName` happened to return. Comparing against the
+ * words would make rewording "Сегодня" silently produce "Сегодня, 30 июл".
+ */
 export function dayFull(date: IsoDate, today: IsoDate): string {
-  const name = dayName(date, today);
-  if (name === "Сегодня" || name === "Завтра") return name;
-  return `${name}, ${dayDate(date)}`;
+  if (date === today || date === addDays(today, 1)) return dayName(date, today);
+  return `${dayName(date, today)}, ${dayDate(date)}`;
 }
 
 /** "Сегодня в 20:00" — the headline on a guest's booking card. */

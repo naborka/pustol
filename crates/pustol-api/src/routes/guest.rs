@@ -77,6 +77,7 @@ async fn session(
         today_free_from_minutes: tonight
             .first()
             .and_then(|offer| offer.free_from_minutes),
+        today_free_for_party: HOME_CARD_PARTY,
     }))
 }
 

@@ -521,6 +521,10 @@ async fn the_first_screen_says_when_tonight_opens_up() {
     let body = app.get("/api/session", &guest).await.expect_ok().clone();
     assert_eq!(body["today_free_from_minutes"], 600);
     assert_eq!(
+        body["today_free_for_party"], 2,
+        "the party that sentence speaks for, sent rather than agreed by comment"
+    );
+    assert_eq!(
         body["bar"]["now_minutes"], 480,
         "eight in the morning, in the bar's own timezone rather than the phone's"
     );

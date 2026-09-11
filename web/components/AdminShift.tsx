@@ -353,7 +353,7 @@ export function BookingRow({
                 action.tone === "primary"
                   ? "var(--btn)"
                   : action.tone === "warn"
-                    ? "rgba(234,161,58,.18)"
+                    ? "var(--warn-wash)"
                     : "transparent",
               color:
                 action.tone === "primary"
@@ -392,13 +392,18 @@ export function NoteChip({ text }: { text: string }) {
 
 // ---- Сейчас -------------------------------------------------------------------------------------
 
-/** Whether a booking matches what somebody typed: a name, or a table number. */
+/**
+ * Whether a booking matches what somebody typed: a name, or a table number.
+ *
+ * Those two and nothing else. A guest at the door says a name; a colleague across the room says a
+ * number. Matching notes as well would quietly turn "Аллергия" into a way to lose the guest you
+ * were looking for.
+ */
 export function matchesSearch(booking: ShiftBooking, query: string): boolean {
   const needle = query.trim().toLowerCase();
   if (needle.length === 0) return true;
   if (booking.guest_name.toLowerCase().includes(needle)) return true;
-  if (booking.table_number !== null && String(booking.table_number).includes(needle)) return true;
-  return (booking.note ?? "").toLowerCase().includes(needle);
+  return booking.table_number !== null && String(booking.table_number).includes(needle);
 }
 
 export function NowPane({
@@ -441,7 +446,23 @@ export function NowPane({
         padding: `0 ${SPACE[3]}px ${SPACE[5]}px`,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: SPACE[2] }}>
+      {/*
+        Sticky rather than merely present. A bartender with somebody at the door is usually part
+        way down a busy list, and a search box that has scrolled off the top is a search box that
+        costs a scroll before it costs a keystroke.
+      */}
+      <div
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 3,
+          background: "var(--bg)",
+          paddingBottom: SPACE[2],
+          display: "flex",
+          alignItems: "center",
+          gap: SPACE[2],
+        }}
+      >
         <TextField
           value={search}
           placeholder="Поиск: имя или номер стола"
@@ -747,7 +768,7 @@ export function TablesPane({
               style={{
                 ...ROW_BOX,
                 position: "relative",
-                background: "rgba(234,161,58,.07)",
+                background: "var(--chip-off)",
               }}
             >
               {orphans.map((booking) => (

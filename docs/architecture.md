@@ -50,7 +50,7 @@
 В схеме второе выглядит так:
 
 ```sql
-exclude using gist (table_id with =, during with &&)
+exclude using gist (table_id with =, occupies with &&)
   where (status <> 'cancelled' and table_id is not null)
 ```
 

@@ -498,7 +498,9 @@ export function DoneScreen({ booking, bar }: { booking: GuestBooking; bar: BarVi
           alignItems: "center",
           justifyContent: "center",
           fontSize: 36,
-          color: "#fff",
+          // The page colour, not white: against the dark scheme's green a white tick is 2.3:1,
+          // which is under the threshold even for something this large.
+          color: "var(--bg)",
           fontWeight: 700,
           animation: "pop .28s cubic-bezier(.2,.9,.3,1.2) both",
         }}

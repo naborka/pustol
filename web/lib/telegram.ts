@@ -69,8 +69,14 @@ export interface WebApp {
   onEvent: (event: string, handler: () => void) => void;
   offEvent: (event: string, handler: () => void) => void;
   openTelegramLink: (url: string) => void;
+  /**
+   * Declared but never called, and a test holds it that way.
+   *
+   * Fullscreen is the platform's to give: the user asks for it from Telegram's own menu, and this
+   * app follows along through `fullscreenChanged`. Requesting it on start-up made the app taller
+   * than the room it was given and was part of why its bottom bar ended up under Telegram's chrome.
+   */
   requestFullscreen?: () => void;
-  exitFullscreen?: () => void;
   setHeaderColor?: (color: string) => void;
   setBackgroundColor?: (color: string) => void;
   safeAreaInset?: Insets;

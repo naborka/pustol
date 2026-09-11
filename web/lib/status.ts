@@ -53,77 +53,97 @@ export function standingOf(
   }
 }
 
-/** The words on screen. Russian, and the same words wherever this standing is shown. */
-export function statusLabel(standing: Standing): string {
+/**
+ * Everything a standing is: what it is called, what colour it is, and whether its evening is over.
+ *
+ * One table rather than four switches on the same union. Four switches is four places to forget a
+ * case, and forgetting one is how `left` ends up the right colour in the list and the wrong one on
+ * the timeline. `word` is the short form for a chip; `label` is the sentence for a row.
+ */
+interface Look {
+  label: string;
+  word: string;
+  color: string;
+  wash: string;
+  settled: boolean;
+}
+
+function look(standing: Standing): Look {
   switch (standing.kind) {
     case "waiting":
-      return "Ждём";
+      return {
+        label: "Ждём",
+        word: "Ждём",
+        color: "var(--btn)",
+        wash: "var(--btn-wash)",
+        settled: false,
+      };
     case "late":
-      return `Опаздывает ${standing.minutes} мин`;
+      return {
+        label: `Опаздывает ${standing.minutes} мин`,
+        word: `Опаздывает ${standing.minutes} мин`,
+        color: "var(--dest)",
+        wash: "var(--tint)",
+        settled: false,
+      };
     case "seated":
-      return "За столом";
+      return {
+        label: "За столом",
+        word: "За столом",
+        color: "var(--ok)",
+        wash: "var(--ok-wash)",
+        settled: false,
+      };
     case "left":
-      return `Ушли в ${time(standing.at)} · стол свободен`;
+      return {
+        label: `Ушли в ${time(standing.at)} · стол свободен`,
+        word: "Ушли",
+        color: "var(--hint)",
+        wash: "var(--chip-off)",
+        settled: true,
+      };
     case "no_show":
-      return `Не пришли в ${time(standing.at)} · стол свободен`;
+      return {
+        label: `Не пришли в ${time(standing.at)} · стол свободен`,
+        word: "Не пришли",
+        color: "var(--hint)",
+        wash: "var(--chip-off)",
+        settled: true,
+      };
     case "cancelled":
-      return "Отменена";
+      return {
+        label: "Отменена",
+        word: "Отменена",
+        color: "var(--hint)",
+        wash: "var(--chip-off)",
+        settled: true,
+      };
   }
+}
+
+/** The words on screen. Russian, and the same words wherever this standing is shown. */
+export function statusLabel(standing: Standing): string {
+  return look(standing).label;
 }
 
 /** The short form, for a chip with no room for a sentence. */
 export function statusWord(standing: Standing): string {
-  switch (standing.kind) {
-    case "waiting":
-      return "Ждём";
-    case "late":
-      return `Опаздывает ${standing.minutes} мин`;
-    case "seated":
-      return "За столом";
-    case "left":
-      return "Ушли";
-    case "no_show":
-      return "Не пришли";
-    case "cancelled":
-      return "Отменена";
-  }
+  return look(standing).word;
 }
 
 /** The colour, as a custom property the theme fills in. */
 export function statusColor(standing: Standing): string {
-  switch (standing.kind) {
-    case "waiting":
-      return "var(--btn)";
-    case "late":
-      return "var(--dest)";
-    case "seated":
-      return "var(--ok)";
-    case "left":
-    case "no_show":
-    case "cancelled":
-      return "var(--hint)";
-  }
+  return look(standing).color;
 }
 
 /** The wash behind a block on the timeline, in the same colour the label is in. */
 export function statusWash(standing: Standing): string {
-  switch (standing.kind) {
-    case "waiting":
-      return "rgba(82,136,193,.22)";
-    case "late":
-      return "var(--tint)";
-    case "seated":
-      return "rgba(66,199,103,.20)";
-    case "left":
-    case "no_show":
-    case "cancelled":
-      return "rgba(128,128,128,.16)";
-  }
+  return look(standing).wash;
 }
 
 /** Whether this booking's evening is over — the `Закрыто` group on the shift list. */
 export function isSettled(standing: Standing): boolean {
-  return standing.kind === "left" || standing.kind === "no_show" || standing.kind === "cancelled";
+  return look(standing).settled;
 }
 
 /** Which group on the shift list a booking belongs to, and in what order the groups read. */
