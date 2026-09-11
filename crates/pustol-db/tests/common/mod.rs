@@ -288,6 +288,7 @@ pub fn staff_booking(bar: BarId, name: &str, minutes: i32, party_size: i32) -> N
         party_size,
         channel: Channel::Staff {
             guest_name: name.to_owned(),
+            table: None,
         },
         // Nobody to remind: a booking taken at the door has no account behind it.
         reminder: None,
@@ -310,4 +311,18 @@ pub fn cancellation_wording(
     reason: &str,
 ) -> String {
     format!("{}: бронь {} отменена — {reason}", config.name, record.guest_name)
+}
+
+pub fn move_words() -> pustol_db::bookings::MoveWords {
+    pustol_db::bookings::MoveWords {
+        notice: |config, record, moved_to| {
+            format!(
+                "{}: бронь {} перенесена на {}",
+                config.name,
+                record.guest_name,
+                moved_to.start()
+            )
+        },
+        reminder: reminder_wording,
+    }
 }

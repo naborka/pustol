@@ -929,6 +929,146 @@ async fn a_walk_in_is_seated_at_the_minute_they_sat_down() {
     assert_eq!(seated["reachable_by_bot"], false);
 }
 
+/// Takes a booking by telephone on the fixture Thursday and answers with its identifier.
+async fn booked(app: &common::Harness, staff: &Caller, minutes: i64, name: &str) -> String {
+    app.post(
+        "/api/admin/bookings",
+        staff,
+        serde_json::json!({
+            "service_date": "2026-07-30",
+            "start_minutes": minutes,
+            "party_size": 2,
+            "guest_name": name,
+        }),
+    )
+    .await
+    .expect_ok()["id"]
+        .as_str()
+        .expect("an identifier")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn staff_move_a_booking_to_the_table_and_the_time_they_choose() {
+    // The allocator gave them the first four-top. The room the allocator cannot see says the
+    // corner, and the guest telephoned to ask for half an hour later.
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 4, "Бар"), table(2, 4, "Зал")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let id = booked(&app, &staff, 1_200, "Глеб").await;
+    let corner = table_id(&app, &staff, 2).await;
+
+    let moved = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            &staff,
+            serde_json::json!({ "start_minutes": 1_320, "table_id": corner }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+
+    assert_eq!(moved["booking"]["table_number"], 2);
+    assert_eq!(moved["booking"]["start_minutes"], 1_320);
+    assert_eq!(moved["booking"]["end_minutes"], 1_440);
+    assert_eq!(
+        moved["guest_notified"], false,
+        "a booking taken over the telephone has no account to write to"
+    );
+
+    let shift = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(shift["bookings"][0]["table_number"], 2);
+    assert_eq!(shift["bookings"][0]["start_minutes"], 1_320);
+}
+
+#[tokio::test]
+async fn the_times_offered_for_a_move_do_not_count_the_booking_being_moved() {
+    // One table, one booking. Moving it by half an hour must not mean giving up its table first
+    // and hoping: the times staff are offered are the times with this booking set aside.
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 4, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let id = booked(&app, &staff, 1_200, "Вера").await;
+
+    let state = |body: &serde_json::Value, minutes: i64| {
+        body["slots"]
+            .as_array()
+            .expect("slots")
+            .iter()
+            .find(|slot| slot["start_minutes"] == minutes)
+            .map(|slot| slot["state"].as_str().expect("a state").to_owned())
+    };
+
+    let plain = app
+        .get(
+            "/api/admin/availability?service_date=2026-07-30&party_size=2",
+            &staff,
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(state(&plain, 1_200).as_deref(), Some("taken"));
+
+    let moving = app
+        .get(
+            &format!("/api/admin/availability?service_date=2026-07-30&party_size=2&ignoring={id}"),
+            &staff,
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(state(&moving, 1_200).as_deref(), Some("free"));
+    assert_eq!(state(&moving, 1_320).as_deref(), Some("free"));
+}
+
+#[tokio::test]
+async fn a_booking_that_has_started_keeps_its_time_and_can_still_change_table() {
+    // 20:30 Belgrade: the 20:00 booking is under way. Its window is history now, and history is
+    // not rewritten; where they sit for the rest of it still is.
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 4, "Бар"), table(2, 4, "Зал")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let id = booked(&app, &staff, 1_200, "Тимур").await;
+    let corner = table_id(&app, &staff, 2).await;
+    let under_way = app.at(common::utc(2026, 7, 30, 18, 30));
+
+    let refused = under_way
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            &staff,
+            serde_json::json!({ "start_minutes": 1_320, "table_id": corner }),
+        )
+        .await;
+    assert_eq!(refused.error_code(), Some("booking_started"));
+
+    let moved = under_way
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            &staff,
+            serde_json::json!({ "start_minutes": 1_200, "table_id": corner }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(moved["booking"]["table_number"], 2);
+}
+
 #[tokio::test]
 async fn staff_seat_a_walk_in_at_the_table_they_picked_themselves() {
     // The room would offer the two-top. A bartender who can see the couple asking for the corner

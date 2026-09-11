@@ -12,6 +12,7 @@
  * list, and gets no undo, because the confirmation *is* the protection.
  */
 
+import type { ReactNode } from "react";
 import { useState } from "react";
 
 import type {
@@ -23,8 +24,9 @@ import type {
   ShiftView,
 } from "@/lib/api";
 import * as fmt from "@/lib/format";
-import { walkInOffers } from "@/lib/occupancy";
-import { standingOf, statusLabel } from "@/lib/status";
+import { tableOffers, walkInOffers } from "@/lib/occupancy";
+import type { TableOffer } from "@/lib/occupancy";
+import { hasStarted, isSettled, standingOf, statusLabel } from "@/lib/status";
 import { openChatWith } from "@/lib/telegram";
 import { RADIUS, SPACE, TEXT } from "@/lib/tokens";
 import {
@@ -104,6 +106,7 @@ export function BookingSheet({
   onNote,
   onOpenTemplates,
   onOpenCancel,
+  onOpenMove,
   onFindTable,
 }: {
   open: boolean;
@@ -115,12 +118,15 @@ export function BookingSheet({
   onNote: (note: string | null) => void;
   onOpenTemplates: () => void;
   onOpenCancel: () => void;
+  onOpenMove: () => void;
   onFindTable: () => void;
 }) {
   if (!booking) return null;
   const seated = booking.table_id !== null;
   const standing = standingOf(booking, nowMinutes, graceMinutes);
   const title = booking.source === "walk" ? "Гости без брони" : booking.guest_name;
+  // An evening that is over is a record, not a plan.
+  const movable = !isSettled(standing);
 
   return (
     <Sheet open={open} onClose={onClose} title={title}>
@@ -147,6 +153,8 @@ export function BookingSheet({
           <Separator />
           <Fact label="Откуда" value={SOURCE_LABEL[booking.source]} />
         </Card>
+
+        {movable ? <CardAction label="Перенести" onClick={onOpenMove} /> : null}
 
         {!seated ? (
           <div
@@ -552,14 +560,8 @@ export function DaySheet({
 /**
  * A party that walked in.
  *
- * The app lists every table the party could be put at and starts on the one the room would have
- * chosen itself, because the bartender is about to walk somebody across a room and is the only
- * person who can see that the couple asked for the corner. It is the same rule that answers the
- * shift's own "who fits" line, so the list and the pulse can never disagree.
- *
- * A free table the party is too large for is drawn too, greyed, with the reason on it: a
- * bartender looking at an empty room and reading «свободного стола нет» would be reading a screen
- * that has lost the plot.
+ * Every table the party could be put at, starting on the one the room would have chosen. The
+ * bartender is the only person who can see that the couple asked for the corner.
  */
 export function WalkInSheet({
   open,
@@ -587,12 +589,7 @@ export function WalkInSheet({
   if (!shift || shift.now_minutes === null) return null;
   const until = shift.now_minutes + turnMinutes;
   const offers = walkInOffers(shift, partySize, turnMinutes);
-  const seatable = offers.filter((offer) => offer.fits);
-  // Read back off the list rather than kept as state of its own: a table that has stopped being
-  // available — the party grew, somebody else took it — is simply no longer the chosen one, and
-  // there is no stale choice left anywhere to reset.
-  const chosen =
-    seatable.find((offer) => offer.table.id === chosenTableId)?.table ?? seatable[0]?.table ?? null;
+  const chosen = chosenTable(offers, chosenTableId);
 
   return (
     <Sheet
@@ -631,30 +628,102 @@ export function WalkInSheet({
           </Card>
         ) : null}
 
-        {offers.length > 0 ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
-            <SectionLabel>{chosen ? "Куда сажаем" : "Свободные столы"}</SectionLabel>
-            <div style={{ display: "flex", flexDirection: "column", gap: SPACE[1] + 2 }}>
-              {offers.map((offer) => (
-                <TableChoice
-                  key={offer.table.id}
-                  table={offer.table}
-                  fits={offer.fits}
-                  chosen={offer.table.id === chosen?.id}
-                  onClick={() => onChooseTable(offer.table.id)}
-                />
-              ))}
-            </div>
-            {chosen ? (
-              <Note>
-                Сверху — самый маленький подходящий: большие столы остаются для больших компаний.
-                Стол будет занят до {fmt.time(until)}.
-              </Note>
-            ) : null}
-          </div>
-        ) : null}
+        <TableChoiceList offers={offers} chosen={chosen} onChoose={onChooseTable}>
+          Сверху — самый маленький подходящий: большие столы остаются для больших компаний. Стол
+          будет занят до {fmt.time(until)}.
+        </TableChoiceList>
       </div>
     </Sheet>
+  );
+}
+
+/**
+ * The table a sheet will actually use.
+ *
+ * Read off the list rather than kept as state: one that has stopped being available — the party
+ * grew, the time moved, somebody took it — is simply no longer the chosen one, with nothing to
+ * reset.
+ */
+function chosenTable(offers: TableOffer[], chosenId: string | null): ShiftTable | null {
+  const seatable = offers.filter((offer) => offer.fits);
+  return seatable.find((offer) => offer.table.id === chosenId)?.table ?? seatable[0]?.table ?? null;
+}
+
+/** The free tables on offer, with the chosen one marked. Shared by every sheet that seats a party. */
+function TableChoiceList({
+  offers,
+  chosen,
+  onChoose,
+  children,
+}: {
+  offers: TableOffer[];
+  chosen: ShiftTable | null;
+  onChoose: (tableId: string) => void;
+  children?: ReactNode;
+}) {
+  if (offers.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
+      <SectionLabel>{chosen ? "Куда сажаем" : "Свободные столы"}</SectionLabel>
+      <div style={{ display: "flex", flexDirection: "column", gap: SPACE[1] + 2 }}>
+        {offers.map((offer) => (
+          <TableChoice
+            key={offer.table.id}
+            table={offer.table}
+            fits={offer.fits}
+            chosen={offer.table.id === chosen?.id}
+            onClick={() => onChoose(offer.table.id)}
+          />
+        ))}
+      </div>
+      {chosen && children ? <Note>{children}</Note> : null}
+    </div>
+  );
+}
+
+/** The evening's arrival times, or why there are none to show. */
+function SlotSection({
+  availability,
+  chosen,
+  failedToLoad,
+  onPick,
+  onTaken,
+  onRetry,
+}: {
+  availability: Availability | null;
+  chosen: number | null;
+  failedToLoad: boolean;
+  onPick: (minutes: number) => void;
+  onTaken: () => void;
+  onRetry: () => void;
+}) {
+  const offered = (availability?.slots ?? []).filter((slot) => slot.state !== "past");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
+      <SectionLabel>Время</SectionLabel>
+      {availability === null ? (
+        failedToLoad ? (
+          <>
+            <Note tone="warn">Не удалось прочитать свободные окна.</Note>
+            <CardAction label="Попробовать снова" onClick={onRetry} />
+          </>
+        ) : (
+          <Spinner label="Считаем свободные окна" />
+        )
+      ) : offered.length === 0 ? (
+        <Note tone="warn">В этот вечер не осталось ни одного времени.</Note>
+      ) : (
+        <SlotGrid
+          slots={offered}
+          chosen={chosen}
+          onPick={onPick}
+          onTaken={onTaken}
+          height={40}
+          fontSize={TEXT.base}
+          gap={SPACE[1] + 2}
+        />
+      )}
+    </div>
   );
 }
 
@@ -705,37 +774,50 @@ function TableChoice({
 /** A booking taken over the telephone or at the door for a later evening. */
 export function ManualBookingSheet({
   open,
+  shift,
   maxParty,
+  turnMinutes,
   availability,
   partySize,
   chosenMinutes,
+  chosenTableId,
   guestName,
   failedToLoad,
   onClose,
   onPartySize,
   onPick,
   onTakenSlot,
+  onChooseTable,
   onGuestName,
   onRetry,
   onCreate,
 }: {
   open: boolean;
+  shift: ShiftView | null;
   maxParty: number;
+  turnMinutes: number;
   availability: Availability | null;
   partySize: number;
   chosenMinutes: number | null;
+  chosenTableId: string | null;
   guestName: string;
   failedToLoad: boolean;
   onClose: () => void;
   onPartySize: (size: number) => void;
   onPick: (minutes: number) => void;
   onTakenSlot: () => void;
+  onChooseTable: (tableId: string) => void;
   onGuestName: (name: string) => void;
   onRetry: () => void;
-  onCreate: () => void;
+  onCreate: (tableId: string) => void;
 }) {
-  const offered = (availability?.slots ?? []).filter((slot) => slot.state !== "past");
-  const ready = guestName.trim().length > 0 && chosenMinutes !== null;
+  if (!open) return null;
+  const offers =
+    shift && chosenMinutes !== null
+      ? tableOffers(shift, partySize, chosenMinutes, chosenMinutes + turnMinutes)
+      : [];
+  const table = chosenTable(offers, chosenTableId);
+  const ready = guestName.trim().length > 0 && chosenMinutes !== null && table !== null;
 
   return (
     <Sheet
@@ -747,11 +829,13 @@ export function ManualBookingSheet({
           tone="primary"
           disabled={!ready}
           label={
-            ready && chosenMinutes !== null
-              ? `Записать на ${fmt.time(chosenMinutes)}`
+            ready
+              ? `Записать на ${fmt.time(chosenMinutes)}, стол ${table.number}`
               : "Имя и время"
           }
-          onClick={onCreate}
+          onClick={() => {
+            if (table) onCreate(table.id);
+          }}
         />
       }
     >
@@ -768,31 +852,120 @@ export function ManualBookingSheet({
           <PartySizeGrid max={maxParty} value={partySize} onChange={onPartySize} />
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
-          <SectionLabel>Время</SectionLabel>
-          {availability === null ? (
-            failedToLoad ? (
-              <>
-                <Note tone="warn">Не удалось прочитать свободные окна.</Note>
-                <CardAction label="Попробовать снова" onClick={onRetry} />
-              </>
-            ) : (
-              <Spinner label="Считаем свободные окна" />
-            )
-          ) : offered.length === 0 ? (
-            <Note tone="warn">В этот вечер не осталось ни одного времени.</Note>
-          ) : (
-            <SlotGrid
-              slots={offered}
-              chosen={chosenMinutes}
-              onPick={onPick}
-              onTaken={onTakenSlot}
-              height={40}
-              fontSize={TEXT.base}
-              gap={SPACE[1] + 2}
-            />
-          )}
-        </div>
+        <SlotSection
+          availability={availability}
+          chosen={chosenMinutes}
+          failedToLoad={failedToLoad}
+          onPick={onPick}
+          onTaken={onTakenSlot}
+          onRetry={onRetry}
+        />
+
+        <TableChoiceList offers={offers} chosen={table} onChoose={onChooseTable}>
+          Сверху — самый маленький подходящий. Гость столов не видит, так что менять их можно
+          сколько угодно.
+        </TableChoiceList>
+      </div>
+    </Sheet>
+  );
+}
+
+// ---- moving a booking ---------------------------------------------------------------------------
+
+/**
+ * Where a booking sits, and when. One sheet, because it is one question.
+ *
+ * The guest is told when the time moves, never when only the table does. A booking that has
+ * started keeps its time — that window is the shift's history — but can still change table.
+ */
+export function MoveBookingSheet({
+  open,
+  booking,
+  shift,
+  turnMinutes,
+  availability,
+  chosenMinutes,
+  chosenTableId,
+  failedToLoad,
+  onClose,
+  onPick,
+  onTakenSlot,
+  onChooseTable,
+  onRetry,
+  onMove,
+}: {
+  open: boolean;
+  booking: ShiftBooking | null;
+  shift: ShiftView | null;
+  turnMinutes: number;
+  availability: Availability | null;
+  chosenMinutes: number | null;
+  chosenTableId: string | null;
+  failedToLoad: boolean;
+  onClose: () => void;
+  onPick: (minutes: number) => void;
+  onTakenSlot: () => void;
+  onChooseTable: (tableId: string) => void;
+  onRetry: () => void;
+  onMove: (startMinutes: number, tableId: string) => void;
+}) {
+  if (!open || !booking || !shift) return null;
+  const started = hasStarted(booking, shift.now_minutes);
+  const minutes = started ? booking.start_minutes : (chosenMinutes ?? booking.start_minutes);
+  const until = minutes === booking.start_minutes ? booking.end_minutes : minutes + turnMinutes;
+  const offers = tableOffers(shift, booking.party_size, minutes, until, booking.id);
+  const table = chosenTable(offers, chosenTableId ?? booking.table_id);
+  const moves =
+    table !== null && (minutes !== booking.start_minutes || table.id !== booking.table_id);
+
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      title="Перенести"
+      footer={
+        <CardAction
+          tone="primary"
+          disabled={!moves}
+          label={
+            !moves
+              ? "Ничего не меняли"
+              : minutes === booking.start_minutes
+                ? `Пересадить за стол ${table.number}`
+                : `Перенести на ${fmt.time(minutes)}, стол ${table.number}`
+          }
+          onClick={() => {
+            if (table) onMove(minutes, table.id);
+          }}
+        />
+      }
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: SPACE[4] }}>
+        <SheetTitle>Перенести</SheetTitle>
+        <Note>
+          {booking.guest_name} · {fmt.time(booking.start_minutes)} ·{" "}
+          {fmt.guests(booking.party_size)}
+        </Note>
+
+        {started ? (
+          <Note tone="warn">
+            Бронь уже началась — время не меняем. Стол можно поменять в любой момент.
+          </Note>
+        ) : (
+          <SlotSection
+            availability={availability}
+            chosen={minutes}
+            failedToLoad={failedToLoad}
+            onPick={onPick}
+            onTaken={onTakenSlot}
+            onRetry={onRetry}
+          />
+        )}
+
+        <TableChoiceList offers={offers} chosen={table} onChoose={onChooseTable}>
+          Стол будет занят до {fmt.time(until)}. Гость увидит только новое время — столов он не
+          видит вовсе.
+        </TableChoiceList>
       </div>
     </Sheet>
   );

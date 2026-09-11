@@ -146,6 +146,19 @@ export function isSettled(standing: Standing): boolean {
   return look(standing).settled;
 }
 
+/**
+ * Whether a booking's window has begun.
+ *
+ * From then on its time is the shift's history and cannot be moved; its table still can. `null`
+ * means this is not the running shift, so nothing has begun.
+ */
+export function hasStarted(
+  booking: Pick<ShiftBooking, "start_minutes">,
+  nowMinutes: number | null,
+): boolean {
+  return nowMinutes !== null && booking.start_minutes <= nowMinutes;
+}
+
 /** Which group on the shift list a booking belongs to, and in what order the groups read. */
 export type ShiftGroup = "orphan" | "waiting" | "seated" | "settled";
 

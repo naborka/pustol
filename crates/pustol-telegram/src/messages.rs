@@ -34,6 +34,24 @@ pub fn cancellation(bar_name: &str, starts_at: DateTime<Utc>, timezone: Tz, reas
     )
 }
 
+/// The message for a moved booking. Names both times — the guest is holding the old one in their
+/// head.
+#[must_use]
+pub fn moved(
+    bar_name: &str,
+    was_at: DateTime<Utc>,
+    now_at: DateTime<Utc>,
+    timezone: Tz,
+    party_size: i32,
+) -> String {
+    format!(
+        "{bar_name}: бронь с {was} перенесена на {now}, {guests}. Не подходит — напишите нам.",
+        was = was_at.with_timezone(&timezone).format("%H:%M"),
+        now = now_at.with_timezone(&timezone).format("%H:%M"),
+        guests = guests(party_size),
+    )
+}
+
 /// Russian counts the noun after the number, so a bare "3 гость" reads as broken software.
 #[must_use]
 pub fn guests(count: i32) -> String {

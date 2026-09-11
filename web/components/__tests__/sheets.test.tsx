@@ -6,14 +6,25 @@
  * no undo, because the choosing was the protection.
  */
 
+import { useState } from "react";
+
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ShiftView } from "@/lib/api";
 
-import { BookingSheet, ChoiceSheet, DaySheet, TableSheet, WalkInSheet } from "../Sheets";
-import { noop, shift, shiftBooking, shiftTable } from "./fixtures";
+import {
+  BookingSheet,
+  ChoiceSheet,
+  DaySheet,
+  ManualBookingSheet,
+  MoveBookingSheet,
+  TableSheet,
+  WalkInSheet,
+} from "../Sheets";
+import { Sheet, TextField } from "../ui";
+import { availability, noop, shift, shiftBooking, shiftTable } from "./fixtures";
 
 afterEach(cleanup);
 
@@ -23,6 +34,7 @@ function bookingSheet(booking = shiftBooking(), handlers: Record<string, () => v
     onNote: vi.fn(),
     onOpenTemplates: vi.fn(),
     onOpenCancel: vi.fn(),
+    onOpenMove: vi.fn(),
     onFindTable: vi.fn(),
     ...handlers,
   };
@@ -37,6 +49,7 @@ function bookingSheet(booking = shiftBooking(), handlers: Record<string, () => v
       onNote={props.onNote as never}
       onOpenTemplates={props.onOpenTemplates}
       onOpenCancel={props.onOpenCancel}
+      onOpenMove={props.onOpenMove}
       onFindTable={props.onFindTable}
     />,
   );
@@ -344,5 +357,143 @@ describe("a party at the door", () => {
     });
     walkInSheet(view, 2);
     expect(screen.getByText("Посадить за стол 7")).toBeDefined();
+  });
+});
+
+describe("typing in a sheet", () => {
+  /** A parent that hands a new `onClose` on every render, which is what a page component does. */
+  function NameSheet() {
+    const [name, setName] = useState("");
+    return (
+      <Sheet open onClose={() => {}} title="Записать гостя">
+        <TextField value={name} onChange={setName} placeholder="Имя" />
+      </Sheet>
+    );
+  }
+
+  it("leaves the focus in the field instead of pulling it back to the panel", async () => {
+    // The bug: the sheet took focus whenever its effect re-ran, and the effect depended on a
+    // callback the page rebuilds every render. Every keystroke re-rendered, stole the focus, and
+    // shut the phone keyboard — so a name could not be typed at all.
+    render(<NameSheet />);
+    const field = screen.getByPlaceholderText("Имя");
+    await userEvent.type(field, "Глеб");
+    expect(document.activeElement).toBe(field);
+    expect((field as HTMLInputElement).value).toBe("Глеб");
+  });
+});
+
+describe("moving a booking", () => {
+  const later = shiftBooking({ start_minutes: 1_320, end_minutes: 1_440 });
+
+  function moveSheet(
+    booking = later,
+    chosen: { minutes?: number | null; table?: string | null } = {},
+    handlers: {
+      onChooseTable?: (tableId: string) => void;
+      onMove?: (minutes: number, tableId: string) => void;
+    } = {},
+  ) {
+    return render(
+      <MoveBookingSheet
+        open
+        booking={booking}
+        shift={shift()}
+        turnMinutes={120}
+        availability={availability()}
+        chosenMinutes={chosen.minutes ?? null}
+        chosenTableId={chosen.table ?? null}
+        failedToLoad={false}
+        onClose={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={handlers.onChooseTable ?? noop}
+        onRetry={noop}
+        onMove={handlers.onMove ?? noop}
+      />,
+    );
+  }
+
+  it("starts on where the booking already is, with nothing to do", () => {
+    moveSheet();
+    expect(screen.getByText("Стол 7 · Стойка")).toBeDefined();
+    expect(screen.getByText("Ничего не меняли").closest("button")?.disabled).toBe(true);
+  });
+
+  it("does not let the booking block its own time or its own table", () => {
+    // Table 7 is held by this very booking. Moving it half an hour must not mean giving the table
+    // up first and hoping somebody else has not taken it.
+    moveSheet(later, { minutes: 1_350 });
+    expect(screen.getByText("Перенести на 22:30, стол 7")).toBeDefined();
+  });
+
+  it("sends the table staff tapped, at the time they left alone", async () => {
+    const onChooseTable = vi.fn();
+    moveSheet(later, {}, { onChooseTable });
+    await userEvent.click(screen.getByText("Стол 8 · Зал"));
+    expect(onChooseTable).toHaveBeenCalledWith("t2");
+
+    cleanup();
+    const onMove = vi.fn();
+    moveSheet(later, { table: "t2" }, { onMove });
+    await userEvent.click(screen.getByText("Пересадить за стол 8"));
+    expect(onMove).toHaveBeenCalledWith(1_320, "t2");
+  });
+
+  it("keeps the time of a booking that has started, and still offers the tables", () => {
+    // 21:20, and they sat down at 21:00. The window is history; where they sit is not.
+    moveSheet(shiftBooking({ status: "arrived" }), { table: "t2" });
+    expect(
+      screen.getByText("Бронь уже началась — время не меняем. Стол можно поменять в любой момент."),
+    ).toBeDefined();
+    expect(screen.queryByText("Время")).toBeNull();
+    expect(screen.getByText("Пересадить за стол 8")).toBeDefined();
+  });
+});
+
+describe("writing a booking down", () => {
+  function manualSheet(
+    chosen: { minutes?: number | null; table?: string | null } = {},
+    onCreate: (tableId: string) => void = noop,
+  ) {
+    return render(
+      <ManualBookingSheet
+        open
+        shift={shift()}
+        maxParty={6}
+        turnMinutes={120}
+        availability={availability()}
+        partySize={2}
+        chosenMinutes={chosen.minutes ?? null}
+        chosenTableId={chosen.table ?? null}
+        guestName="Глеб"
+        failedToLoad={false}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onGuestName={noop}
+        onRetry={noop}
+        onCreate={onCreate}
+      />,
+    );
+  }
+
+  it("offers no tables until there is a time for them to be free at", () => {
+    manualSheet();
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+    expect(screen.getByText("Имя и время").closest("button")?.disabled).toBe(true);
+  });
+
+  it("offers the tables free at the chosen time, and books the one staff picked", async () => {
+    const onCreate = vi.fn();
+    manualSheet({ minutes: 1_290, table: "t3" }, onCreate);
+    // Table 7 is taken from 21:00 to 23:00, so it is not on offer for a 21:30 sitting.
+    expect(screen.queryByText("Стол 7 · Стойка")).toBeNull();
+    expect(screen.getByText("Стол 8 · Зал")).toBeDefined();
+
+    await userEvent.click(screen.getByText("Записать на 21:30, стол 10"));
+    expect(onCreate).toHaveBeenCalledWith("t3");
   });
 });

@@ -24,6 +24,8 @@ pub enum NotificationKind {
     Cancelled,
     /// One of the bar's own messages, sent by staff from the guest's card.
     StaffMessage,
+    /// Sent when staff move a booking to another time, naming the new one.
+    Moved,
 }
 
 /// A message ready to go out.
@@ -231,6 +233,33 @@ pub(crate) async fn enqueue_reminder(
     Ok(())
 }
 
+/// Moves a pending reminder onto a booking's new window.
+///
+/// The body names an hour, so a reminder left behind would contradict the notice just sent.
+/// Rewritten rather than replaced: the queue holds at most one reminder per booking. One whose
+/// new moment has already gone is given up.
+pub(crate) async fn reschedule_reminder(
+    connection: &mut PgConnection,
+    booking: BookingId,
+    body: &str,
+    scheduled_for: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if scheduled_for <= now {
+        return abandon_reminder(connection, booking, "the booking moved past its reminder").await;
+    }
+    sqlx::query(
+        "update notification set body = $2, scheduled_for = $3
+         where booking_id = $1 and kind = 'reminder' and sent_at is null and gave_up_at is null",
+    )
+    .bind(booking.0)
+    .bind(body)
+    .bind(scheduled_for)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 /// Settles the pending reminder of a booking that is no longer happening.
 ///
 /// Hygiene rather than correctness: [`Store::claim_due`] would refuse to send it anyway. Without
@@ -238,12 +267,14 @@ pub(crate) async fn enqueue_reminder(
 pub(crate) async fn abandon_reminder(
     connection: &mut PgConnection,
     booking: BookingId,
+    why: &str,
 ) -> Result<()> {
     sqlx::query(
-        "update notification set gave_up_at = now(), last_error = 'booking is no longer live'
+        "update notification set gave_up_at = now(), last_error = $2
          where booking_id = $1 and kind = 'reminder' and sent_at is null and gave_up_at is null",
     )
     .bind(booking.0)
+    .bind(why)
     .execute(connection)
     .await?;
     Ok(())

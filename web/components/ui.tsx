@@ -681,13 +681,18 @@ export function Sheet({
 }) {
   const panel = useRef<HTMLDivElement>(null);
 
+  // Once, on opening. Kept apart from the key listener, which has to track the current `onClose`
+  // — sharing an effect meant every keystroke stole the focus and shut the phone keyboard.
+  useEffect(() => {
+    if (open) panel.current?.focus();
+  }, [open]);
+
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
-    panel.current?.focus();
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 

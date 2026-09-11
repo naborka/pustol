@@ -46,6 +46,7 @@ import {
   strandedLines,
 } from "@/lib/outcomes";
 import { firstReason, differs } from "@/lib/settingsRules";
+import { hasStarted } from "@/lib/status";
 import { credentials, haptics, openBotChat, webApp } from "@/lib/telegram";
 import { TIMING } from "@/lib/tokens";
 import { ShiftActions, ShiftScreen, type ShiftPane } from "@/components/AdminShift";
@@ -65,6 +66,7 @@ import {
   DaySheet,
   GuestCancelSheet,
   ManualBookingSheet,
+  MoveBookingSheet,
   TableSheet,
   WalkInSheet,
 } from "@/components/Sheets";
@@ -83,6 +85,7 @@ type OpenSheet =
   | { kind: "days" }
   | { kind: "walkIn" }
   | { kind: "manual" }
+  | { kind: "move"; booking: ShiftBooking }
   | { kind: "guestCancel" };
 
 /**
@@ -153,12 +156,17 @@ export default function Page() {
 
   const insets = useInsets();
   const [sheet, setSheet] = useState<OpenSheet>({ kind: "none" });
-  const [manual, setManual] = useState({ name: "", partySize: DEFAULT_PARTY, minutes: null as number | null });
-  const [manualAvailability, setManualAvailability] = useState<Availability | null>(null);
-  const [manualFailed, setManualFailed] = useState(false);
+  const [manual, setManual] = useState({
+    name: "",
+    partySize: DEFAULT_PARTY,
+    minutes: null as number | null,
+    table: null as string | null,
+  });
+  const [move, setMove] = useState({ minutes: null as number | null, table: null as string | null });
+  const [staffTimes, setStaffTimes] = useState<Availability | null>(null);
+  const [staffTimesFailed, setStaffTimesFailed] = useState(false);
   const [walkInParty, setWalkInParty] = useState(DEFAULT_PARTY);
-  // A preference, not the decision: the sheet resolves it against the tables actually free, so a
-  // table that has stopped fitting cannot be the one the button then asks for.
+  // A preference, not the decision: the sheet resolves it against the tables actually free.
   const [walkInTable, setWalkInTable] = useState<string | null>(null);
 
   /**
@@ -295,30 +303,38 @@ export default function Page() {
     void loadSettings(shiftDate);
   }, [tab, shiftDate, loadSettings]);
 
-  // The manual-booking sheet asks the same question the guest picker does, for the shift on screen.
-  const loadManualAvailability = useLatest(
+  // Writing a booking down and moving one ask the same question, so there is one of it. A move
+  // sets its own booking aside — shifting it half an hour must not mean giving up its table first
+  // and hoping — and a booking already under way is not asking at all: its time cannot change.
+  const moving = sheet.kind === "move" ? sheet.booking : null;
+  const movingTime = moving !== null && !hasStarted(moving, shift?.now_minutes ?? null);
+  const asksTimes = sheet.kind === "manual" || movingTime;
+  const askParty = moving ? moving.party_size : manual.partySize;
+  const askIgnoring = movingTime && moving ? moving.id : undefined;
+
+  const loadStaffTimes = useLatest(
     useCallback(
       async () =>
-        api && shiftDate !== null
-          ? await api.staffAvailability(shiftDate, manual.partySize)
+        api && shiftDate !== null && asksTimes
+          ? await api.staffAvailability(shiftDate, askParty, askIgnoring)
           : null,
-      [api, shiftDate, manual.partySize],
+      [api, shiftDate, asksTimes, askParty, askIgnoring],
     ),
-    setManualAvailability,
+    setStaffTimes,
     useCallback(
       (error: unknown) => {
-        setManualFailed(true);
+        setStaffTimesFailed(true);
         report(error, "staff");
       },
       [report],
     ),
-    useCallback(() => setManualFailed(false), []),
+    useCallback(() => setStaffTimesFailed(false), []),
   );
 
   useEffect(() => {
-    if (sheet.kind !== "manual") return;
-    void loadManualAvailability();
-  }, [sheet.kind, loadManualAvailability]);
+    if (!asksTimes) return;
+    void loadStaffTimes();
+  }, [asksTimes, loadStaffTimes]);
 
   // Telegram's own back button, where there is one, rather than a second one drawn in the page.
   useEffect(() => {
@@ -606,7 +622,7 @@ export default function Page() {
     }
   };
 
-  const createManualBooking = async () => {
+  const createManualBooking = async (tableId: string) => {
     if (manual.minutes === null) return;
     try {
       const created = await api.createStaffBooking(
@@ -614,15 +630,36 @@ export default function Page() {
         manual.minutes,
         manual.partySize,
         manual.name,
+        tableId,
       );
-      setManual({ name: "", partySize: DEFAULT_PARTY, minutes: null });
+      setManual({ name: "", partySize: DEFAULT_PARTY, minutes: null, table: null });
       closeSheet();
       await afterShiftChange({
         text: `${created.guest_name} записан на ${fmt.time(created.start_minutes)}, стол ${created.table_number}.`,
       });
     } catch (error) {
       report(error, "staff");
-      void loadManualAvailability();
+      void loadStaffTimes();
+    }
+  };
+
+  /** The report says whether the guest was told: not knowing means sending a second message. */
+  const moveBooking = async (booking: ShiftBooking, minutes: number, tableId: string) => {
+    try {
+      const moved = await api.moveBooking(booking.id, minutes, tableId);
+      haptics.success();
+      closeSheet();
+      const where = `стол ${moved.booking.table_number}`;
+      const told = moved.booking.start_minutes === booking.start_minutes
+        ? `${moved.booking.guest_name} за ${where}.`
+        : `${moved.booking.guest_name}: ${fmt.time(moved.booking.start_minutes)}, ${where}. ` +
+          (moved.guest_notified ? "Гостю сообщили." : "Гость не в боте — предупредите сами.");
+      await afterShiftChange({
+        text: [told, reconciliationReport(moved.reconciliation)].filter(Boolean).join(" "),
+      });
+    } catch (error) {
+      report(error, "staff");
+      await loadShift(shiftDate);
     }
   };
 
@@ -708,6 +745,11 @@ export default function Page() {
             onOpenCancel={() => {
               if (sheet.kind === "booking") setSheet({ kind: "cancelBooking", booking: sheet.booking });
             }}
+            onOpenMove={() => {
+              if (sheet.kind !== "booking") return;
+              setMove({ minutes: null, table: null });
+              setSheet({ kind: "move", booking: sheet.booking });
+            }}
             onFindTable={() => void findTables()}
           />
 
@@ -782,21 +824,44 @@ export default function Page() {
 
           <ManualBookingSheet
             open={sheet.kind === "manual"}
+            shift={shift}
             maxParty={bar.max_party}
-            availability={manualAvailability}
+            turnMinutes={bar.turn_minutes}
+            availability={staffTimes}
             partySize={manual.partySize}
             chosenMinutes={manual.minutes}
+            chosenTableId={manual.table}
             guestName={manual.name}
-            failedToLoad={manualFailed}
+            failedToLoad={staffTimesFailed}
             onClose={closeSheet}
             onPartySize={(size) =>
               setManual((current) => ({ ...current, partySize: size, minutes: null }))
             }
             onPick={(minutes) => setManual((current) => ({ ...current, minutes }))}
             onTakenSlot={() => tell("Это время занято. Свободное — без зачёркивания.")}
+            onChooseTable={(table) => setManual((current) => ({ ...current, table }))}
             onGuestName={(name) => setManual((current) => ({ ...current, name }))}
-            onRetry={() => void loadManualAvailability()}
-            onCreate={() => void createManualBooking()}
+            onRetry={() => void loadStaffTimes()}
+            onCreate={(tableId) => void createManualBooking(tableId)}
+          />
+
+          <MoveBookingSheet
+            open={sheet.kind === "move"}
+            booking={moving}
+            shift={shift}
+            turnMinutes={bar.turn_minutes}
+            availability={staffTimes}
+            chosenMinutes={move.minutes}
+            chosenTableId={move.table}
+            failedToLoad={staffTimesFailed}
+            onClose={closeSheet}
+            onPick={(minutes) => setMove((current) => ({ ...current, minutes }))}
+            onTakenSlot={() => tell("Это время занято. Свободное — без зачёркивания.")}
+            onChooseTable={(table) => setMove((current) => ({ ...current, table }))}
+            onRetry={() => void loadStaffTimes()}
+            onMove={(minutes, tableId) => {
+              if (moving) void moveBooking(moving, minutes, tableId);
+            }}
           />
 
           <GuestCancelSheet

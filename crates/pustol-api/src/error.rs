@@ -122,6 +122,12 @@ impl From<DbError> for ApiError {
             DbError::ChosenTableNotFree => {
                 Self::new(Code::CONFLICT, "chosen_table_not_free", error.to_string())
             }
+            DbError::BookingHasStarted => {
+                Self::new(Code::CONFLICT, "booking_started", error.to_string())
+            }
+            DbError::BookingHasFinished => {
+                Self::new(Code::CONFLICT, "booking_finished", error.to_string())
+            }
             DbError::PartyTooLarge {
                 party_size,
                 max_party,

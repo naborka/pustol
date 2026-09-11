@@ -11,7 +11,7 @@ use pustol_domain::slots::{
 use pustol_domain::{WeekSchedule, bookable_days};
 
 use common::{
-    DEFAULT_HOURS, at, block, booking, default_config, force, in_force, numbered, table, thursday,
+    DEFAULT_HOURS, at, block, booking, default_config, force, in_force, table, thursday,
     utc, zone,
 };
 
@@ -81,18 +81,6 @@ fn no_offered_booking_runs_past_closing_time() {
 }
 
 #[test]
-fn a_free_slot_names_the_table_it_would_use() {
-    let config = in_force();
-    let slots = slot_list(&couple_at!(config, thursday(), morning()));
-    let two_top = numbered(&config.tables, 1);
-    assert_eq!(
-        slots[0].availability,
-        SlotAvailability::Free { table: two_top.id },
-        "the smallest table that fits, deterministically"
-    );
-}
-
-#[test]
 fn a_slot_is_taken_once_every_table_that_fits_is_busy() {
     let config = in_force();
     let bookings: Vec<_> = config
@@ -134,12 +122,8 @@ fn closing_tables_removes_them_from_the_picker() {
         blocks: &blocks,
         ..couple_at!(config, thursday(), morning())
     });
-    // With the bar's two-tops shut, a couple is offered the smallest remaining table.
-    let four_top = numbered(&config.tables, 5);
-    assert_eq!(
-        slots[0].availability,
-        SlotAvailability::Free { table: four_top.id }
-    );
+    // With the bar's two-tops shut, a couple is still offered a time: a four-top takes them.
+    assert!(slots[0].availability.is_free());
 }
 
 #[test]

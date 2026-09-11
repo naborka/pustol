@@ -194,7 +194,7 @@ async fn book(
 ///
 /// The copy lives here, with the rest of the bot's voice; the window it describes is derived once,
 /// inside the transaction that decided it.
-fn word_reminder(config: &ValidConfig, window: Interval, party_size: i32) -> String {
+pub(crate) fn word_reminder(config: &ValidConfig, window: Interval, party_size: i32) -> String {
     messages::reminder(&config.name, window.start(), config.timezone, party_size)
 }
 

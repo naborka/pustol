@@ -19,6 +19,7 @@ import {
   peakHour,
   seatedGuestsAt,
   shiftTotals,
+  tableOffers,
   walkInOffers,
 } from "../occupancy";
 
@@ -227,5 +228,18 @@ describe("the tables offered to a party at the door", () => {
 
   it("has nothing to offer on an evening that is not running", () => {
     expect(walkInOffers(shift({ now_minutes: null }), 2, 120)).toEqual([]);
+  });
+});
+
+describe("the tables offered for a booking being moved", () => {
+  it("does not let the booking block its own new place", () => {
+    const room = shift({
+      tables: [table("t1", 1, 2)],
+      bookings: [booking({ start_minutes: 1_200, end_minutes: 1_320 })],
+    });
+    expect(tableOffers(room, 2, 1_200, 1_320)).toEqual([]);
+    expect(tableOffers(room, 2, 1_200, 1_320, "b1").map((offer) => offer.table.number)).toEqual([
+      1,
+    ]);
   });
 });

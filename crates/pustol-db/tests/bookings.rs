@@ -3,7 +3,7 @@
 
 mod common;
 
-use pustol_db::bookings::Attendance;
+use pustol_db::bookings::{Attendance, Channel};
 use pustol_db::{BookingSource, Error};
 use pustol_domain::{BookingStatus, SlotAvailability, TableId};
 use uuid::Uuid;
@@ -588,6 +588,231 @@ async fn a_walk_in_takes_the_table_the_shift_said_would_fit() {
         "seated at the minute they sat down, not at the nearest slot"
     );
     assert_eq!(seated.record.booking.window.minutes(), 120);
+}
+
+#[tokio::test]
+async fn staff_taking_a_booking_pick_the_table_themselves() {
+    let store = store().await;
+    let corner = table(2, 4, "Зал");
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 4, "Бар"), corner.clone()], "anna_mgr"),
+    )
+    .await;
+
+    let mut request = staff_booking(bar, "Глеб", 1200, 2);
+    request.channel = Channel::Staff {
+        guest_name: "Глеб".to_owned(),
+        table: Some(corner.id),
+    };
+    let created = store.create_booking(&request, morning()).await.expect("free");
+    assert_eq!(created.record.table_number, Some(2));
+
+    // And a table somebody else has is refused, exactly as it is for a walk-in or a move.
+    let refused = store.create_booking(&request, morning()).await;
+    assert!(
+        matches!(refused, Err(Error::ChosenTableNotFree)),
+        "got {refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn staff_move_a_booking_to_another_table_at_the_same_time() {
+    let store = store().await;
+    let corner = table(2, 4, "Зал");
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 4, "Бар"), corner.clone()], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Глеб");
+    store.identify(bar, &account, morning()).await.expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    assert_eq!(created.record.table_number, Some(1));
+
+    let moved = store
+        .move_booking(
+            bar,
+            created.record.booking.id,
+            Some(corner.id),
+            1200,
+            None,
+            morning(),
+        )
+        .await
+        .expect("the corner is free");
+
+    assert_eq!(moved.record.table_number, Some(2));
+    assert_eq!(
+        moved.record.booking.window,
+        created.record.booking.window,
+        "only the table moved"
+    );
+    assert!(!moved.guest_notified, "a guest is never told a table number");
+}
+
+#[tokio::test]
+async fn staff_move_a_booking_to_another_time_and_the_guest_is_told() {
+    let store = store().await;
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 4, "Бар")], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Тимур");
+    store.identify(bar, &account, morning()).await.expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+
+    let moved = store
+        .move_booking(
+            bar,
+            created.record.booking.id,
+            created.record.booking.table_id,
+            1320,
+            Some(common::move_words()),
+            morning(),
+        )
+        .await
+        .expect("the same table is free later");
+
+    assert_eq!(
+        moved.record.booking.window.start(),
+        at(thursday(), 1320),
+        "the promise now names the time staff agreed"
+    );
+    assert_eq!(moved.record.booking.window.minutes(), 120);
+    assert!(
+        moved.guest_notified,
+        "a guest who is not told is a guest who turns up at the old time"
+    );
+
+    // The time they were moved to is the time the room now has taken, and the old one is free.
+    let slots = store
+        .availability(bar, thursday(), 2, morning(), None)
+        .await
+        .expect("reads")
+        .slots;
+    let state = |minutes: i32| {
+        slots
+            .iter()
+            .find(|slot| slot.start_minutes == minutes)
+            .map(|slot| slot.availability.is_free())
+    };
+    assert_eq!(state(1200), Some(true));
+    assert_eq!(state(1320), Some(false));
+}
+
+#[tokio::test]
+async fn a_booking_cannot_be_moved_onto_a_table_that_is_not_free_for_it() {
+    let store = store().await;
+    let small = table(2, 2, "Бар");
+    let busy = table(3, 4, "Зал");
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(
+            vec![table(1, 4, "Бар"), small.clone(), busy.clone()],
+            "anna_mgr",
+        ),
+    )
+    .await;
+    let mover = fresh_account("Ксения");
+    let sitting = fresh_account("Артур");
+    for account in [&mover, &sitting] {
+        store.identify(bar, account, morning()).await.expect("ok");
+    }
+    let mine = store
+        .create_booking(&guest_booking(bar, &mover, 1200, 4), morning())
+        .await
+        .expect("free");
+    let theirs = store
+        .create_booking(&guest_booking(bar, &sitting, 1200, 4), morning())
+        .await
+        .expect("free");
+    assert_eq!(theirs.record.table_number, Some(3), "the other four top");
+
+    for (table_id, why) in [
+        (small.id, "a party of four does not fit at a two top"),
+        (busy.id, "somebody else has it"),
+        (TableId(Uuid::nil()), "not a table this bar has"),
+    ] {
+        let refused = store
+            .move_booking(bar, mine.record.booking.id, Some(table_id), 1200, None, morning())
+            .await;
+        assert!(
+            matches!(refused, Err(Error::ChosenTableNotFree)),
+            "{why}, got {refused:?}"
+        );
+    }
+    assert_eq!(
+        store
+            .shift(bar, thursday())
+            .await
+            .expect("reads")
+            .bookings
+            .iter()
+            .find(|record| record.booking.id == mine.record.booking.id)
+            .and_then(|record| record.table_number),
+        Some(1),
+        "a refused move leaves the booking exactly where it was"
+    );
+}
+
+#[tokio::test]
+async fn an_evening_that_has_started_or_finished_is_not_moved_in_time() {
+    // The window is what the bar promised and what the shift reads as history. Rewriting it over
+    // minutes that have already been lived would move a party that is sitting in front of you, and
+    // free the table they are sitting at for somebody else to have booked an hour ago.
+    let store = store().await;
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 4, "Бар"), table(2, 4, "Зал")], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Полина");
+    store.identify(bar, &account, morning()).await.expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let id = created.record.booking.id;
+    let table_id = created.record.booking.table_id.expect("seated");
+
+    let sat_down = at(thursday(), 1200);
+    store
+        .set_attendance(bar, id, Attendance::Arrived, sat_down)
+        .await
+        .expect("recorded");
+    let refused = store
+        .move_booking(bar, id, Some(table_id), 1320, None, sat_down)
+        .await;
+    assert!(
+        matches!(refused, Err(Error::BookingHasStarted)),
+        "got {refused:?}"
+    );
+    store
+        .move_booking(bar, id, Some(table_id), 1200, None, sat_down)
+        .await
+        .expect("the table is still theirs to change");
+
+    // Once they have gone home there is nothing left to move at all.
+    let went_home = at(thursday(), 1290);
+    store
+        .set_attendance(bar, id, Attendance::Left, went_home)
+        .await
+        .expect("recorded");
+    let refused = store
+        .move_booking(bar, id, Some(table_id), 1200, None, went_home)
+        .await;
+    assert!(
+        matches!(refused, Err(Error::BookingHasFinished)),
+        "got {refused:?}"
+    );
 }
 
 #[tokio::test]
