@@ -371,3 +371,54 @@ describe("moving a booking the guest already holds", () => {
     expect(screen.queryByText(/стол дождётся/)).toBeNull();
   });
 });
+
+describe("the time grid, for a screen reader and a slow phone", () => {
+  it("says a taken time is taken in its name, not only by a line through it", () => {
+    render(
+      <BookScreen
+        bar={bar}
+        days={rail(4)}
+        availability={availability()}
+        partySize={2}
+        serviceDate="2026-09-11"
+        chosenMinutes={null}
+        daysFailed={false}
+        timesFailed={false}
+        onPartySize={noop}
+        onServiceDate={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onRetry={noop}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "22:00, занято" })).toBeDefined();
+  });
+
+  it("keeps the last answer on screen while it asks again, but will not take a tap on it", async () => {
+    // Blanking the grid to a spinner on every change made the page jump; taking a tap on times for
+    // the party the guest just stopped bringing would book the wrong question.
+    const onPick = vi.fn();
+    render(
+      <BookScreen
+        bar={bar}
+        days={rail(4)}
+        availability={availability()}
+        partySize={4}
+        serviceDate="2026-09-11"
+        chosenMinutes={null}
+        daysFailed={false}
+        timesFailed={false}
+        timesPending
+        onPartySize={noop}
+        onServiceDate={noop}
+        onPick={onPick}
+        onTakenSlot={noop}
+        onRetry={noop}
+      />,
+    );
+    const time = screen.getByRole("button", { name: "21:30" });
+    expect((time as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(time);
+    expect(onPick).not.toHaveBeenCalled();
+  });
+});

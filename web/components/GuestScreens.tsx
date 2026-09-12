@@ -349,6 +349,7 @@ export function BookScreen({
   chosenMinutes,
   daysFailed,
   timesFailed,
+  timesPending = false,
   onPartySize,
   onServiceDate,
   onPick,
@@ -365,6 +366,8 @@ export function BookScreen({
   /** Kept apart from `timesFailed`: one succeeding must not hide that the other failed. */
   daysFailed: boolean;
   timesFailed: boolean;
+  /** The times on screen answer a question the guest has since changed. */
+  timesPending?: boolean;
   onPartySize: (size: number) => void;
   onServiceDate: (date: string) => void;
   onPick: (minutes: number) => void;
@@ -456,6 +459,7 @@ export function BookScreen({
               chosen={chosenMinutes}
               onPick={onPick}
               onTaken={onTakenSlot}
+              stale={timesPending}
             />
             <Note>
               Зачёркнутое время занято. Свободных окон: {availability.free_count} — за каждым уже

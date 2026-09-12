@@ -306,6 +306,7 @@ export function SlotGrid({
   height = TAP,
   fontSize = TEXT.lg,
   gap = SPACE[2],
+  stale = false,
 }: {
   slots: { start_minutes: number; state: "free" | "taken" | "past" }[];
   chosen: number | null;
@@ -314,22 +315,40 @@ export function SlotGrid({
   height?: number;
   fontSize?: number;
   gap?: number;
+  /**
+   * These times answer the question before the last change, and a new answer is on its way. Kept
+   * on screen so the page does not jump, and not tappable so nobody books the old question.
+   */
+  stale?: boolean;
 }) {
   const offered = slots.filter((slot) => slot.state !== "past");
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap }}>
+    <div
+      aria-busy={stale}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(4, 1fr)",
+        gap,
+        opacity: stale ? 0.55 : 1,
+      }}
+    >
       {offered.map((slot) => {
         const taken = slot.state === "taken";
+        const label = clockLabel(slot.start_minutes);
         return (
           <Chip
             key={slot.start_minutes}
-            label={clockLabel(slot.start_minutes)}
+            label={label}
+            // The strike-through is invisible to a screen reader, so the name says it.
+            {...(taken ? { ariaLabel: `${label}, занято` } : {})}
             height={height}
             fontSize={fontSize}
             state={
               slot.start_minutes === chosen ? "chosen" : taken ? "unavailable" : "available"
             }
-            onClick={taken ? onTaken : () => onPick(slot.start_minutes)}
+            {...(stale
+              ? {}
+              : { onClick: taken ? onTaken : () => onPick(slot.start_minutes) })}
           />
         );
       })}
@@ -686,8 +705,13 @@ export function Sheet({
 
   // Once, on opening. Kept apart from the key listener, which has to track the current `onClose`
   // — sharing an effect meant every keystroke stole the focus and shut the phone keyboard.
+  // Focus goes back to whatever opened the sheet once it closes, so a keyboard or screen reader is
+  // not left at the top of the page.
   useEffect(() => {
-    if (open) panel.current?.focus();
+    if (!open) return undefined;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    panel.current?.focus();
+    return () => opener?.focus();
   }, [open]);
 
   useEffect(() => {
@@ -764,17 +788,46 @@ export function Sheet({
           animation: "sheetUp .24s cubic-bezier(.2,.8,.3,1) both",
         }}
       >
+        {/*
+          The grab handle and a close button share one row. The backdrop closes the sheet for a
+          finger but is hidden from assistive technology, so without a button there was no way out.
+        */}
         <div
-          aria-hidden
           style={{
             flex: "none",
-            width: 36,
-            height: 4,
-            borderRadius: RADIUS.pill,
-            background: "var(--sep)",
-            margin: `0 auto ${SPACE[3]}px`,
+            position: "relative",
+            display: "flex",
+            justifyContent: "flex-end",
+            margin: `-${SPACE[1]}px -${SPACE[2]}px 0`,
           }}
-        />
+        >
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: SPACE[2],
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: 36,
+              height: 4,
+              borderRadius: RADIUS.pill,
+              background: "var(--sep)",
+            }}
+          />
+          <Pressable
+            ariaLabel="Закрыть"
+            onClick={onClose}
+            style={{
+              width: TAP,
+              minHeight: TAP,
+              justifyContent: "center",
+              color: "var(--hint)",
+              fontSize: TEXT.xl,
+            }}
+          >
+            ×
+          </Pressable>
+        </div>
         <div
           style={{
             flex: "1 1 auto",

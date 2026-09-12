@@ -514,3 +514,31 @@ describe("a message about something done in a sheet", () => {
     expect(layer(toast)).toBeGreaterThan(layer(panel));
   });
 });
+
+describe("leaving a sheet", () => {
+  function Opener() {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button type="button" onClick={() => setOpen(true)}>
+          Открыть
+        </button>
+        <Sheet open={open} onClose={() => setOpen(false)} title="Бронь">
+          <span>карточка</span>
+        </Sheet>
+      </>
+    );
+  }
+
+  it("can be done with a button a screen reader can find, and hands focus back", async () => {
+    // The backdrop is hidden from assistive technology, so without a button there was no way out.
+    render(<Opener />);
+    const opener = screen.getByRole("button", { name: "Открыть" });
+    await userEvent.click(opener);
+    expect(screen.getByText("карточка")).toBeDefined();
+
+    await userEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(screen.queryByText("карточка")).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+});

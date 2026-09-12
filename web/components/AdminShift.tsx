@@ -626,11 +626,15 @@ export function TablesPane({
   const orphans = byTable.get(null) ?? [];
 
   /** One booking, drawn over the hours it actually holds its table for. */
-  const Block = ({ booking }: { booking: ShiftBooking }) => {
+  // A function called for each booking rather than a component declared inside this one: a
+  // component defined during render is a new type every render, so React threw every block away
+  // and rebuilt it whenever anything on the page changed.
+  const block = (booking: ShiftBooking) => {
     const standing = standingOf(booking, shift.now_minutes, graceMinutes);
     const held = occupancyEnd(booking) - booking.start_minutes;
     return (
       <Pressable
+        key={booking.id}
         onClick={() => onOpenBooking(booking)}
         ariaLabel={`${booking.guest_name}, ${fmt.time(booking.start_minutes)}`}
         style={{
@@ -772,7 +776,7 @@ export function TablesPane({
               }}
             >
               {orphans.map((booking) => (
-                <Block key={booking.id} booking={booking} />
+                block(booking)
               ))}
             </div>
           ) : null}
@@ -808,7 +812,7 @@ export function TablesPane({
                   </span>
                 ) : null}
                 {seated.map((booking) => (
-                  <Block key={booking.id} booking={booking} />
+                  block(booking)
                 ))}
               </div>
             );

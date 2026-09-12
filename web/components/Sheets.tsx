@@ -686,6 +686,7 @@ function SlotSection({
   availability,
   chosen,
   failedToLoad,
+  stale,
   onPick,
   onTaken,
   onRetry,
@@ -693,6 +694,7 @@ function SlotSection({
   availability: Availability | null;
   chosen: number | null;
   failedToLoad: boolean;
+  stale: boolean;
   onPick: (minutes: number) => void;
   onTaken: () => void;
   onRetry: () => void;
@@ -721,6 +723,7 @@ function SlotSection({
           height={40}
           fontSize={TEXT.base}
           gap={SPACE[1] + 2}
+          stale={stale}
         />
       )}
     </div>
@@ -783,6 +786,7 @@ export function ManualBookingSheet({
   chosenTableId,
   guestName,
   failedToLoad,
+  timesPending = false,
   onClose,
   onPartySize,
   onPick,
@@ -802,6 +806,8 @@ export function ManualBookingSheet({
   chosenTableId: string | null;
   guestName: string;
   failedToLoad: boolean;
+  /** The times on screen answer the party size before the last change. */
+  timesPending?: boolean;
   onClose: () => void;
   onPartySize: (size: number) => void;
   onPick: (minutes: number) => void;
@@ -856,6 +862,7 @@ export function ManualBookingSheet({
           availability={availability}
           chosen={chosenMinutes}
           failedToLoad={failedToLoad}
+          stale={timesPending}
           onPick={onPick}
           onTaken={onTakenSlot}
           onRetry={onRetry}
@@ -887,6 +894,7 @@ export function MoveBookingSheet({
   chosenMinutes,
   chosenTableId,
   failedToLoad,
+  timesPending = false,
   onClose,
   onPick,
   onTakenSlot,
@@ -902,6 +910,8 @@ export function MoveBookingSheet({
   chosenMinutes: number | null;
   chosenTableId: string | null;
   failedToLoad: boolean;
+  /** The times on screen answer a question the sheet has since changed. */
+  timesPending?: boolean;
   onClose: () => void;
   onPick: (minutes: number) => void;
   onTakenSlot: () => void;
@@ -956,6 +966,7 @@ export function MoveBookingSheet({
             availability={availability}
             chosen={minutes}
             failedToLoad={failedToLoad}
+            stale={timesPending}
             onPick={onPick}
             onTaken={onTakenSlot}
             onRetry={onRetry}

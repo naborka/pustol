@@ -116,22 +116,26 @@ function failureOf(error: unknown): ApiFailure {
 }
 
 /**
- * Fetches, and keeps only the answer to the newest question.
+ * Fetches, keeps only the answer to the newest question, and says while a newer one is on its way.
  *
  * Tapping 2 then 4 guests fires two requests, and without this the first to come back wins — which
  * on a bad connection is how a guest is shown the times for a party they are no longer bringing.
  * Numbered rather than aborted, because an abort still has to be raced against the state update.
+ *
+ * The last answer stays until the next arrives, marked pending, rather than being blanked: blanking
+ * swapped the grid for a spinner on every tap and made the page jump under the guest's thumb.
  */
 function useLatest<T>(
   ask: () => Promise<T | null>,
   keep: (value: T | null) => void,
   onFailure: (error: unknown) => void,
   onSuccess: () => void,
-): () => Promise<void> {
+): [load: () => Promise<void>, pending: boolean] {
   const asked = useRef(0);
-  return useCallback(async () => {
+  const [pending, setPending] = useState(false);
+  const load = useCallback(async () => {
     const question = (asked.current += 1);
-    keep(null);
+    setPending(true);
     try {
       const answer = await ask();
       if (question !== asked.current) return;
@@ -139,9 +143,14 @@ function useLatest<T>(
       onSuccess();
     } catch (error) {
       if (question !== asked.current) return;
+      // An answer to an older question must not stand in for one that failed.
+      keep(null);
       onFailure(error);
+    } finally {
+      if (question === asked.current) setPending(false);
     }
   }, [ask, keep, onFailure, onSuccess]);
+  return [load, pending];
 }
 
 /**
@@ -315,7 +324,7 @@ export default function Page() {
 
   // The rail depends only on how many are coming, so it is fetched when that changes and not when
   // a different day on the rail is tapped.
-  const loadDays = useLatest(
+  const [loadDays] = useLatest(
     useCallback(async () => (await api?.days(partySize))?.days ?? null, [api, partySize]),
     setDayRail,
     useCallback(
@@ -335,7 +344,7 @@ export default function Page() {
 
   // The time grid recomputes whenever the question changes. Every answer comes from the server,
   // which has run the real allocator: a time shown as free is a time with a table behind it.
-  const loadAvailability = useLatest(
+  const [loadAvailability, timesPending] = useLatest(
     useCallback(
       async () =>
         api && serviceDate !== null ? await api.availability(serviceDate, partySize) : null,
@@ -444,7 +453,7 @@ export default function Page() {
   const askParty = moving ? moving.party_size : manual.partySize;
   const askIgnoring = movingTime && moving ? moving.id : undefined;
 
-  const loadStaffTimes = useLatest(
+  const [loadStaffTimes, staffTimesPending] = useLatest(
     useCallback(
       async () =>
         api && shiftDate !== null && asksTimes
@@ -988,6 +997,7 @@ export default function Page() {
             chosenTableId={manual.table}
             guestName={manual.name}
             failedToLoad={staffTimesFailed}
+            timesPending={staffTimesPending}
             onClose={closeSheet}
             onPartySize={(size) =>
               setManual((current) => ({ ...current, partySize: size, minutes: null }))
@@ -1009,6 +1019,7 @@ export default function Page() {
             chosenMinutes={move.minutes}
             chosenTableId={move.table}
             failedToLoad={staffTimesFailed}
+            timesPending={staffTimesPending}
             onClose={closeSheet}
             onPick={(minutes) => setMove((current) => ({ ...current, minutes }))}
             onTakenSlot={() => tell("Это время занято. Свободное — без зачёркивания.")}
@@ -1056,6 +1067,7 @@ export default function Page() {
           chosenMinutes={chosenMinutes}
           daysFailed={daysFailed}
           timesFailed={timesFailed}
+          timesPending={timesPending}
           onPartySize={(size) => {
             setPartySize(size);
             setChosenMinutes(null);

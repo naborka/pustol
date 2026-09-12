@@ -28,7 +28,7 @@ interface Answer {
   body: unknown;
 }
 
-type Handler = (body: unknown) => Answer | Promise<Answer>;
+type Handler = (request: { body: unknown; url: URL }) => Answer | Promise<Answer>;
 
 const failed: Answer = { status: 500, body: { error: { code: "internal", message: "boom" } } };
 
@@ -40,7 +40,7 @@ function fakeServer(routes: Record<string, Handler>) {
     calls.push({ method, path: url.pathname });
     const handler = routes[`${method} ${url.pathname}`];
     const { status = 200, body } = handler
-      ? await handler(init?.body ? JSON.parse(String(init.body)) : undefined)
+      ? await handler({ body: init?.body ? JSON.parse(String(init.body)) : undefined, url })
       : { status: 404, body: { error: { code: "not_found", message: url.pathname } } };
     return new Response(JSON.stringify(body), {
       status,
@@ -132,6 +132,25 @@ describe("a shift left open on the bar", () => {
     act(() => telegram.emit("activated"));
     await waitFor(() => expect(server.count("GET", "/api/admin/shift")).toBe(3));
     expect(screen.getByText("Саша")).toBeDefined();
+  });
+
+  it("offers nothing to write into an evening that is already over", async () => {
+    fakeTelegram();
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": ({ url }) => ({
+        body: shift({ service_date: url.searchParams.get("service_date") ?? "" }),
+      }),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Смена"));
+    expect(await screen.findByText("Посадить сейчас")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "Предыдущий день" }));
+    await screen.findByText("чт, 10 сен");
+    expect(screen.queryByText("Записать гостя")).toBeNull();
+    expect(screen.queryByText("Посадить сейчас")).toBeNull();
   });
 
   it("closes the open sheet when Telegram's back button is pressed", async () => {
