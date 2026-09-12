@@ -42,6 +42,7 @@ export const booking: GuestBooking = {
 
 export function session(overrides: Partial<Session> = {}): Session {
   return {
+    session_token: "claims.signature",
     user: { id: 999, first_name: "Алексей", username: "alexey" },
     is_staff: false,
     reminders: { opted_in: false, deliverable: true, should_ask: true },

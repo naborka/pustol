@@ -59,6 +59,7 @@ async fn session(
         .await?;
 
     Ok(Json(Session {
+        session_token: caller.session(state.bot_token()),
         user: UserView {
             id: viewer.account.id.0,
             first_name: viewer.account.first_name.clone(),
@@ -175,8 +176,8 @@ async fn book(
                 party_size: request.party_size,
                 channel: Channel::Guest {
                     user: caller.user_id(),
-                    name: caller.init_data.user.first_name.clone(),
-                    username: caller.init_data.user.username.clone(),
+                    name: caller.user.first_name.clone(),
+                    username: caller.user.username.clone(),
                 },
                 reminder: Some(word_reminder),
             },

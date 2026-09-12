@@ -40,7 +40,7 @@ const SIGNATURE_FIELD: &str = "signature";
 const CLOCK_SKEW: TimeDelta = TimeDelta::minutes(1);
 
 /// A Telegram account, as Telegram describes it.
-#[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
 pub struct TelegramUser {
     pub id: i64,
     pub first_name: String,
@@ -88,6 +88,8 @@ pub enum VerifyError {
     },
     #[error("the payload was signed in the future, which no clock skew explains")]
     SignedInTheFuture,
+    #[error("the session has ended")]
+    SessionEnded,
 }
 
 /// The bot's token, kept in a type that will not print itself.
@@ -103,15 +105,24 @@ pub struct BotToken {
     /// carries Telegram's newer signature field. Deriving it at construction keeps the verifier's
     /// per-request work to the one HMAC that actually depends on the payload.
     signing_key: [u8; 32],
+    /// `HMAC-SHA256("PustolSession", token)`: the key sessions are signed with.
+    ///
+    /// A salt of its own, so that nothing signed as a session can pass for Telegram's signature
+    /// and nothing Telegram signed can pass for a session.
+    pub(crate) session_key: [u8; 32],
 }
 
 impl BotToken {
     pub fn new(token: impl Into<String>) -> Self {
         let token = token.into();
-        let mut derive = HmacSha256::new_from_slice(KEY_SALT).expect("hmac accepts any key length");
-        derive.update(token.as_bytes());
+        let derive = |salt: &[u8]| -> [u8; 32] {
+            let mut mac = HmacSha256::new_from_slice(salt).expect("hmac accepts any key length");
+            mac.update(token.as_bytes());
+            mac.finalize().into_bytes().into()
+        };
         Self {
-            signing_key: derive.finalize().into_bytes().into(),
+            signing_key: derive(KEY_SALT),
+            session_key: derive(b"PustolSession"),
             token,
         }
     }

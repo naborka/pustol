@@ -92,7 +92,9 @@ impl From<VerifyError> for ApiError {
         // The distinction the app needs is "sign in again" versus "something is wrong with you":
         // a stale payload is routine and self-healing, a bad signature never is.
         let code = match error {
-            VerifyError::Stale { .. } | VerifyError::SignedInTheFuture => "session_expired",
+            VerifyError::Stale { .. }
+            | VerifyError::SignedInTheFuture
+            | VerifyError::SessionEnded => "session_expired",
             _ => "not_telegram",
         };
         Self::unauthorised(code, error.to_string())

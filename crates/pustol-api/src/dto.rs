@@ -152,6 +152,9 @@ impl BarView {
 /// Everything the app needs to draw its first screen, in one request.
 #[derive(Debug, Serialize)]
 pub struct Session {
+    /// What the app sends instead of the Telegram payload from now on, so that it keeps working
+    /// after the hour the payload is accepted for.
+    pub session_token: String,
     pub user: UserView,
     pub is_staff: bool,
     pub reminders: RemindersView,

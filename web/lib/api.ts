@@ -1,9 +1,10 @@
 /**
  * The typed client.
  *
- * Every call carries the payload Telegram signed. The server verifies it on every request, so this
- * file holds no session, no token and no notion of being "logged in" — there is nothing here for an
- * attacker to steal and nothing to get out of step with the server.
+ * The first call carries the payload Telegram signed; the server answers it with a session, and
+ * every call after carries that. The payload is accepted for an hour and Telegram never refreshes
+ * it while the app stays open, so sending it for the whole of a shift locked staff out every hour.
+ * The session is held in this closure only — never in storage, never in a URL.
  */
 
 import type { IsoDate } from "./format";
@@ -48,6 +49,8 @@ export interface BarView {
 }
 
 export interface Session {
+  /** Sent instead of Telegram's payload from here on, which is accepted for an hour only. */
+  session_token: string;
   user: { id: number; first_name: string; username: string | null };
   is_staff: boolean;
   reminders: { opted_in: boolean; deliverable: boolean; should_ask: boolean };
@@ -255,7 +258,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(
-  credentials: string,
+  authorization: string,
   path: string,
   init?: RequestInit,
 ): Promise<T> {
@@ -263,7 +266,7 @@ async function request<T>(
     ...init,
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),
-      authorization: `tma ${credentials}`,
+      authorization,
       ...init?.headers,
     },
   });
@@ -297,15 +300,21 @@ function query(params: Record<string, string | number | undefined>): string {
 
 /** Every call the app can make, bound to one set of credentials. */
 export function client(credentials: string) {
-  const get = <T>(path: string) => request<T>(credentials, path);
+  let session: string | null = null;
+  const authorization = () => (session === null ? `tma ${credentials}` : `session ${session}`);
+  const get = <T>(path: string) => request<T>(authorization(), path);
   const send = <T>(method: string, path: string, body?: unknown) =>
-    request<T>(credentials, path, {
+    request<T>(authorization(), path, {
       method,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
 
   return {
-    session: () => get<Session>("/api/session"),
+    session: async () => {
+      const answer = await get<Session>("/api/session");
+      session = answer.session_token;
+      return answer;
+    },
 
     availability: (serviceDate: IsoDate, partySize: number) =>
       get<Availability>(

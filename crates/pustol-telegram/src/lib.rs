@@ -7,6 +7,7 @@
 pub mod bot;
 pub mod init_data;
 pub mod messages;
+pub mod session;
 pub mod updates;
 
 pub use bot::{Bot, CallbackButton, SendError};

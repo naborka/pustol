@@ -358,12 +358,16 @@ export default function Page() {
     );
   }
   if (fatal) {
+    // Retrying with the proof the server just refused refuses again. Only reopening from Telegram
+    // brings a new one, so that is the way out offered.
+    const telegram = webApp();
+    const relaunch = needsRelaunch(fatal) && telegram !== undefined;
     return (
       <InsetFrame insets={insets}>
         <Failure
           message={messageFor(fatal, "guest")}
-          actionLabel="Попробовать снова"
-          onAction={() => void reload()}
+          actionLabel={relaunch ? "Закрыть" : "Попробовать снова"}
+          onAction={() => (relaunch ? telegram.close() : void reload())}
         />
       </InsetFrame>
     );
