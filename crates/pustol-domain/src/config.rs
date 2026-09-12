@@ -48,6 +48,19 @@ pub struct Limits {
     pub seats: Bounds,
     pub slot_step_minutes: &'static [i32],
     pub staff_username_length: Bounds,
+    pub text: TextLimits,
+}
+
+/// The longest each text the bar writes may be, in characters.
+///
+/// A guest message longer than Telegram carries is refused on every send; a name or reason that
+/// long breaks every screen and message it is drawn into.
+#[derive(Clone, Copy, Debug)]
+pub struct TextLimits {
+    pub name: usize,
+    pub address: usize,
+    pub message: usize,
+    pub reason: usize,
 }
 
 /// The limits this deployment runs under.
@@ -65,6 +78,12 @@ pub const LIMITS: Limits = Limits {
     seats: Bounds { min: 1, max: 12 },
     slot_step_minutes: &[15, 30, 60],
     staff_username_length: Bounds { min: 5, max: 32 },
+    text: TextLimits {
+        name: 100,
+        address: 200,
+        message: 1000,
+        reason: 200,
+    },
 };
 
 /// Wall-clock minute from which a slot counts as an evening slot rather than a daytime one.
@@ -249,6 +268,16 @@ impl BarConfig {
         if self.address.trim().is_empty() {
             errors.push(ConfigError::BlankAddress);
         }
+        if self.name.chars().count() > LIMITS.text.name {
+            errors.push(ConfigError::NameTooLong {
+                limit: LIMITS.text.name,
+            });
+        }
+        if self.address.chars().count() > LIMITS.text.address {
+            errors.push(ConfigError::AddressTooLong {
+                limit: LIMITS.text.address,
+            });
+        }
     }
 
     fn check_week(&self, errors: &mut Vec<ConfigError>) {
@@ -369,6 +398,24 @@ impl BarConfig {
         if self.cancel_reasons.iter().any(|text| text.trim().is_empty()) {
             errors.push(ConfigError::BlankCancelReason);
         }
+        if self
+            .message_templates
+            .iter()
+            .any(|text| text.chars().count() > LIMITS.text.message)
+        {
+            errors.push(ConfigError::MessageTemplateTooLong {
+                limit: LIMITS.text.message,
+            });
+        }
+        if self
+            .cancel_reasons
+            .iter()
+            .any(|text| text.chars().count() > LIMITS.text.reason)
+        {
+            errors.push(ConfigError::CancelReasonTooLong {
+                limit: LIMITS.text.reason,
+            });
+        }
     }
 
     fn check_staff(&self, errors: &mut Vec<ConfigError>) {
@@ -455,6 +502,14 @@ pub enum ConfigError {
     BlankName,
     #[error("the bar needs an address")]
     BlankAddress,
+    #[error("the bar's name is longer than {limit} characters")]
+    NameTooLong { limit: usize },
+    #[error("the bar's address is longer than {limit} characters")]
+    AddressTooLong { limit: usize },
+    #[error("a guest message is longer than {limit} characters")]
+    MessageTemplateTooLong { limit: usize },
+    #[error("a cancellation reason is longer than {limit} characters")]
+    CancelReasonTooLong { limit: usize },
     #[error("{weekday:?} opens at minute {minutes}, outside the allowed opening times")]
     OpenOutOfRange { weekday: Weekday, minutes: i32 },
     #[error("{weekday:?} closes at minute {minutes}, outside the allowed closing times")]

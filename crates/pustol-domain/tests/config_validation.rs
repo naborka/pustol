@@ -720,3 +720,24 @@ fn the_last_arrival_on_the_spring_clock_change_is_not_a_conflict_with_the_hours_
         Vec::new()
     );
 }
+
+#[test]
+fn texts_the_bar_writes_stay_short_enough_to_send_and_to_show() {
+    // A template longer than Telegram carries is refused on every send and silently given up on;
+    // a thousand-character bar name breaks every screen it is drawn on.
+    let mut config = default_config();
+    config.name = "б".repeat(LIMITS.text.name + 1);
+    config.address = "в".repeat(LIMITS.text.address + 1);
+    config.message_templates = vec!["а".repeat(LIMITS.text.message + 1)];
+    config.cancel_reasons = vec!["г".repeat(LIMITS.text.reason + 1)];
+    let errors = config.validate();
+    assert!(errors.contains(&ConfigError::NameTooLong { limit: LIMITS.text.name }));
+    assert!(errors.contains(&ConfigError::AddressTooLong { limit: LIMITS.text.address }));
+    assert!(errors.contains(&ConfigError::MessageTemplateTooLong { limit: LIMITS.text.message }));
+    assert!(errors.contains(&ConfigError::CancelReasonTooLong { limit: LIMITS.text.reason }));
+
+    let mut at_the_limit = default_config();
+    at_the_limit.name = "🍺".repeat(LIMITS.text.name);
+    at_the_limit.message_templates = vec!["а".repeat(LIMITS.text.message)];
+    assert_eq!(at_the_limit.validate(), Vec::new(), "counted in characters, not bytes");
+}

@@ -610,6 +610,15 @@ pub struct LimitsView {
     pub grace_minutes: BoundsView,
     pub seats: BoundsView,
     pub slot_step_minutes: Vec<i32>,
+    pub text: TextLimitsView,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TextLimitsView {
+    pub name: usize,
+    pub address: usize,
+    pub message: usize,
+    pub reason: usize,
 }
 
 impl LimitsView {
@@ -628,6 +637,12 @@ impl LimitsView {
             grace_minutes: bounds(LIMITS.grace_minutes),
             seats: bounds(LIMITS.seats),
             slot_step_minutes: LIMITS.slot_step_minutes.to_vec(),
+            text: TextLimitsView {
+                name: LIMITS.text.name,
+                address: LIMITS.text.address,
+                message: LIMITS.text.message,
+                reason: LIMITS.text.reason,
+            },
         }
     }
 }

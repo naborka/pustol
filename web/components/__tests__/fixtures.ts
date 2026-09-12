@@ -147,6 +147,7 @@ export const LIMITS: Limits = {
   grace_minutes: { min: 5, max: 60 },
   seats: { min: 1, max: 12 },
   slot_step_minutes: [15, 30, 60],
+  text: { name: 100, address: 200, message: 1_000, reason: 200 },
 };
 
 export function settingsView(overrides: Partial<SettingsView> = {}): SettingsView {

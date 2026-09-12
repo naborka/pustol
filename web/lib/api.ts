@@ -175,6 +175,8 @@ export interface Limits {
   grace_minutes: Bounds;
   seats: Bounds;
   slot_step_minutes: number[];
+  /** The longest each text may be, in characters. */
+  text: { name: number; address: number; message: number; reason: number };
 }
 
 export interface SettingsTable {

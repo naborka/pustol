@@ -23,6 +23,10 @@ import type { Bounds, Limits, SettingsDraft } from "./api";
 export type Reason =
   | { kind: "blank_name" }
   | { kind: "blank_address" }
+  | { kind: "name_too_long" }
+  | { kind: "address_too_long" }
+  | { kind: "message_template_too_long" }
+  | { kind: "cancel_reason_too_long" }
   | { kind: "open_out_of_range"; weekday: number }
   | { kind: "close_out_of_range"; weekday: number }
   | { kind: "every_day_closed" }
@@ -50,6 +54,11 @@ export type NumericSetting =
   | "remind_hours"
   | "grace_minutes";
 
+/** Length as the server counts it: characters, where JavaScript counts an emoji as two. */
+export function characters(text: string): number {
+  return [...text].length;
+}
+
 function within(value: number, bounds: Bounds): boolean {
   return value >= bounds.min && value <= bounds.max;
 }
@@ -69,6 +78,8 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
 
   if (draft.name.trim().length === 0) reasons.push({ kind: "blank_name" });
   if (draft.address.trim().length === 0) reasons.push({ kind: "blank_address" });
+  if (characters(draft.name) > limits.text.name) reasons.push({ kind: "name_too_long" });
+  if (characters(draft.address) > limits.text.address) reasons.push({ kind: "address_too_long" });
 
   draft.week.forEach((hours, weekday) => {
     if (!within(hours.open_minutes, limits.open_minutes)) {
@@ -120,6 +131,12 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   if (draft.cancel_reasons.length === 0) reasons.push({ kind: "no_cancel_reasons" });
   if (draft.cancel_reasons.some((text) => text.trim().length === 0)) {
     reasons.push({ kind: "blank_cancel_reason" });
+  }
+  if (draft.message_templates.some((text) => characters(text) > limits.text.message)) {
+    reasons.push({ kind: "message_template_too_long" });
+  }
+  if (draft.cancel_reasons.some((text) => characters(text) > limits.text.reason)) {
+    reasons.push({ kind: "cancel_reason_too_long" });
   }
 
   if (draft.staff.length === 0) reasons.push({ kind: "no_staff" });
@@ -236,6 +253,14 @@ export function reasonSentence(reason: Reason, draft: SettingsDraft): string {
       return "У бара нет названия.";
     case "blank_address":
       return "У бара нет адреса.";
+    case "name_too_long":
+      return "Название слишком длинное.";
+    case "address_too_long":
+      return "Адрес слишком длинный.";
+    case "message_template_too_long":
+      return "Сообщение гостю слишком длинное.";
+    case "cancel_reason_too_long":
+      return "Причина отмены слишком длинная.";
     case "open_out_of_range":
       return `${WEEKDAY[reason.weekday] ?? "День"} открывается в час, который бар не принимает.`;
     case "close_out_of_range":

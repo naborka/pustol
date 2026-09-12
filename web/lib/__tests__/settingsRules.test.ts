@@ -22,6 +22,7 @@ const LIMITS: Limits = {
   grace_minutes: { min: 5, max: 60 },
   seats: { min: 1, max: 12 },
   slot_step_minutes: [15, 30, 60],
+  text: { name: 100, address: 200, message: 1_000, reason: 200 },
 };
 
 function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
@@ -293,5 +294,30 @@ describe("the copy an edit is tried on", () => {
   it("copies everything, so a round trip changes nothing", () => {
     const original = draft();
     expect(copyDraft(original)).toEqual(original);
+  });
+});
+
+describe("how long a text may be", () => {
+  it("refuses a guest message too long for Telegram to carry, and not one character sooner", () => {
+    const limit = LIMITS.text.message;
+    expect(kinds(draft({ message_templates: ["а".repeat(limit + 1)] }))).toContain(
+      "message_template_too_long",
+    );
+    expect(kinds(draft({ message_templates: ["а".repeat(limit)] }))).toEqual([]);
+  });
+
+  it("refuses a name, an address and a reason too long to show", () => {
+    expect(kinds(draft({ name: "б".repeat(LIMITS.text.name + 1) }))).toContain("name_too_long");
+    expect(kinds(draft({ address: "в".repeat(LIMITS.text.address + 1) }))).toContain(
+      "address_too_long",
+    );
+    expect(kinds(draft({ cancel_reasons: ["г".repeat(LIMITS.text.reason + 1)] }))).toContain(
+      "cancel_reason_too_long",
+    );
+  });
+
+  it("counts characters the way the server does, not UTF-16 halves", () => {
+    // One emoji is one character to the server and two code units to JavaScript.
+    expect(kinds(draft({ name: "🍺".repeat(LIMITS.text.name) }))).toEqual([]);
   });
 });
