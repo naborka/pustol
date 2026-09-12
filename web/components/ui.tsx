@@ -14,7 +14,7 @@ import { useEffect, useRef } from "react";
 
 import { guests as guestsLabel, time as clockLabel } from "@/lib/format";
 import { haptics } from "@/lib/telegram";
-import { RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
+import { LAYER, RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
 import { useViewport } from "./ThemeProvider";
 
 // ---- the one interactive primitive -------------------------------------------------------------
@@ -36,6 +36,7 @@ export function Pressable({
   style,
   ariaLabel,
   ariaPressed,
+  ariaSelected,
   ariaCurrent,
   role,
   haptic = "tap",
@@ -48,6 +49,7 @@ export function Pressable({
   style?: CSSProperties;
   ariaLabel?: string;
   ariaPressed?: boolean;
+  ariaSelected?: boolean;
   ariaCurrent?: boolean;
   role?: string;
   haptic?: "tap" | "none";
@@ -64,6 +66,7 @@ export function Pressable({
       }}
       {...(ariaLabel === undefined ? {} : { "aria-label": ariaLabel })}
       {...(ariaPressed === undefined ? {} : { "aria-pressed": ariaPressed })}
+      {...(ariaSelected === undefined ? {} : { "aria-selected": ariaSelected })}
       {...(ariaCurrent === undefined ? {} : { "aria-current": ariaCurrent })}
       {...(role === undefined ? {} : { role })}
       {...(title === undefined ? {} : { title })}
@@ -367,7 +370,7 @@ export function Segmented<T extends string | number>({
           <Pressable
             key={String(option.value)}
             role="tab"
-            ariaPressed={chosen}
+            ariaSelected={chosen}
             onClick={() => onChange(option.value)}
             style={{
               flex: 1,
@@ -736,7 +739,7 @@ export function Sheet({
           // darkness. Deriving it from the palette would make it white in a light scheme, which
           // is a fog rather than a dim.
           background: "rgba(0,0,0,.5)",
-          zIndex: 10,
+          zIndex: LAYER.backdrop,
           animation: "fadeIn .16s ease both",
         }}
       />
@@ -751,7 +754,7 @@ export function Sheet({
           left: 0,
           right: 0,
           bottom: 0,
-          zIndex: 11,
+          zIndex: LAYER.sheet,
           background: "var(--bg)",
           borderRadius: `${RADIUS.lg}px ${RADIUS.lg}px 0 0`,
           padding: `${SPACE[2]}px ${SPACE[4]}px calc(${SPACE[5]}px + var(--inset-bottom, 0px))`,
@@ -856,7 +859,9 @@ export function Toast({ message }: { message: ToastMessage | null }) {
         left: SPACE[3],
         right: SPACE[3],
         bottom: SPACE[2],
-        zIndex: 9,
+        // Above the sheet's backdrop and panel: a failure reported from inside a sheet used to be
+        // drawn under it, so the only sign anything happened was a buzz.
+        zIndex: LAYER.toast,
         background: "var(--txt)",
         borderRadius: RADIUS.md,
         padding: `${SPACE[3]}px ${SPACE[3]}px ${SPACE[3]}px ${SPACE[4]}px`,

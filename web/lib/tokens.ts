@@ -43,3 +43,6 @@ export const TIMING = {
   /** A message with nothing to undo. */
   toastMs: 4200,
 } as const;
+
+/** What is drawn over what. A message about something done in a sheet has to be seen over it. */
+export const LAYER = { backdrop: 10, sheet: 11, toast: 12 } as const;

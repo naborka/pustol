@@ -120,3 +120,20 @@ describe("dates", () => {
     expect(fmt.weekdayLongByIndex(0)).toBe("Воскресенье");
   });
 });
+
+describe("counts inside a sentence", () => {
+  it("holds a table for minutes in the accusative", () => {
+    expect(fmt.minutesAccusative(1)).toBe("1 минуту");
+    expect(fmt.minutesAccusative(21)).toBe("21 минуту");
+    expect(fmt.minutesAccusative(3)).toBe("3 минуты");
+    expect(fmt.minutesAccusative(15)).toBe("15 минут");
+    expect(fmt.minutesAccusative(11)).toBe("11 минут");
+  });
+
+  it("seats up to guests in the genitive", () => {
+    expect(fmt.guestsGenitive(1)).toBe("1 гостя");
+    expect(fmt.guestsGenitive(2)).toBe("2 гостей");
+    expect(fmt.guestsGenitive(21)).toBe("21 гостя");
+    expect(fmt.guestsGenitive(8)).toBe("8 гостей");
+  });
+});

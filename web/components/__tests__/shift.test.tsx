@@ -47,8 +47,13 @@ describe("the pulse", () => {
   it("says the time, the room and what still fits, on two lines", () => {
     render(<Pulse shift={shift({ bookings: [shiftBooking({ status: "arrived" })] })} />);
     expect(screen.getByText("21:20 · 2 гостя за столами")).toBeDefined();
-    expect(screen.getByText("2 стола свободно")).toBeDefined();
+    expect(screen.getByText("Свободно: 2 стола")).toBeDefined();
     expect(screen.getByText("Сейчас можно посадить компанию до 8 гостей")).toBeDefined();
+  });
+
+  it("counts what fits the way Russian counts after «до»", () => {
+    render(<Pulse shift={shift({ largest_party_seatable_now: 2 })} />);
+    expect(screen.getByText("Сейчас можно посадить компанию до 2 гостей")).toBeDefined();
   });
 
   it("says plainly when nothing fits", () => {
@@ -421,7 +426,7 @@ describe("the shift screen", () => {
         actions={actions()}
       />,
     );
-    expect(screen.getByRole("tab", { name: "Сейчас" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Сейчас" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByPlaceholderText("Поиск: имя или номер стола")).toBeDefined();
     expect(screen.getByRole("tab", { name: "Столы" })).toBeDefined();
     expect(screen.getByRole("tab", { name: "Итоги" })).toBeDefined();
@@ -447,16 +452,16 @@ describe("the shift screen", () => {
     expect(within(header).getByText("Сегодня")).toBeDefined();
     expect(within(header).getByText("пт, 11 сен")).toBeDefined();
 
-    for (const control of ["Предыдущий день", "Следующий день", "Выбрать день"]) {
+    for (const control of ["Предыдущий день", "Следующий день", /^Выбрать день/]) {
       const hit = screen.getByRole("button", { name: control });
-      expect(Number.parseInt(hit.style.minHeight, 10), control).toBeGreaterThanOrEqual(48);
+      expect(Number.parseInt(hit.style.minHeight, 10), String(control)).toBeGreaterThanOrEqual(48);
     }
 
     await userEvent.click(screen.getByRole("button", { name: "Предыдущий день" }));
     expect(onServiceDate).toHaveBeenCalledWith("2026-09-10");
     await userEvent.click(screen.getByRole("button", { name: "Следующий день" }));
     expect(onServiceDate).toHaveBeenCalledWith("2026-09-12");
-    await userEvent.click(screen.getByRole("button", { name: "Выбрать день" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Выбрать день/ }));
     expect(onOpenDays).toHaveBeenCalledOnce();
   });
 

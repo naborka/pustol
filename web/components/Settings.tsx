@@ -97,14 +97,21 @@ export function SettingsScreen({
   editedWeekday,
   onDraft,
   onEditWeekday,
+  section,
+  onSection,
 }: {
   settings: SettingsView;
   draft: SettingsDraft;
   editedWeekday: number;
   onDraft: (next: SettingsDraft) => void;
   onEditWeekday: (weekday: number) => void;
+  /**
+   * The open section, or the index. Held by the page, so that a look at the shift comes back to
+   * the section being edited and Telegram's back button can close it.
+   */
+  section: Section | null;
+  onSection: (section: Section | null) => void;
 }) {
-  const [section, setSection] = useState<Section | null>(null);
   const limits = settings.limits;
 
   // One notion of "an edit", built here and handed to every section: a change is described once and
@@ -137,7 +144,7 @@ export function SettingsScreen({
         {SECTIONS.map((item) => (
           <Pressable
             key={item.id}
-            onClick={() => setSection(item.id)}
+            onClick={() => onSection(item.id)}
             tone="card"
             style={{
               minHeight: 62,
@@ -193,7 +200,7 @@ export function SettingsScreen({
     >
       <Pressable
         ariaLabel="Назад"
-        onClick={() => setSection(null)}
+        onClick={() => onSection(null)}
         style={{
           alignSelf: "flex-start",
           fontSize: TEXT.base,
@@ -690,6 +697,7 @@ function ListSection({
         <div key={index} style={{ display: "flex", alignItems: "center", gap: SPACE[1] + 2 }}>
           <TextField
             value={text}
+            placeholder={placeholder}
             ariaLabel={`${title}: ${index + 1}`}
             onChange={(value) => {
               const next = [...items];
@@ -715,7 +723,7 @@ function ListSection({
           </Pressable>
         </div>
       ))}
-      <CardAction label={addLabel} onClick={() => onChange([...items, placeholder])} />
+      <CardAction label={addLabel} onClick={() => onChange([...items, ""])} />
     </section>
   );
 }

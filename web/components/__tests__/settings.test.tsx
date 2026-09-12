@@ -4,19 +4,28 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SECTIONS, SaveBar, SettingsScreen, sectionValue } from "../Settings";
+import { SECTIONS, SaveBar, SettingsScreen, sectionValue, type Section } from "../Settings";
 import { draftOf, type SettingsDraft } from "@/lib/api";
 import { firstReason } from "@/lib/settingsRules";
 import { LIMITS, noop, settingsView } from "./fixtures";
 
 afterEach(cleanup);
 
-function open(overrides: Partial<Parameters<typeof SettingsScreen>[0]> = {}) {
+type ScreenProps = Parameters<typeof SettingsScreen>[0];
+
+/** The page holds the open section; this stands in for it. */
+function Settings(props: Omit<ScreenProps, "section" | "onSection">) {
+  const [section, setSection] = useState<Section | null>(null);
+  return <SettingsScreen {...props} section={section} onSection={setSection} />;
+}
+
+function open(overrides: Partial<Omit<ScreenProps, "section" | "onSection">> = {}) {
   const view = settingsView();
   return render(
-    <SettingsScreen
+    <Settings
       settings={view}
       draft={draftOf(view)}
       editedWeekday={5}
@@ -66,7 +75,7 @@ describe("the index", () => {
     const view = settingsView();
     let current: SettingsDraft = draftOf(view);
     const draw = () => (
-      <SettingsScreen
+      <Settings
         settings={view}
         draft={current}
         editedWeekday={5}
@@ -87,6 +96,32 @@ describe("the index", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Назад" }));
     expect(screen.getByText("Новый · ул. Рубинштейна, 24")).toBeDefined();
+  });
+
+  it("adds a message as an empty field to fill in, not as words nobody chose", async () => {
+    // The placeholder used to be added as the message itself: «Новое сообщение» could be saved and
+    // sent to a guest.
+    const view = settingsView();
+    let current: SettingsDraft = draftOf(view);
+    const draw = () => (
+      <Settings
+        settings={view}
+        draft={current}
+        editedWeekday={5}
+        onDraft={(next) => {
+          current = next;
+          rerender(draw());
+        }}
+        onEditWeekday={noop}
+      />
+    );
+    const { rerender } = render(draw());
+
+    await userEvent.click(screen.getByText("Сообщения и причины отмены"));
+    await userEvent.click(screen.getByText("+ Сообщение"));
+    expect(current.message_templates.at(-1)).toBe("");
+    expect(screen.queryByDisplayValue("Новое сообщение")).toBeNull();
+    expect(firstReason(current, LIMITS)).toBe("Пустое сообщение отправить нельзя.");
   });
 
   it("reaches every section it advertises", async () => {

@@ -103,7 +103,7 @@ export function DayHeader({
         ‹
       </Pressable>
       <Pressable
-        ariaLabel="Выбрать день"
+        ariaLabel={`Выбрать день. Открыт: ${fmt.dayName(shift.service_date, today)}, ${fmt.dayStamp(shift.service_date)}`}
         onClick={onOpenDays}
         tone="card"
         style={{
@@ -180,7 +180,7 @@ export function Pulse({ shift }: { shift: ShiftView }) {
               whiteSpace: "nowrap",
             }}
           >
-            {fmt.tables(free)} свободно
+            Свободно: {fmt.tables(free)}
           </span>
         )}
       </div>
@@ -188,7 +188,7 @@ export function Pulse({ shift }: { shift: ShiftView }) {
         <Note tone={fits === null ? "warn" : "hint"}>
           {fits === null
             ? "Посадить сейчас некуда: все подходящие столы заняты"
-            : `Сейчас можно посадить компанию до ${fmt.guests(fits)}`}
+            : `Сейчас можно посадить компанию до ${fmt.guestsGenitive(fits)}`}
         </Note>
       ) : null}
     </div>

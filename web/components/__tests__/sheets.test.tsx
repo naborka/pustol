@@ -23,7 +23,7 @@ import {
   TableSheet,
   WalkInSheet,
 } from "../Sheets";
-import { Sheet, TextField } from "../ui";
+import { Sheet, TextField, Toast } from "../ui";
 import { availability, noop, shift, shiftBooking, shiftTable } from "./fixtures";
 
 afterEach(cleanup);
@@ -495,5 +495,22 @@ describe("writing a booking down", () => {
 
     await userEvent.click(screen.getByText("Записать на 21:30, стол 10"));
     expect(onCreate).toHaveBeenCalledWith("t3");
+  });
+});
+
+describe("a message about something done in a sheet", () => {
+  it("is drawn over the sheet rather than under it", () => {
+    const { container } = render(
+      <div>
+        <Sheet open onClose={() => {}} title="Записать гостя">
+          <span>содержимое</span>
+        </Sheet>
+        <Toast message={{ text: "Это время занято." }} />
+      </div>,
+    );
+    const layer = (element: Element | null) => Number((element as HTMLElement | null)?.style.zIndex);
+    const panel = container.querySelector('[role="dialog"]');
+    const toast = screen.getByText("Это время занято.").parentElement;
+    expect(layer(toast)).toBeGreaterThan(layer(panel));
   });
 });

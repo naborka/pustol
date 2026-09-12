@@ -186,7 +186,8 @@ describe("the picker", () => {
         partySize={2}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        failedToLoad={false}
+        daysFailed={false}
+        timesFailed={false}
         onPartySize={noop}
         onServiceDate={noop}
         onPick={noop}
@@ -253,7 +254,8 @@ describe("the picker", () => {
         partySize={2}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        failedToLoad
+        daysFailed
+        timesFailed
         onPartySize={noop}
         onServiceDate={noop}
         onPick={noop}
@@ -347,5 +349,25 @@ describe("reaching a person at the bar", () => {
     home();
     expect(screen.queryByText(/Написать бару|Связаться/)).toBeNull();
     expect(screen.getByText(/Компания больше 6/)).toBeDefined();
+  });
+});
+
+describe("moving a booking the guest already holds", () => {
+  it("says «Перенести» on the button, so nobody wonders whether they are about to hold two", () => {
+    expect(bookingDecision(4, "2026-09-11", "2026-09-11", 1_290, true).label).toBe(
+      "Перенести · 4 гостя · сегодня в 21:30",
+    );
+  });
+
+  it("confirms a move as a move", () => {
+    render(<DoneScreen booking={booking} bar={bar} moved />);
+    expect(screen.getByText("Бронь перенесена")).toBeDefined();
+    expect(screen.queryByText("Стол забронирован")).toBeNull();
+  });
+
+  it("tells the guest how long the table is held in words that agree with the number", () => {
+    home({ booking, bar: { ...bar, grace_minutes: 21 } });
+    expect(screen.getByText(/Держим стол 21 минуту после времени брони/)).toBeDefined();
+    expect(screen.queryByText(/стол дождётся/)).toBeNull();
   });
 });

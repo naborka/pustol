@@ -122,8 +122,8 @@ export function BookingCard({
       </div>
       <Separator />
       <Note>
-        Держим стол {fmt.minutesWord(bar.grace_minutes)} после времени брони. Опаздываете —
-        напишите нам, стол дождётся.
+        Держим стол {fmt.minutesAccusative(bar.grace_minutes)} после времени брони — дальше он может
+        уйти другим гостям.
       </Note>
       <div style={{ display: "flex", gap: SPACE[2] }}>
         <div style={{ flex: 1 }}>
@@ -347,7 +347,8 @@ export function BookScreen({
   partySize,
   serviceDate,
   chosenMinutes,
-  failedToLoad,
+  daysFailed,
+  timesFailed,
   onPartySize,
   onServiceDate,
   onPick,
@@ -361,7 +362,9 @@ export function BookScreen({
   partySize: number;
   serviceDate: string;
   chosenMinutes: number | null;
-  failedToLoad: boolean;
+  /** Kept apart from `timesFailed`: one succeeding must not hide that the other failed. */
+  daysFailed: boolean;
+  timesFailed: boolean;
   onPartySize: (size: number) => void;
   onServiceDate: (date: string) => void;
   onPick: (minutes: number) => void;
@@ -405,7 +408,7 @@ export function BookScreen({
       <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
         <SectionLabel>Какой вечер</SectionLabel>
         {days === null ? (
-          failedToLoad ? (
+          daysFailed ? (
             <Card gap={SPACE[2]}>
               <Note tone="warn">Не удалось прочитать свободные вечера.</Note>
               <CardAction label="Попробовать снова" onClick={onRetry} />
@@ -436,7 +439,7 @@ export function BookScreen({
         </div>
 
         {availability === null ? (
-          failedToLoad ? (
+          timesFailed ? (
             <Card gap={SPACE[2]}>
               <Note tone="warn">Не удалось прочитать свободные окна.</Note>
               <CardAction label="Попробовать снова" onClick={onRetry} />
@@ -471,15 +474,28 @@ export function bookingDecision(
   serviceDate: string,
   today: string,
   chosenMinutes: number | null,
+  moving = false,
 ): { label: string; enabled: boolean } {
   if (chosenMinutes === null) return { label: "Выберите время", enabled: false };
   const when = `${fmt.dayFull(serviceDate, today).toLowerCase()} в ${fmt.time(chosenMinutes)}`;
-  return { label: `Забронировать · ${fmt.guests(partySize)} · ${when}`, enabled: true };
+  // A guest who already holds a table is moving it, and a button reading «Забронировать» makes
+  // them wonder whether they are about to hold two.
+  const verb = moving ? "Перенести" : "Забронировать";
+  return { label: `${verb} · ${fmt.guests(partySize)} · ${when}`, enabled: true };
 }
 
 // ---- the confirmation --------------------------------------------------------------------------
 
-export function DoneScreen({ booking, bar }: { booking: GuestBooking; bar: BarView }) {
+export function DoneScreen({
+  booking,
+  bar,
+  moved = false,
+}: {
+  booking: GuestBooking;
+  bar: BarView;
+  /** The booking replaced an earlier one, so this is a move rather than a new table. */
+  moved?: boolean;
+}) {
   return (
     <div
       style={{
@@ -520,7 +536,7 @@ export function DoneScreen({ booking, bar }: { booking: GuestBooking; bar: BarVi
           letterSpacing: "-.01em",
         }}
       >
-        Стол забронирован
+        {moved ? "Бронь перенесена" : "Стол забронирован"}
       </span>
       <span style={{ fontSize: 16, color: "var(--hint)" }}>
         {fmt.whenLabel(booking.service_date, bar.today, booking.start_minutes)} ·{" "}
@@ -528,8 +544,8 @@ export function DoneScreen({ booking, bar }: { booking: GuestBooking; bar: BarVi
       </span>
       <div style={{ maxWidth: 300, marginTop: SPACE[2] }}>
         <Note>
-          Держим стол {fmt.minutesWord(bar.grace_minutes)} после времени брони. Опаздываете —
-          напишите нам, стол дождётся.
+          Держим стол {fmt.minutesAccusative(bar.grace_minutes)} после времени брони — дальше он может
+          уйти другим гостям.
         </Note>
       </div>
     </div>

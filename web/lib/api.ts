@@ -257,37 +257,67 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * How long a call may take before the app stops waiting and says so.
+ *
+ * A request lost on a basement's signal otherwise leaves a spinner turning for ever. Built on a
+ * timer and an `AbortController` rather than `AbortSignal.timeout`, which older iOS webviews lack.
+ */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** The call never got an answer: the phone's connection, not the bar's server. */
+function unreachable(): ApiError {
+  return new ApiError(0, { code: "network", message: "the request got no answer" });
+}
+
 async function request<T>(
   authorization: string,
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      authorization,
-      ...init?.headers,
-    },
-  });
-
-  if (!response.ok) {
-    // A failure that is not the API's own shape — a proxy error page, a dropped connection — is
-    // still reported with a code, so no caller has to handle "undefined" as a state.
-    let failure: ApiFailure = {
-      code: "internal",
-      message: `HTTP ${response.status}`,
-    };
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    let response: Response;
     try {
-      const body = (await response.json()) as { error?: ApiFailure };
-      if (body.error?.code) failure = body.error;
+      response = await fetch(path, {
+        ...init,
+        signal: abort.signal,
+        headers: {
+          ...(init?.body ? { "content-type": "application/json" } : {}),
+          authorization,
+          ...init?.headers,
+        },
+      });
     } catch {
-      // Keep the fallback.
+      throw unreachable();
     }
-    throw new ApiError(response.status, failure);
+
+    if (!response.ok) {
+      // A failure that is not the API's own shape — a proxy error page — is still reported with a
+      // code, so no caller has to handle "undefined" as a state.
+      let failure: ApiFailure = {
+        code: "internal",
+        message: `HTTP ${response.status}`,
+      };
+      try {
+        const body = (await response.json()) as { error?: ApiFailure };
+        if (body.error?.code) failure = body.error;
+      } catch {
+        // Keep the fallback.
+      }
+      throw new ApiError(response.status, failure);
+    }
+    if (response.status === 204) return undefined as T;
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      if (abort.signal.aborted) throw unreachable();
+      throw error;
+    }
+  } finally {
+    clearTimeout(timer);
   }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
 }
 
 function query(params: Record<string, string | number | undefined>): string {

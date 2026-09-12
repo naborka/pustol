@@ -7,7 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { client } from "../api";
+import { REQUEST_TIMEOUT_MS, client } from "../api";
 
 function reply(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -39,5 +39,38 @@ describe("the proof a call carries", () => {
 
     expect(authorizationOf(fetch.mock.calls[0])).toBe("tma signed-by-telegram");
     expect(authorizationOf(fetch.mock.calls[1])).toBe("session claims.signature");
+  });
+});
+
+describe("a network that does not answer", () => {
+  it("names a dropped connection as the phone's rather than the bar's", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    await expect(client("signed").days(2)).rejects.toMatchObject({
+      failure: { code: "network" },
+    });
+  });
+
+  it("gives up on a request that never comes back instead of spinning for ever", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_path: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () =>
+                reject(new DOMException("aborted", "AbortError")),
+              );
+            }),
+        ),
+      );
+      const outcome = expect(client("signed").days(2)).rejects.toMatchObject({
+        failure: { code: "network" },
+      });
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

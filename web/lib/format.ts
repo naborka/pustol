@@ -145,6 +145,16 @@ export function minutesWord(count: number): string {
   return `${count} ${plural(count, "минута", "минуты", "минут")}`;
 }
 
+/** "Держим стол 21 минуту": minutes as the object of a verb, which Russian inflects. */
+export function minutesAccusative(count: number): string {
+  return `${count} ${plural(count, "минуту", "минуты", "минут")}`;
+}
+
+/** "до 21 гостя": guests after «до», which takes the genitive. */
+export function guestsGenitive(count: number): string {
+  return `${count} ${plural(count, "гостя", "гостей", "гостей")}`;
+}
+
 export function daysWord(count: number): string {
   return `${count} ${plural(count, "день", "дня", "дней")}`;
 }

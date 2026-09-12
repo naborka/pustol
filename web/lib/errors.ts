@@ -26,6 +26,8 @@ const GUEST: Record<string, string> = {
   shift_not_bookable: "На этот день брони пока нет. Выберите другой.",
   impossible_time: "Такого времени в этот день не существует.",
   internal: "Что-то сломалось у нас. Попробуйте ещё раз через минуту.",
+  network: "Нет связи. Проверьте интернет и попробуйте ещё раз.",
+  already_booked_tonight: "На этот вечер у вас уже есть бронь.",
 };
 
 /** What each code means to somebody working the shift. */

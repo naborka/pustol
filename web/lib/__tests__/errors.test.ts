@@ -107,3 +107,10 @@ describe("the detail a refused settings save carries", () => {
     expect(invalidReasons(failure("no_table_free", { reasons: ["x"] }))).toEqual([]);
   });
 });
+
+describe("a failure that is nobody's fault here", () => {
+  it("tells the person holding the phone to check their connection", () => {
+    expect(messageFor(failure("network"), "guest")).toContain("интернет");
+    expect(messageFor(failure("network"), "staff")).toContain("интернет");
+  });
+});
