@@ -47,7 +47,7 @@ import {
 } from "@/lib/outcomes";
 import { firstReason, differs } from "@/lib/settingsRules";
 import { hasStarted } from "@/lib/status";
-import { credentials, haptics, openBotChat, webApp } from "@/lib/telegram";
+import { credentials, haptics, openBotChat, openContact, webApp } from "@/lib/telegram";
 import { TIMING } from "@/lib/tokens";
 import { ShiftActions, ShiftScreen, type ShiftPane } from "@/components/AdminShift";
 import { AppShell, InsetFrame, type StaffTab } from "@/components/AppChrome";
@@ -887,7 +887,7 @@ export default function Page() {
           onCancel={() => setSheet({ kind: "guestCancel" })}
           onEnableReminders={() => void enableReminders()}
           onDismissReminders={() => void dismissReminders()}
-          onWriteToBar={() => openBotChat(process.env.NEXT_PUBLIC_BOT_USERNAME ?? "", "hello")}
+          onContact={openContact}
         />
       ) : null}
 

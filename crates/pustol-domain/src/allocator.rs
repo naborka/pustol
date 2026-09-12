@@ -574,6 +574,7 @@ mod tests {
                 username: "anna_mgr".to_owned(),
                 telegram_user_id: None,
             }],
+            contact: None,
         })
         .expect("a legal bar")
     }

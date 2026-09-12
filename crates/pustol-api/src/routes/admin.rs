@@ -495,6 +495,7 @@ fn view_of(
     SettingsView {
         name: config.name.clone(),
         address: config.address.clone(),
+        contact: config.contact.clone().unwrap_or_default(),
         timezone: config.timezone.name().to_owned(),
         week: config.week.all().iter().copied().map(Hours::from).collect(),
         zones: config

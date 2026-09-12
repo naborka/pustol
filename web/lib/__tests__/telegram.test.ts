@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   bootstrapTelegram,
   combinedInsets,
+  openContact,
   ZERO_INSETS,
   type Insets,
   type WebApp,
@@ -145,5 +146,18 @@ describe("bootstrapTelegram", () => {
       insets: ZERO_INSETS,
       stableHeight: 420,
     });
+  });
+});
+
+describe("opening the bar's contact", () => {
+  it("opens a Telegram account inside Telegram rather than in a browser", () => {
+    const app = fakeWebApp();
+    window.Telegram = { WebApp: app };
+    try {
+      openContact("https://t.me/podval_bar");
+      expect(app.openTelegramLink).toHaveBeenCalledWith("https://t.me/podval_bar");
+    } finally {
+      delete window.Telegram;
+    }
   });
 });

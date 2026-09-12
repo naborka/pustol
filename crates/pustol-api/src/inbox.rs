@@ -23,7 +23,7 @@ const AFTER_FAILURE: Duration = Duration::from_secs(5);
 ///
 /// It refuses when another process polls the same bot or a webhook is set for it. Neither goes away
 /// in seconds, and asking every five would fill the log with the same line.
-const AFTER_REFUSAL: Duration = Duration::from_secs(60);
+const AFTER_REFUSAL: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Debug)]
 pub struct Inbox {
@@ -144,6 +144,11 @@ impl Inbox {
                 return;
             }
         };
+        let contact = config
+            .contact
+            .as_deref()
+            .and_then(pustol_domain::config::Contact::parse)
+            .map(|contact| contact.label());
         let reply = match message.text.as_deref().and_then(start_payload) {
             Some(payload) => {
                 // Starting the bot is the one thing that makes a guest reachable again after they
@@ -156,10 +161,10 @@ impl Inbox {
                 if payload == "reminders" {
                     messages::reminders_on(config.remind_hours)
                 } else {
-                    messages::welcome(&config.name)
+                    messages::welcome(&config.name, contact.as_deref())
                 }
             }
-            None => messages::nobody_reads_this(&config.name),
+            None => messages::nobody_reads_this(&config.name, contact.as_deref()),
         };
         if let Err(error) = self.bot.send_message(message.chat.id, &reply, &[]).await {
             tracing::warn!(%error, "could not answer a message");

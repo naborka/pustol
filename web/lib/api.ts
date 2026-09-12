@@ -43,6 +43,8 @@ export interface BarView {
   last_arrival_minutes: number | null;
   /** The bar's own clock, in wall-clock minutes into today's shift. */
   now_minutes: number;
+  /** Where a person at the bar answers, already turned into a label and a link. */
+  contact: { label: string; url: string } | null;
 }
 
 export interface Session {
@@ -190,6 +192,8 @@ export interface SettingsTable {
 export interface SettingsView {
   name: string;
   address: string;
+  /** As the manager typed it; empty when there is none. */
+  contact: string;
   timezone: string;
   week: Hours[];
   zones: string[];
@@ -221,6 +225,7 @@ export type TableDraft =
 export interface SettingsDraft {
   name: string;
   address: string;
+  contact: string;
   timezone: string;
   week: Hours[];
   zones: string[];
@@ -414,6 +419,7 @@ export function draftOf(settings: SettingsView): SettingsDraft {
   return {
     name: settings.name,
     address: settings.address,
+    contact: settings.contact,
     timezone: settings.timezone,
     week: settings.week.map((hours) => ({ ...hours })),
     zones: [...settings.zones],

@@ -134,7 +134,8 @@ pub(crate) async fn load_config(
 ) -> Result<ValidConfig> {
     let row = sqlx::query(
         "select name, address, timezone, turn_minutes, slot_step_minutes, max_party,
-                horizon_days, remind_hours, grace_minutes, zones, message_templates, cancel_reasons
+                horizon_days, remind_hours, grace_minutes, zones, message_templates, cancel_reasons,
+                contact
          from bar where id = $1",
     )
     .bind(bar)
@@ -177,6 +178,7 @@ pub(crate) async fn load_config(
         message_templates: row.try_get("message_templates")?,
         cancel_reasons: row.try_get("cancel_reasons")?,
         staff,
+        contact: row.try_get("contact")?,
     };
     ValidConfig::new(config).map_err(Error::StoredConfigInvalid)
 }
@@ -275,7 +277,8 @@ async fn write_bar(
     sqlx::query(
         "update bar set name = $2, address = $3, timezone = $4, turn_minutes = $5,
                 slot_step_minutes = $6, max_party = $7, horizon_days = $8, remind_hours = $9,
-                grace_minutes = $10, zones = $11, message_templates = $12, cancel_reasons = $13
+                grace_minutes = $10, zones = $11, message_templates = $12, cancel_reasons = $13,
+                contact = $14
          where id = $1",
     )
     .bind(bar)
@@ -297,6 +300,7 @@ async fn write_bar(
     )
     .bind(&config.message_templates)
     .bind(&config.cancel_reasons)
+    .bind(&config.contact)
     .execute(connection)
     .await?;
     Ok(())
@@ -435,8 +439,8 @@ pub(crate) async fn insert_bar(
     let bar: BarId = sqlx::query(
         "insert into bar (name, address, timezone, turn_minutes, slot_step_minutes, max_party,
                           horizon_days, remind_hours, grace_minutes, zones, message_templates,
-                          cancel_reasons)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning id",
+                          cancel_reasons, contact)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id",
     )
     .bind(&config.name)
     .bind(&config.address)
@@ -456,6 +460,7 @@ pub(crate) async fn insert_bar(
     )
     .bind(&config.message_templates)
     .bind(&config.cancel_reasons)
+    .bind(&config.contact)
     .fetch_one(&mut *connection)
     .await
     .map(|row| row.get::<Uuid, _>("id"))

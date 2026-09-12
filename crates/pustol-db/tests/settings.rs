@@ -659,3 +659,22 @@ async fn applying_one_days_hours_to_the_whole_week_is_just_a_proposal_like_any_o
             .all(|hours| hours.open_minutes == 1020 && hours.close_minutes == 1440)
     );
 }
+
+#[tokio::test]
+async fn a_contact_for_guests_is_saved_cleared_and_checked() {
+    let store = store().await;
+    let (bar, config) = default_bar(&store).await;
+
+    let mut draft = draft_of(&config);
+    draft.contact = "  @podval_bar ".to_owned();
+    store.save_settings(bar, &draft, morning()).await.expect("saved");
+    assert_eq!(store.config(bar).await.expect("loads").contact.as_deref(), Some("@podval_bar"));
+
+    draft.contact = String::new();
+    store.save_settings(bar, &draft, morning()).await.expect("saved");
+    assert_eq!(store.config(bar).await.expect("loads").contact, None, "blank means none");
+
+    draft.contact = "звоните".to_owned();
+    let refused = store.save_settings(bar, &draft, morning()).await;
+    assert!(matches!(refused, Err(Error::ProposedConfigInvalid(_))), "{refused:?}");
+}

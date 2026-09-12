@@ -151,6 +151,20 @@ export function openChatWith(username: string): void {
   }
 }
 
+/**
+ * Opens the bar's contact: a Telegram account inside Telegram, a phone number in the dialer.
+ *
+ * The link comes from the server, which has already decided which of the two it is.
+ */
+export function openContact(url: string): void {
+  const app = webApp();
+  if (url.startsWith("https://t.me/") && app) {
+    app.openTelegramLink(url);
+  } else if (typeof window !== "undefined") {
+    window.location.href = url;
+  }
+}
+
 /** Device safe area plus Telegram's remaining chrome. Both are zero on old clients. */
 export function combinedInsets(safe?: Insets, content?: Insets): Insets {
   const device = safe ?? ZERO_INSETS;

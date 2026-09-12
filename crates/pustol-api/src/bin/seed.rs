@@ -93,5 +93,6 @@ fn default_bar(admin: &str) -> BarConfig {
             username: admin.trim().trim_start_matches('@').to_owned(),
             telegram_user_id: None,
         }],
+        contact: None,
     }
 }

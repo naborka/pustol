@@ -50,6 +50,7 @@ function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
     message_templates: ["Ваш стол готов, ждём вас!"],
     cancel_reasons: ["Частное мероприятие"],
     staff: [{ username: "anna_mgr" }],
+    contact: "",
     ...overrides,
   };
 }
@@ -319,5 +320,16 @@ describe("how long a text may be", () => {
   it("counts characters the way the server does, not UTF-16 halves", () => {
     // One emoji is one character to the server and two code units to JavaScript.
     expect(kinds(draft({ name: "🍺".repeat(LIMITS.text.name) }))).toEqual([]);
+  });
+});
+
+describe("the contact guests are given", () => {
+  it("is a phone number, a Telegram username, or nothing at all", () => {
+    for (const fine of ["", "+381 (11) 123-45-67", "@podval_bar", "podval_bar"]) {
+      expect(kinds(draft({ contact: fine }))).toEqual([]);
+    }
+    for (const wrong of ["звоните", "12", "+1+2345678", "@ab", "https://evil.example"]) {
+      expect(kinds(draft({ contact: wrong }))).toContain("malformed_contact");
+    }
   });
 });

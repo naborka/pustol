@@ -254,3 +254,15 @@ async fn polling_hands_each_update_over_once_and_moves_past_it() {
     assert_eq!(polls[1]["offset"], 8, "confirming update 7 so Telegram stops sending it");
     assert_eq!(stub.calls_to("sendMessage").await.len(), 1, "handled once, not twice");
 }
+
+#[tokio::test]
+async fn the_reply_to_an_unread_message_names_who_will_read_one() {
+    let mut config = common::config_with(common::default_tables());
+    config.contact = Some("@podval_bar".to_owned());
+    let app = common::harness_at(common::morning(), config).await;
+    let (bot, stub) = stub_telegram().await;
+    let update: Update = serde_json::from_value(said(5, 78, "Можно на восьмерых?")).expect("a message");
+    inbox(&app, bot).handle(update).await;
+    let sent = stub.calls_to("sendMessage").await;
+    assert!(sent[0]["text"].as_str().expect("text").contains("@podval_bar"), "{}", sent[0]);
+}

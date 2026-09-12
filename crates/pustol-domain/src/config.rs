@@ -189,6 +189,9 @@ pub struct BarConfig {
     pub message_templates: Vec<String>,
     pub cancel_reasons: Vec<String>,
     pub staff: Vec<StaffMember>,
+    /// How guests reach a person at the bar — a phone number or a Telegram username — when the bar
+    /// has given one. Kept as written; [`Contact::parse`] says what it is.
+    pub contact: Option<String>,
 }
 
 impl BarConfig {
@@ -277,6 +280,13 @@ impl BarConfig {
             errors.push(ConfigError::AddressTooLong {
                 limit: LIMITS.text.address,
             });
+        }
+        if self
+            .contact
+            .as_deref()
+            .is_some_and(|contact| Contact::parse(contact).is_none())
+        {
+            errors.push(ConfigError::MalformedContact);
         }
     }
 
@@ -510,6 +520,8 @@ pub enum ConfigError {
     MessageTemplateTooLong { limit: usize },
     #[error("a cancellation reason is longer than {limit} characters")]
     CancelReasonTooLong { limit: usize },
+    #[error("the contact is neither a phone number nor a Telegram username")]
+    MalformedContact,
     #[error("{weekday:?} opens at minute {minutes}, outside the allowed opening times")]
     OpenOutOfRange { weekday: Weekday, minutes: i32 },
     #[error("{weekday:?} closes at minute {minutes}, outside the allowed closing times")]
@@ -680,6 +692,68 @@ pub fn parties_above_cap(
         .filter(|booking| booking.party_size > config.max_party)
         .map(|booking| booking.id)
         .collect()
+}
+
+/// A way for a guest to reach a person at the bar.
+///
+/// The bot's chat is read by nobody, so a party larger than the app takes needs somewhere a human
+/// answers. Only two kinds are accepted, because only those two turn into a link a phone can open.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Contact {
+    Phone { shown: String, dial: String },
+    Telegram { username: String },
+}
+
+/// Longer than any phone number or username, short enough for one line of a screen.
+const CONTACT_MAX_CHARS: usize = 32;
+
+impl Contact {
+    /// Reads a contact as a manager typed it, or `None` when it is neither kind.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > CONTACT_MAX_CHARS {
+            return None;
+        }
+        let username = text.strip_prefix('@').unwrap_or(text);
+        if is_telegram_username(username) {
+            return Some(Self::Telegram {
+                username: username.to_owned(),
+            });
+        }
+        let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+        let shaped = text
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, ' ' | '-' | '(' | ')' | '+'))
+            && text.rfind('+').is_none_or(|at| at == 0);
+        // E.164 allows at most fifteen digits; fewer than seven is not a number anyone can dial.
+        (shaped && (7..=15).contains(&digits.len())).then(|| Self::Phone {
+            shown: text.to_owned(),
+            dial: if text.starts_with('+') {
+                format!("+{digits}")
+            } else {
+                digits
+            },
+        })
+    }
+
+    /// How the contact is written on a screen.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Phone { shown, .. } => shown.clone(),
+            Self::Telegram { username } => format!("@{username}"),
+        }
+    }
+
+    /// What a phone opens to reach it.
+    #[must_use]
+    pub fn url(&self) -> String {
+        match self {
+            Self::Phone { dial, .. } => format!("tel:{dial}"),
+            Self::Telegram { username } => format!("https://t.me/{username}"),
+        }
+    }
 }
 
 /// Whether `candidate` could be a Telegram username.

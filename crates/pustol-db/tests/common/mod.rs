@@ -170,6 +170,7 @@ pub fn config_with(tables: Vec<BarTable>, staff: &str) -> BarConfig {
             username: staff.to_owned(),
             telegram_user_id: None,
         }],
+        contact: None,
     }
 }
 
@@ -255,6 +256,7 @@ pub fn draft_of(config: &BarConfig) -> Draft {
                 username: member.username.clone(),
             })
             .collect(),
+        contact: config.contact.clone().unwrap_or_default(),
     }
 }
 

@@ -700,3 +700,20 @@ async fn rebooking_another_evening_gives_the_table_left_behind_to_a_party_withou
         .expect("still booked");
     assert!(!peter["table_id"].is_null(), "the table Ира gave back should seat Пётр: {peter}");
 }
+
+#[tokio::test]
+async fn the_first_screen_says_how_to_reach_a_person_at_the_bar() {
+    let mut config = config_with(common::default_tables());
+    config.contact = Some("+381 11 123 45 67".to_owned());
+    let app = harness_at(morning(), config).await;
+    let body = app.get("/api/session", &Caller::new("Юля")).await.expect_ok().clone();
+    assert_eq!(body["bar"]["contact"]["label"], "+381 11 123 45 67");
+    assert_eq!(body["bar"]["contact"]["url"], "tel:+381111234567");
+}
+
+#[tokio::test]
+async fn a_bar_without_a_contact_says_so_rather_than_inventing_one() {
+    let app = harness().await;
+    let body = app.get("/api/session", &Caller::new("Юля")).await.expect_ok().clone();
+    assert!(body["bar"]["contact"].is_null());
+}

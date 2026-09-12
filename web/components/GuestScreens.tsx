@@ -200,14 +200,14 @@ export function HomeScreen({
   onCancel,
   onEnableReminders,
   onDismissReminders,
-  onWriteToBar,
+  onContact,
 }: {
   session: Session;
   onMove: () => void;
   onCancel: () => void;
   onEnableReminders: () => void;
   onDismissReminders: () => void;
-  onWriteToBar: () => void;
+  onContact: (url: string) => void;
 }) {
   const { bar, booking } = session;
   return (
@@ -248,19 +248,23 @@ export function HomeScreen({
           }}
         >
           <span style={{ fontSize: TEXT.base, color: "var(--hint)" }}>
-            Компания больше {bar.max_party}
+            {bar.contact
+              ? `Компания больше ${bar.max_party}`
+              : `Компания больше ${bar.max_party} — только по договорённости с баром`}
           </span>
-          <Pressable
-            onClick={onWriteToBar}
-            style={{
-              fontSize: TEXT.base,
-              fontWeight: 600,
-              color: "var(--link)",
-              padding: `0 0 0 ${SPACE[2]}px`,
-            }}
-          >
-            Написать бару
-          </Pressable>
+          {bar.contact ? (
+            <Pressable
+              onClick={() => onContact(bar.contact?.url ?? "")}
+              style={{
+                fontSize: TEXT.base,
+                fontWeight: 600,
+                color: "var(--link)",
+                padding: `0 0 0 ${SPACE[2]}px`,
+              }}
+            >
+              {`Связаться: ${bar.contact.label}`}
+            </Pressable>
+          ) : null}
         </div>
       </Card>
     </div>

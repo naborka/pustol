@@ -23,6 +23,7 @@ import type { Bounds, Limits, SettingsDraft } from "./api";
 export type Reason =
   | { kind: "blank_name" }
   | { kind: "blank_address" }
+  | { kind: "malformed_contact" }
   | { kind: "name_too_long" }
   | { kind: "address_too_long" }
   | { kind: "message_template_too_long" }
@@ -68,6 +69,15 @@ export function isTelegramUsername(candidate: string): boolean {
   return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(candidate);
 }
 
+/** A phone number or a Telegram username: `Contact::parse` in `pustol-domain`, advisory here. */
+export function isContact(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || characters(trimmed) > 32) return false;
+  if (isTelegramUsername(trimmed.startsWith("@") ? trimmed.slice(1) : trimmed)) return true;
+  const digits = trimmed.replace(/\D/g, "").length;
+  return /^\+?[0-9 ()-]+$/.test(trimmed) && digits >= 7 && digits <= 15;
+}
+
 export function largestTable(draft: SettingsDraft): number {
   return draft.tables.reduce((largest, table) => Math.max(largest, table.seats), 0);
 }
@@ -80,6 +90,9 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   if (draft.address.trim().length === 0) reasons.push({ kind: "blank_address" });
   if (characters(draft.name) > limits.text.name) reasons.push({ kind: "name_too_long" });
   if (characters(draft.address) > limits.text.address) reasons.push({ kind: "address_too_long" });
+  if (draft.contact.trim().length > 0 && !isContact(draft.contact)) {
+    reasons.push({ kind: "malformed_contact" });
+  }
 
   draft.week.forEach((hours, weekday) => {
     if (!within(hours.open_minutes, limits.open_minutes)) {
@@ -253,6 +266,8 @@ export function reasonSentence(reason: Reason, draft: SettingsDraft): string {
       return "У бара нет названия.";
     case "blank_address":
       return "У бара нет адреса.";
+    case "malformed_contact":
+      return "Контакт для гостей — это телефон или @ник в Telegram.";
     case "name_too_long":
       return "Название слишком длинное.";
     case "address_too_long":

@@ -55,6 +55,7 @@ fn draft_of(config: &BarConfig) -> Draft {
                 username: member.username.clone(),
             })
             .collect(),
+        contact: config.contact.clone().unwrap_or_default(),
     }
 }
 

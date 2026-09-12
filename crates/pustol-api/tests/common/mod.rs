@@ -162,6 +162,7 @@ pub fn config_with(tables: Vec<BarTable>) -> BarConfig {
             username: "anna_mgr".to_owned(),
             telegram_user_id: None,
         }],
+        contact: None,
     }
 }
 

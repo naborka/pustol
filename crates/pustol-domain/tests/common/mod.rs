@@ -96,6 +96,7 @@ pub fn default_config() -> BarConfig {
                 telegram_user_id: None,
             },
         ],
+        contact: None,
     }
 }
 

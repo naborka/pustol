@@ -104,6 +104,28 @@ pub struct BarView {
     /// different timezone from the bar and is under nobody's control. "Открыт до 02:00" is a claim
     /// about the bar, so it is answered by the bar.
     pub now_minutes: i32,
+    /// Where a person at the bar answers, absent when the bar has given nowhere.
+    pub contact: Option<ContactView>,
+}
+
+/// A contact, already turned into what a screen shows and what a tap opens.
+#[derive(Debug, Serialize)]
+pub struct ContactView {
+    pub label: String,
+    pub url: String,
+}
+
+impl ContactView {
+    pub fn of(config: &ValidConfig) -> Option<Self> {
+        config
+            .contact
+            .as_deref()
+            .and_then(pustol_domain::config::Contact::parse)
+            .map(|contact| Self {
+                label: contact.label(),
+                url: contact.url(),
+            })
+    }
 }
 
 impl BarView {
@@ -122,6 +144,7 @@ impl BarView {
             today_hours: hours.into(),
             last_arrival_minutes: config.last_arrival_minutes(today.weekday()),
             now_minutes: minutes_within(today, now, config.timezone),
+            contact: ContactView::of(config),
         }
     }
 }
@@ -557,6 +580,8 @@ pub struct ReconcileRequest {
 pub struct SettingsView {
     pub name: String,
     pub address: String,
+    /// As the manager typed it; empty when there is none.
+    pub contact: String,
     pub timezone: String,
     /// Indexed from Sunday, matching `chrono`'s numbering.
     pub week: Vec<Hours>,

@@ -741,3 +741,30 @@ fn texts_the_bar_writes_stay_short_enough_to_send_and_to_show() {
     at_the_limit.message_templates = vec!["а".repeat(LIMITS.text.message)];
     assert_eq!(at_the_limit.validate(), Vec::new(), "counted in characters, not bytes");
 }
+
+#[test]
+fn a_contact_is_a_phone_number_or_a_telegram_username_and_nothing_else() {
+    use pustol_domain::config::Contact;
+
+    let phone = Contact::parse(" +381 (11) 123-45-67 ").expect("a phone number");
+    assert_eq!(phone.label(), "+381 (11) 123-45-67");
+    assert_eq!(phone.url(), "tel:+381111234567");
+
+    let account = Contact::parse("@podval_bar").expect("a username");
+    assert_eq!(account.label(), "@podval_bar");
+    assert_eq!(account.url(), "https://t.me/podval_bar");
+    assert_eq!(Contact::parse("podval_bar"), Some(account), "the @ is optional");
+
+    for nonsense in ["", "позвоните", "12", "+1+2345678", "https://evil.example", "@ab"] {
+        assert_eq!(Contact::parse(nonsense), None, "{nonsense:?}");
+    }
+}
+
+#[test]
+fn a_bar_with_an_unreadable_contact_is_not_legal_and_one_without_a_contact_is() {
+    let mut config = default_config();
+    config.contact = Some("звоните в дверь".to_owned());
+    assert!(config.validate().contains(&ConfigError::MalformedContact));
+    config.contact = None;
+    assert_eq!(config.validate(), Vec::new());
+}

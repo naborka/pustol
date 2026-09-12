@@ -67,6 +67,9 @@ pub struct Draft {
     pub message_templates: Vec<String>,
     pub cancel_reasons: Vec<String>,
     pub staff: Vec<StaffDraft>,
+    /// Empty when the bar gives guests no contact.
+    #[serde(default)]
+    pub contact: String,
 }
 
 /// A proposal that cannot even be understood, as distinct from one that is understood and
@@ -136,6 +139,9 @@ impl Draft {
                 .map(|text| text.trim().to_owned())
                 .collect(),
             staff: self.resolve_staff(current),
+            contact: Some(self.contact.trim())
+                .filter(|contact| !contact.is_empty())
+                .map(str::to_owned),
         })
     }
 

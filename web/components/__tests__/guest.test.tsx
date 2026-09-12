@@ -26,7 +26,7 @@ function home(overrides: Parameters<typeof session>[0] = {}) {
       onCancel={noop}
       onEnableReminders={noop}
       onDismissReminders={noop}
-      onWriteToBar={noop}
+      onContact={noop}
     />,
   );
 }
@@ -86,7 +86,7 @@ describe("the guest's home screen", () => {
         onCancel={onCancel}
         onEnableReminders={noop}
         onDismissReminders={noop}
-        onWriteToBar={noop}
+        onContact={noop}
       />,
     );
     await userEvent.click(screen.getByText("Перенести"));
@@ -320,5 +320,32 @@ describe("cancelling", () => {
 
     await userEvent.click(within(sheet).getByText("Отменить бронь"));
     expect(onConfirm).toHaveBeenCalledOnce();
+  });
+});
+
+describe("reaching a person at the bar", () => {
+  it("offers the bar's own contact for a party the app does not take", async () => {
+    const onContact = vi.fn();
+    render(
+      <HomeScreen
+        session={session({
+          bar: { ...bar, contact: { label: "@podval_bar", url: "https://t.me/podval_bar" } },
+        })}
+        onMove={noop}
+        onCancel={noop}
+        onEnableReminders={noop}
+        onDismissReminders={noop}
+        onContact={onContact}
+      />,
+    );
+    await userEvent.click(screen.getByText("Связаться: @podval_bar"));
+    expect(onContact).toHaveBeenCalledWith("https://t.me/podval_bar");
+  });
+
+  it("points nowhere when the bar gave nowhere to point", () => {
+    // The bot's chat is read by nobody. A link into it was a promise nobody kept.
+    home();
+    expect(screen.queryByText(/Написать бару|Связаться/)).toBeNull();
+    expect(screen.getByText(/Компания больше 6/)).toBeDefined();
   });
 });

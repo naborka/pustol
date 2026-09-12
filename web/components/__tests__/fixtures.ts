@@ -28,6 +28,7 @@ export const bar: BarView = {
   today_hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
   last_arrival_minutes: 1_440,
   now_minutes: 1_280,
+  contact: null,
 };
 
 export const booking: GuestBooking = {
@@ -180,6 +181,7 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     ],
     next_table_number: 9,
     limits: LIMITS,
+    contact: "",
     ...overrides,
   };
 }

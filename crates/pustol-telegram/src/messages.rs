@@ -90,17 +90,27 @@ pub fn reminders_on(remind_hours: i32) -> String {
 
 /// The answer to starting the bot any other way.
 #[must_use]
-pub fn welcome(bar_name: &str) -> String {
-    format!("Это бот бара «{bar_name}». Забронировать, перенести или отменить стол можно в приложении.")
+pub fn welcome(bar_name: &str, contact: Option<&str>) -> String {
+    format!(
+        "Это бот бара «{bar_name}». Забронировать, перенести или отменить стол можно в приложении.{}",
+        reach(contact)
+    )
 }
 
 /// The answer to a message typed into the bot's chat. Nobody reads it, and saying nothing would
-/// read as being ignored.
+/// read as being ignored — so it says where somebody does.
 #[must_use]
-pub fn nobody_reads_this(bar_name: &str) -> String {
+pub fn nobody_reads_this(bar_name: &str, contact: Option<&str>) -> String {
     format!(
-        "Это бот бара «{bar_name}», сообщения здесь никто не читает. Забронировать, перенести или отменить стол можно в приложении."
+        "Это бот бара «{bar_name}», сообщения здесь никто не читает. Забронировать, перенести или отменить стол можно в приложении.{}",
+        reach(contact)
     )
+}
+
+fn reach(contact: Option<&str>) -> String {
+    contact.map_or_else(String::new, |contact| {
+        format!(" Связаться с баром: {contact}.")
+    })
 }
 
 fn hours(count: i32) -> String {

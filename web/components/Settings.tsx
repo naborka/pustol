@@ -73,7 +73,7 @@ interface Context {
 export function sectionValue(section: Section, draft: SettingsDraft, weekday: number): string {
   switch (section) {
     case "bar":
-      return `${draft.name} · ${draft.address}`;
+      return [draft.name, draft.address, draft.contact.trim()].filter(Boolean).join(" · ");
     case "room":
       return `${fmt.tables(draft.tables.length)} · ${draft.zones.join(", ")}`;
     case "hours": {
@@ -237,6 +237,19 @@ function sectionBody(section: Section, ctx: Context): ReactNode {
               })
             }
           />
+          <TextField
+            value={ctx.draft.contact}
+            placeholder="Телефон или @ник для гостей"
+            onChange={(value) =>
+              ctx.edit((next) => {
+                next.contact = value;
+              })
+            }
+          />
+          <Note>
+            Контакт видят гости, чья компания больше предела, и бот называет его в ответ на сообщения.
+            Пусто — значит некуда.
+          </Note>
           <Note>
             Часовой пояс — {ctx.draft.timezone}. Все времена в приложении показаны по нему.
           </Note>
