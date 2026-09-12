@@ -45,12 +45,6 @@ fn backoff(attempts: i32) -> TimeDelta {
     (FIRST_BACKOFF * 2_i32.pow(doublings)).min(MAX_BACKOFF)
 }
 
-/// The callback the reminder's button sends back.
-///
-/// A guest who can cancel in one tap does, and the bar gets the table back — which is the entire
-/// argument for reminding anybody about anything.
-pub const CANCEL_CALLBACK: &str = "cancel_booking";
-
 /// Runs until the process is asked to stop.
 pub async fn run(store: Store, bot: Bot, clock: Clock, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     loop {
@@ -168,11 +162,13 @@ async fn deliver(
     Ok(())
 }
 
+/// A guest who can cancel in one tap does, and the bar gets the table back — which is the entire
+/// argument for reminding anybody about anything. [`crate::inbox`] answers the tap.
 fn reminder_buttons(message: &PendingNotification) -> Vec<CallbackButton> {
     if message.kind == NotificationKind::Reminder {
         vec![CallbackButton {
             text: "Не смогу прийти".to_owned(),
-            callback_data: format!("{CANCEL_CALLBACK}:{}", message.booking.0),
+            callback_data: crate::callbacks::cancel_booking(message.booking),
         }]
     } else {
         Vec::new()

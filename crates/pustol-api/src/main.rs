@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
+use pustol_api::inbox::Inbox;
 use pustol_api::{AppState, Assets, Clock, bind_address, interrupt_signal, router, worker};
 use pustol_db::Store;
 use pustol_telegram::{Bot, BotToken};
@@ -50,6 +51,15 @@ async fn main() -> Result<()> {
     let state = AppState::new(store.clone(), bot.clone(), bar, bot_token, Clock::System);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let inbox = tokio::spawn(
+        Inbox {
+            store: store.clone(),
+            bot: bot.clone(),
+            bar,
+            clock: Clock::System,
+        }
+        .run(shutdown_rx.clone()),
+    );
     let outbox = tokio::spawn(worker::run(store, bot, Clock::System, shutdown_rx));
 
     let serving_app = assets.is_some();
@@ -72,6 +82,7 @@ async fn main() -> Result<()> {
     // Let the outbox finish the batch it is on rather than dropping a message mid-flight.
     let _ = shutdown_tx.send(true);
     let _ = outbox.await;
+    let _ = inbox.await;
     Ok(())
 }
 

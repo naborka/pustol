@@ -45,3 +45,16 @@ async fn a_telegram_that_never_answers_is_a_transient_failure_rather_than_a_hang
     assert!(matches!(failure, SendError::Transient(_)), "got {failure:?}");
     assert!(started.elapsed() < Duration::from_secs(5));
 }
+
+#[test]
+fn an_update_with_a_part_nobody_can_read_still_carries_its_id() {
+    // Batches are confirmed by their highest id. An update that failed to parse as a whole would be
+    // fetched again on every poll and hold up everything sent after it.
+    let update: pustol_telegram::Update = serde_json::from_value(serde_json::json!({
+        "update_id": 5,
+        "message": { "surprise": true }
+    }))
+    .expect("the id is always readable");
+    assert_eq!(update.update_id, 5);
+    assert!(update.message.is_none());
+}

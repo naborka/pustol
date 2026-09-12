@@ -9,8 +9,9 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::init_data::BotToken;
+use crate::updates::Update;
 
-/// Where an outgoing message failed, and whether trying again could help.
+/// Where a call to Telegram failed, and whether trying again could help.
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     /// The guest has blocked the bot, deleted their account, or never started a chat. No number of
@@ -23,9 +24,9 @@ pub enum SendError {
     /// Something transient: a network blip, a 5xx.
     #[error("telegram could not be reached: {0}")]
     Transient(String),
-    /// A request Telegram refused on its merits — a malformed message, a bad token. Retrying sends
-    /// the same broken request again, so it is terminal, but it is a bug rather than a fact about
-    /// the guest.
+    /// A request Telegram refused on its merits — a malformed message, a bad token, another process
+    /// already polling this bot. Retrying sends the same request again, so it is terminal, but it
+    /// is a bug or a deployment fact rather than a fact about the guest.
     #[error("telegram refused the request: {description}")]
     Refused { description: String },
 }
@@ -122,24 +123,69 @@ impl Bot {
                 "inline_keyboard": [buttons],
             });
         }
+        self.call("sendMessage", &body, self.timeout).await.map(drop)
+    }
 
+    /// Waits up to `wait` for what has been sent to the bot from `offset` on.
+    ///
+    /// Asking with the id after the last one handled is what tells Telegram those are done.
+    pub async fn get_updates(
+        &self,
+        offset: Option<i64>,
+        wait: Duration,
+    ) -> Result<Vec<Update>, SendError> {
+        let body = serde_json::json!({
+            "offset": offset,
+            "timeout": wait.as_secs(),
+            "allowed_updates": ["message", "callback_query"],
+        });
+        let response = self.call("getUpdates", &body, wait + self.timeout).await?;
+        let reply: Reply = response.json().await.map_err(transient)?;
+        Ok(reply.result)
+    }
+
+    /// Answers a tap on a button. Telegram shows the tap as pending until this is sent.
+    pub async fn answer_callback_query(&self, query_id: &str, text: &str) -> Result<(), SendError> {
+        let body = serde_json::json!({ "callback_query_id": query_id, "text": text });
+        self.call("answerCallbackQuery", &body, self.timeout)
+            .await
+            .map(drop)
+    }
+
+    /// Takes the buttons away from a message whose buttons can do nothing more.
+    pub async fn remove_buttons(&self, chat_id: i64, message_id: i64) -> Result<(), SendError> {
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": { "inline_keyboard": [] },
+        });
+        self.call("editMessageReplyMarkup", &body, self.timeout)
+            .await
+            .map(drop)
+    }
+
+    async fn call(
+        &self,
+        method: &str,
+        body: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, SendError> {
         let response = self
             .client
             .post(format!(
-                "{}/bot{}/sendMessage",
+                "{}/bot{}/{method}",
                 self.base_url,
                 self.token.expose()
             ))
-            .json(&body)
-            .timeout(self.timeout)
+            .json(body)
+            .timeout(timeout)
             .send()
             .await
-            // The URL carries the token, and this text is stored in the outbox.
-            .map_err(|error| SendError::Transient(error.without_url().to_string()))?;
+            .map_err(transient)?;
 
         let status = response.status();
         if status.is_success() {
-            return Ok(());
+            return Ok(response);
         }
 
         let payload: ApiError = response.json().await.unwrap_or_else(|_| ApiError {
@@ -148,6 +194,17 @@ impl Bot {
         });
         Err(classify(status, &payload))
     }
+}
+
+/// The URL carries the token, and this text ends up stored in the outbox.
+fn transient(error: reqwest::Error) -> SendError {
+    SendError::Transient(error.without_url().to_string())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Reply {
+    #[serde(default)]
+    result: Vec<Update>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -291,6 +348,18 @@ mod tests {
         assert!(
             !failure.means_unreachable(),
             "a broken request must not mark a reachable guest unreachable"
+        );
+        assert!(matches!(failure, SendError::Refused { .. }));
+    }
+
+    #[test]
+    fn another_process_polling_the_same_bot_is_a_refusal_not_a_blip() {
+        let failure = classify(
+            reqwest::StatusCode::CONFLICT,
+            &error(
+                "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
+                None,
+            ),
         );
         assert!(matches!(failure, SendError::Refused { .. }));
     }

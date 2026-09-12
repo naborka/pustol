@@ -121,10 +121,10 @@ async fn a_reminder_goes_out_with_a_button_that_cancels_it() {
     let button = &sent["reply_markup"]["inline_keyboard"][0][0];
     assert_eq!(button["text"], "Не смогу прийти");
     assert!(
-        button["callback_data"]
-            .as_str()
-            .expect("callback data")
-            .starts_with(worker::CANCEL_CALLBACK),
+        matches!(
+            pustol_api::callbacks::parse(button["callback_data"].as_str().expect("callback data")),
+            Some(pustol_api::callbacks::Callback::CancelBooking(_))
+        ),
         "a reminder without a way to cancel is a notification, not a service"
     );
 

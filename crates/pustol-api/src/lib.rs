@@ -8,8 +8,10 @@
 pub mod assets;
 pub mod auth;
 pub mod boot;
+pub mod callbacks;
 pub mod dto;
 pub mod error;
+pub mod inbox;
 pub mod routes;
 pub mod state;
 pub mod worker;
