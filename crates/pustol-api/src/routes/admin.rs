@@ -6,7 +6,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use pustol_db::bookings::{Channel, MoveWords, NewBooking};
+use pustol_db::bookings::{Channel, MoveTo, MoveWords, NewBooking};
 use pustol_db::records::{BookingRecord, blocks_of, bookings_of};
 use pustol_domain::config::ValidConfig;
 use pustol_domain::draft::Draft;
@@ -268,8 +268,11 @@ async fn move_booking(
         .move_booking(
             state.bar,
             BookingId(id),
-            request.table_id.map(TableId),
-            request.start_minutes,
+            MoveTo {
+                start_minutes: request.start_minutes,
+                table: request.table_id.map(TableId),
+                party_size: request.party_size,
+            },
             Some(MoveWords {
                 notice: word_move,
                 reminder: crate::routes::guest::word_reminder,
@@ -285,13 +288,13 @@ async fn move_booking(
 }
 
 /// The notice a guest gets when their time changes, worded here where the bot's voice lives.
-fn word_move(config: &ValidConfig, record: &BookingRecord, moved_to: Interval) -> String {
+fn word_move(config: &ValidConfig, was: &BookingRecord, now: &BookingRecord) -> String {
     messages::moved(
         &config.name,
-        record.booking.window.start(),
-        moved_to.start(),
+        was.booking.window.start(),
+        now.booking.window.start(),
         config.timezone,
-        record.booking.party_size,
+        now.booking.party_size,
     )
 }
 

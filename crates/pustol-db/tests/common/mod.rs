@@ -317,12 +317,12 @@ pub fn cancellation_wording(
 
 pub fn move_words() -> pustol_db::bookings::MoveWords {
     pustol_db::bookings::MoveWords {
-        notice: |config, record, moved_to| {
+        notice: |config, was, now| {
             format!(
                 "{}: бронь {} перенесена на {}",
                 config.name,
-                record.guest_name,
-                moved_to.start()
+                was.guest_name,
+                now.booking.window.start()
             )
         },
         reminder: reminder_wording,

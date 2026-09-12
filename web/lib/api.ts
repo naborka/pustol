@@ -393,10 +393,16 @@ export function client(credentials: string) {
         table_id: tableId,
       }),
 
-    moveBooking: (bookingId: string, startMinutes: number, tableId: string | null) =>
+    moveBooking: (
+      bookingId: string,
+      startMinutes: number,
+      tableId: string | null,
+      partySize: number,
+    ) =>
       send<MovedBooking>("PATCH", `/api/admin/bookings/${bookingId}/move`, {
         start_minutes: startMinutes,
         table_id: tableId,
+        party_size: partySize,
       }),
 
     /** `tableId` is the table staff chose; `null` asks the room for its own best fit. */

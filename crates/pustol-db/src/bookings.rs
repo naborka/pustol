@@ -153,7 +153,7 @@ pub type ReminderWording = fn(&ValidConfig, Interval, i32) -> String;
 pub type CancellationWording = fn(&ValidConfig, &BookingRecord, &str) -> String;
 
 /// Words the notice for a moved booking. The record is where it was, the interval where it goes.
-pub type MoveWording = fn(&ValidConfig, &BookingRecord, Interval) -> String;
+pub type MoveWording = fn(&ValidConfig, &BookingRecord, &BookingRecord) -> String;
 
 /// What the bot says when a booking moves: the notice now, and the reminder that would otherwise
 /// still name the old hour. Together, so a move cannot remember one and forget the other.
@@ -161,6 +161,17 @@ pub type MoveWording = fn(&ValidConfig, &BookingRecord, Interval) -> String;
 pub struct MoveWords {
     pub notice: MoveWording,
     pub reminder: ReminderWording,
+}
+
+/// Where a booking should now be, when, and for how many — named in full, as one act.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MoveTo {
+    /// The wall-clock arrival. The booking's own, when only the table or the party changes.
+    pub start_minutes: i32,
+    /// The table staff chose; `None` asks the room for its own best fit.
+    pub table: Option<TableId>,
+    /// How many are coming now; `None` keeps the party it was.
+    pub party_size: Option<i32>,
 }
 
 /// A booking that now exists.
@@ -607,8 +618,7 @@ impl Store {
         &self,
         bar: BarId,
         booking: BookingId,
-        table: Option<TableId>,
-        start_minutes: i32,
+        to: MoveTo,
         words: Option<MoveWords>,
         now: DateTime<Utc>,
     ) -> Result<MovedBooking> {
@@ -628,6 +638,13 @@ impl Store {
             return Err(Error::BookingHasFinished);
         }
 
+        // The cap is asked only of a party that changes: a booking taken before the cap was
+        // lowered keeps its size, and must still be movable to another table or time.
+        let party_size = to.party_size.unwrap_or(current.booking.party_size);
+        if party_size != current.booking.party_size {
+            check_party_size(party_size, &config)?;
+        }
+
         let day = current.booking.service_day;
         let bookings = load_window(&mut transaction, bar, day).await?;
         let blocks = load_blocks(&mut transaction, bar, day).await?;
@@ -637,24 +654,24 @@ impl Store {
         let asking = slots::Query {
             config: &config,
             service_day: day,
-            party_size: current.booking.party_size,
+            party_size,
             bookings: &live,
             blocks: &closed,
             now,
             ignoring: Some(booking),
         };
-        let window = if start_minutes == minutes_within(day, was.start(), config.timezone) {
+        let window = if to.start_minutes == minutes_within(day, was.start(), config.timezone) {
             was
         } else {
             if was.start() <= now {
                 return Err(Error::BookingHasStarted);
             }
-            window_at(&asking, start_minutes)?
+            window_at(&asking, to.start_minutes)?
         };
-        let seat = seat_of(&asking.request(window), table)?;
+        let seat = seat_of(&asking.request(window), to.table)?;
 
         sqlx::query(
-            "update booking set table_id = $3, starts_at = $4, ends_at = $5
+            "update booking set table_id = $3, starts_at = $4, ends_at = $5, party_size = $6
              where bar_id = $1 and id = $2 and status <> 'cancelled'",
         )
         .bind(bar)
@@ -662,38 +679,43 @@ impl Store {
         .bind(seat.table_id.0)
         .bind(window.start())
         .bind(window.end())
+        .bind(party_size)
         .execute(&mut *transaction)
         .await
         .map_err(Error::from_write)?;
 
-        let mut guest_notified = false;
-        if window != was
-            && let (Some(recipient), Some(words)) = (current.telegram_user_id, words)
-        {
-            notifications::enqueue(
-                &mut transaction,
-                bar,
-                booking,
-                recipient,
-                notifications::NotificationKind::Moved,
-                &(words.notice)(&config, &current, window),
-                now,
-            )
-            .await?;
-            guest_notified = true;
-            notifications::plan_reminder(
-                &mut transaction,
-                bar,
-                booking,
-                recipient,
-                &(words.reminder)(&config, window, current.booking.party_size),
-                window.start() - chrono::Duration::hours(i64::from(config.remind_hours)),
-                now,
-            )
-            .await?;
-        }
-
         let record = fetch_booking(&mut transaction, bar, booking).await?;
+        let mut guest_notified = false;
+        if let (Some(recipient), Some(words)) = (current.telegram_user_id, words) {
+            // Only a new time is news: the guest never saw a table number, and a change of size
+            // is one they asked for. The reminder names both the hour and the party, so it follows
+            // either.
+            if window != was {
+                notifications::enqueue(
+                    &mut transaction,
+                    bar,
+                    booking,
+                    recipient,
+                    notifications::NotificationKind::Moved,
+                    &(words.notice)(&config, &current, &record),
+                    now,
+                )
+                .await?;
+                guest_notified = true;
+            }
+            if window != was || party_size != current.booking.party_size {
+                notifications::plan_reminder(
+                    &mut transaction,
+                    bar,
+                    booking,
+                    recipient,
+                    &(words.reminder)(&config, window, party_size),
+                    window.start() - chrono::Duration::hours(i64::from(config.remind_hours)),
+                    now,
+                )
+                .await?;
+            }
+        }
         // The table they left is capacity appearing, and capacity appearing is offered to whoever
         // the room could not seat — the same rule a cancellation and a party going home follow.
         let reconciliation = reconcile_shift(&mut transaction, bar, &config, day, now).await?;

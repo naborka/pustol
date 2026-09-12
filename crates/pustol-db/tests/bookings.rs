@@ -3,7 +3,7 @@
 
 mod common;
 
-use pustol_db::bookings::{Attendance, Channel};
+use pustol_db::bookings::{Attendance, Channel, MoveTo};
 use pustol_db::{BookingSource, Error};
 use pustol_domain::{BookingStatus, SlotAvailability, TableId};
 use uuid::Uuid;
@@ -637,8 +637,11 @@ async fn staff_move_a_booking_to_another_table_at_the_same_time() {
         .move_booking(
             bar,
             created.record.booking.id,
-            Some(corner.id),
-            1200,
+            MoveTo {
+                start_minutes: 1200,
+                table: Some(corner.id),
+                party_size: None,
+            },
             None,
             morning(),
         )
@@ -673,8 +676,11 @@ async fn staff_move_a_booking_to_another_time_and_the_guest_is_told() {
         .move_booking(
             bar,
             created.record.booking.id,
-            created.record.booking.table_id,
-            1320,
+            MoveTo {
+                start_minutes: 1320,
+                table: created.record.booking.table_id,
+                party_size: None,
+            },
             Some(common::move_words()),
             morning(),
         )
@@ -742,7 +748,7 @@ async fn a_booking_cannot_be_moved_onto_a_table_that_is_not_free_for_it() {
         (TableId(Uuid::nil()), "not a table this bar has"),
     ] {
         let refused = store
-            .move_booking(bar, mine.record.booking.id, Some(table_id), 1200, None, morning())
+            .move_booking(bar, mine.record.booking.id, MoveTo { start_minutes: 1200, table: Some(table_id), party_size: None }, None, morning())
             .await;
         assert!(
             matches!(refused, Err(Error::ChosenTableNotFree)),
@@ -789,14 +795,14 @@ async fn an_evening_that_has_started_or_finished_is_not_moved_in_time() {
         .await
         .expect("recorded");
     let refused = store
-        .move_booking(bar, id, Some(table_id), 1320, None, sat_down)
+        .move_booking(bar, id, MoveTo { start_minutes: 1320, table: Some(table_id), party_size: None }, None, sat_down)
         .await;
     assert!(
         matches!(refused, Err(Error::BookingHasStarted)),
         "got {refused:?}"
     );
     store
-        .move_booking(bar, id, Some(table_id), 1200, None, sat_down)
+        .move_booking(bar, id, MoveTo { start_minutes: 1200, table: Some(table_id), party_size: None }, None, sat_down)
         .await
         .expect("the table is still theirs to change");
 
@@ -807,7 +813,7 @@ async fn an_evening_that_has_started_or_finished_is_not_moved_in_time() {
         .await
         .expect("recorded");
     let refused = store
-        .move_booking(bar, id, Some(table_id), 1200, None, went_home)
+        .move_booking(bar, id, MoveTo { start_minutes: 1200, table: Some(table_id), party_size: None }, None, went_home)
         .await;
     assert!(
         matches!(refused, Err(Error::BookingHasFinished)),
@@ -1299,4 +1305,85 @@ async fn a_late_booking_does_not_haunt_the_following_shift() {
         .create_booking(&friday_evening, morning())
         .await
         .expect("the one table is free on Friday");
+}
+
+#[tokio::test]
+async fn staff_grow_a_party_and_the_room_finds_a_table_it_fits() {
+    // «Нас будет четверо» is the call a bar takes most. Cancelling and taking the booking again
+    // told the guest their evening was off.
+    let store = store().await;
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 2, "Бар"), table(2, 4, "Зал")], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Сева");
+    store.identify(bar, &account, morning()).await.expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    assert_eq!(created.record.table_number, Some(1));
+
+    let grown = store
+        .move_booking(
+            bar,
+            created.record.booking.id,
+            MoveTo {
+                start_minutes: 1200,
+                table: None,
+                party_size: Some(4),
+            },
+            Some(common::move_words()),
+            morning(),
+        )
+        .await
+        .expect("the four-top is free");
+
+    assert_eq!(grown.record.booking.party_size, 4);
+    assert_eq!(grown.record.table_number, Some(2));
+    assert_eq!(grown.record.booking.window, created.record.booking.window);
+    assert!(!grown.guest_notified, "the guest asked for it; only a new time is news");
+}
+
+#[tokio::test]
+async fn a_party_grown_past_every_free_table_or_the_cap_is_refused_and_left_as_it_was() {
+    let store = store().await;
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 2, "Бар"), table(2, 4, "Зал")], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Лёша");
+    store.identify(bar, &account, morning()).await.expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let id = created.record.booking.id;
+    let to = |party_size| MoveTo {
+        start_minutes: 1200,
+        table: None,
+        party_size: Some(party_size),
+    };
+
+    assert!(matches!(
+        store.move_booking(bar, id, to(5), None, morning()).await,
+        Err(Error::PartyTooLarge { .. })
+    ));
+
+    let other = fresh_account("Ира");
+    store.identify(bar, &other, morning()).await.expect("ok");
+    store
+        .create_booking(&guest_booking(bar, &other, 1200, 4), morning())
+        .await
+        .expect("the four-top is free");
+    assert!(matches!(
+        store.move_booking(bar, id, to(3), None, morning()).await,
+        Err(Error::NoTableFree { .. })
+    ));
+
+    let unchanged = store.bookings_by_id(bar, &[id]).await.expect("reads");
+    assert_eq!(unchanged[0].booking.party_size, 2);
+    assert_eq!(unchanged[0].table_number, Some(1));
 }

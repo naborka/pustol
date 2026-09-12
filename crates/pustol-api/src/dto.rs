@@ -524,6 +524,9 @@ pub struct MoveRequest {
     /// The table staff chose. Absent asks the room to choose, as everywhere else.
     #[serde(default)]
     pub table_id: Option<Uuid>,
+    /// How many are coming now. Absent keeps the party as it was.
+    #[serde(default)]
+    pub party_size: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

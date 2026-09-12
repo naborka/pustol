@@ -391,7 +391,7 @@ describe("moving a booking", () => {
     chosen: { minutes?: number | null; table?: string | null } = {},
     handlers: {
       onChooseTable?: (tableId: string) => void;
-      onMove?: (minutes: number, tableId: string) => void;
+      onMove?: (minutes: number, tableId: string, partySize: number) => void;
     } = {},
   ) {
     return render(
@@ -400,11 +400,14 @@ describe("moving a booking", () => {
         booking={booking}
         shift={shift()}
         turnMinutes={120}
+        maxParty={6}
+        partySize={booking.party_size}
         availability={availability()}
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
         failedToLoad={false}
         onClose={noop}
+        onPartySize={noop}
         onPick={noop}
         onTakenSlot={noop}
         onChooseTable={handlers.onChooseTable ?? noop}
@@ -437,7 +440,7 @@ describe("moving a booking", () => {
     const onMove = vi.fn();
     moveSheet(later, { table: "t2" }, { onMove });
     await userEvent.click(screen.getByText("Пересадить за стол 8"));
-    expect(onMove).toHaveBeenCalledWith(1_320, "t2");
+    expect(onMove).toHaveBeenCalledWith(1_320, "t2", 2);
   });
 
   it("keeps the time of a booking that has started, and still offers the tables", () => {
@@ -540,5 +543,62 @@ describe("leaving a sheet", () => {
     await userEvent.click(screen.getByRole("button", { name: "Закрыть" }));
     expect(screen.queryByText("карточка")).toBeNull();
     expect(document.activeElement).toBe(opener);
+  });
+});
+
+describe("changing how many are coming", () => {
+  it("asks the party size with the time and the table, and says what will change", async () => {
+    const onPartySize = vi.fn();
+    const onMove = vi.fn();
+    const booking = shiftBooking({ party_size: 2, table_id: "t1", table_number: 7 });
+    const { rerender } = render(
+      <MoveBookingSheet
+        open
+        booking={booking}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability()}
+        chosenMinutes={null}
+        chosenTableId={null}
+        failedToLoad={false}
+        onClose={noop}
+        onPartySize={onPartySize}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={onMove}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "4 гостя" }));
+    expect(onPartySize).toHaveBeenCalledWith(4);
+
+    rerender(
+      <MoveBookingSheet
+        open
+        booking={booking}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={4}
+        availability={availability()}
+        chosenMinutes={null}
+        chosenTableId={null}
+        failedToLoad={false}
+        onClose={noop}
+        onPartySize={onPartySize}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={onMove}
+      />,
+    );
+    // Table 7 seats two; the smallest free table that seats four is table 8.
+    const save = screen.getByText("4 гостя за столом 8");
+    await userEvent.click(save);
+    expect(onMove).toHaveBeenCalledWith(1_260, "t2", 4);
   });
 });

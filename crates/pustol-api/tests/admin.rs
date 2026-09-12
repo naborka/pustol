@@ -1315,3 +1315,28 @@ async fn every_admin_route_refuses_a_request_with_no_credentials() {
         );
     }
 }
+
+#[tokio::test]
+async fn staff_grow_a_party_over_the_telephone_without_cancelling_anything() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар"), table(2, 4, "Зал")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let id = booked(&app, &staff, 1_200, "Глеб").await;
+
+    let grown = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            &staff,
+            serde_json::json!({ "start_minutes": 1_200, "table_id": null, "party_size": 4 }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(grown["booking"]["party_size"], 4);
+    assert_eq!(grown["booking"]["table_number"], 2);
+    assert_eq!(grown["booking"]["status"], "confirmed", "the booking stands; nothing was cancelled");
+}

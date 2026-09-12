@@ -890,12 +890,15 @@ export function MoveBookingSheet({
   booking,
   shift,
   turnMinutes,
+  maxParty,
+  partySize,
   availability,
   chosenMinutes,
   chosenTableId,
   failedToLoad,
   timesPending = false,
   onClose,
+  onPartySize,
   onPick,
   onTakenSlot,
   onChooseTable,
@@ -906,6 +909,9 @@ export function MoveBookingSheet({
   booking: ShiftBooking | null;
   shift: ShiftView | null;
   turnMinutes: number;
+  maxParty: number;
+  /** How many are coming now. «Нас будет шесть» is the call a bar takes most. */
+  partySize: number;
   availability: Availability | null;
   chosenMinutes: number | null;
   chosenTableId: string | null;
@@ -913,20 +919,22 @@ export function MoveBookingSheet({
   /** The times on screen answer a question the sheet has since changed. */
   timesPending?: boolean;
   onClose: () => void;
+  onPartySize: (size: number) => void;
   onPick: (minutes: number) => void;
   onTakenSlot: () => void;
   onChooseTable: (tableId: string) => void;
   onRetry: () => void;
-  onMove: (startMinutes: number, tableId: string) => void;
+  onMove: (startMinutes: number, tableId: string, partySize: number) => void;
 }) {
   if (!open || !booking || !shift) return null;
   const started = hasStarted(booking, shift.now_minutes);
   const minutes = started ? booking.start_minutes : (chosenMinutes ?? booking.start_minutes);
   const until = minutes === booking.start_minutes ? booking.end_minutes : minutes + turnMinutes;
-  const offers = tableOffers(shift, booking.party_size, minutes, until, booking.id);
+  const offers = tableOffers(shift, partySize, minutes, until, booking.id);
   const table = chosenTable(offers, chosenTableId ?? booking.table_id);
-  const moves =
-    table !== null && (minutes !== booking.start_minutes || table.id !== booking.table_id);
+  const retimed = minutes !== booking.start_minutes;
+  const resized = partySize !== booking.party_size;
+  const moves = table !== null && (retimed || resized || table.id !== booking.table_id);
 
   return (
     <Sheet
@@ -940,12 +948,16 @@ export function MoveBookingSheet({
           label={
             !moves
               ? "Ничего не меняли"
-              : minutes === booking.start_minutes
-                ? `Пересадить за стол ${table.number}`
-                : `Перенести на ${fmt.time(minutes)}, стол ${table.number}`
+              : retimed
+                ? `Перенести на ${fmt.time(minutes)}, стол ${table.number}${
+                    resized ? ` · ${fmt.guests(partySize)}` : ""
+                  }`
+                : resized
+                  ? `${fmt.guests(partySize)} за столом ${table.number}`
+                  : `Пересадить за стол ${table.number}`
           }
           onClick={() => {
-            if (table) onMove(minutes, table.id);
+            if (table) onMove(minutes, table.id, partySize);
           }}
         />
       }
@@ -956,6 +968,11 @@ export function MoveBookingSheet({
           {booking.guest_name} · {fmt.time(booking.start_minutes)} ·{" "}
           {fmt.guests(booking.party_size)}
         </Note>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
+          <SectionLabel>Сколько гостей</SectionLabel>
+          <PartySizeGrid max={maxParty} value={partySize} onChange={onPartySize} />
+        </div>
 
         {started ? (
           <Note tone="warn">

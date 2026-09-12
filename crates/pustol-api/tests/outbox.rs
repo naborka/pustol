@@ -583,3 +583,25 @@ async fn the_kinds_of_message_are_distinguishable_to_the_worker() {
     assert_ne!(NotificationKind::Reminder, NotificationKind::Cancelled);
     assert_ne!(NotificationKind::Reminder, NotificationKind::StaffMessage);
 }
+
+#[tokio::test]
+async fn a_party_grown_by_telephone_is_reminded_with_its_new_size() {
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    let guest = booked_and_opted_in(&app).await;
+    let id = booking_id(app.get("/api/session", &guest).await.expect_ok());
+    let staff = Caller::manager();
+    app.send(
+        "PATCH",
+        &format!("/api/admin/bookings/{id}/move"),
+        &staff,
+        serde_json::json!({ "start_minutes": 1200, "table_id": null, "party_size": 4 }),
+    )
+    .await
+    .expect_ok();
+
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+    assert_eq!(drain(&app.store, &bot, reminder_due()).await, 1, "no notice, only the reminder");
+    let seen = stub.seen.lock().await;
+    assert!(seen[0]["text"].as_str().expect("text").contains("4 гостя"), "got {}", seen[0]);
+}

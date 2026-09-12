@@ -223,7 +223,11 @@ export default function Page() {
     minutes: null as number | null,
     table: null as string | null,
   });
-  const [move, setMove] = useState({ minutes: null as number | null, table: null as string | null });
+  const [move, setMove] = useState({
+    minutes: null as number | null,
+    table: null as string | null,
+    party: null as number | null,
+  });
   const [staffTimes, setStaffTimes] = useState<Availability | null>(null);
   const [staffTimesFailed, setStaffTimesFailed] = useState(false);
   const [walkInParty, setWalkInParty] = useState(DEFAULT_PARTY);
@@ -450,7 +454,7 @@ export default function Page() {
   const moving = sheet.kind === "move" ? sheet.booking : null;
   const movingTime = moving !== null && !hasStarted(moving, shift?.now_minutes ?? null);
   const asksTimes = sheet.kind === "manual" || movingTime;
-  const askParty = moving ? moving.party_size : manual.partySize;
+  const askParty = moving ? (move.party ?? moving.party_size) : manual.partySize;
   const askIgnoring = movingTime && moving ? moving.id : undefined;
 
   const [loadStaffTimes, staffTimesPending] = useLatest(
@@ -809,14 +813,17 @@ export default function Page() {
   });
 
   /** The report says whether the guest was told: not knowing means sending a second message. */
-  const moveBooking = exclusive(async (booking: ShiftBooking, minutes: number, tableId: string) => {
+  const moveBooking = exclusive(
+    async (booking: ShiftBooking, minutes: number, tableId: string, party: number) => {
     try {
-      const moved = await api.moveBooking(booking.id, minutes, tableId);
+      const moved = await api.moveBooking(booking.id, minutes, tableId, party);
       haptics.success();
       closeSheet();
       const where = `стол ${moved.booking.table_number}`;
       const told = moved.booking.start_minutes === booking.start_minutes
-        ? `${moved.booking.guest_name} за ${where}.`
+        ? moved.booking.party_size === booking.party_size
+          ? `${moved.booking.guest_name} за ${where}.`
+          : `${moved.booking.guest_name}: ${fmt.guests(moved.booking.party_size)}, ${where}.`
         : `${moved.booking.guest_name}: ${fmt.time(moved.booking.start_minutes)}, ${where}. ` +
           (moved.guest_notified ? "Гостю сообщили." : "Гость не в боте — предупредите сами.");
       await afterShiftChange({
@@ -826,7 +833,8 @@ export default function Page() {
       report(error, "staff");
       await loadShift(shiftDate);
     }
-  });
+  },
+  );
 
   const saveSettings = exclusive(async () => {
     if (!draft) return;
@@ -911,7 +919,7 @@ export default function Page() {
             }}
             onOpenMove={() => {
               if (sheet.kind !== "booking") return;
-              setMove({ minutes: null, table: null });
+              setMove({ minutes: null, table: null, party: null });
               setSheet({ kind: "move", booking: sheet.booking });
             }}
             onFindTable={() => void findTables()}
@@ -1015,18 +1023,23 @@ export default function Page() {
             booking={moving}
             shift={shift}
             turnMinutes={bar.turn_minutes}
+            maxParty={bar.max_party}
+            partySize={move.party ?? moving?.party_size ?? DEFAULT_PARTY}
             availability={staffTimes}
             chosenMinutes={move.minutes}
             chosenTableId={move.table}
             failedToLoad={staffTimesFailed}
             timesPending={staffTimesPending}
             onClose={closeSheet}
+            // A table chosen for the old party may not seat the new one, so the choice goes back to
+            // the room's own best fit.
+            onPartySize={(party) => setMove((current) => ({ ...current, party, table: null }))}
             onPick={(minutes) => setMove((current) => ({ ...current, minutes }))}
             onTakenSlot={() => tell("Это время занято. Свободное — без зачёркивания.")}
             onChooseTable={(table) => setMove((current) => ({ ...current, table }))}
             onRetry={() => void loadStaffTimes()}
-            onMove={(minutes, tableId) => {
-              if (moving) void moveBooking(moving, minutes, tableId);
+            onMove={(minutes, tableId, party) => {
+              if (moving) void moveBooking(moving, minutes, tableId, party);
             }}
           />
 
