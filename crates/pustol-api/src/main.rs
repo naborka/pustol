@@ -46,19 +46,14 @@ async fn main() -> Result<()> {
         .await
         .context("no bar is configured; seed one before starting the API")?;
 
-    let bot = Bot::new(bot_token.clone(), reqwest::Client::new());
+    let bot = Bot::new(bot_token.clone());
     let state = AppState::new(store.clone(), bot.clone(), bar, bot_token, Clock::System);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let outbox = tokio::spawn(worker::run(store, bot, Clock::System, shutdown_rx));
 
-    // Routes win over a fallback, so `/health` and everything under `/api` keep answering as the
-    // API however the app's build is laid out.
     let serving_app = assets.is_some();
-    let app = match assets {
-        Some(assets) => router(state).fallback_service(assets.into_router()),
-        None => router(state),
-    };
+    let app = router(state, assets);
 
     let interrupt = interrupt_signal()?;
     let listener = tokio::net::TcpListener::bind(bind)

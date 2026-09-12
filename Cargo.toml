@@ -20,13 +20,10 @@ pustol-telegram = { path = "crates/pustol-telegram" }
 
 anyhow = "1.0"
 axum = "0.8"
-axum-extra = { version = "0.12", features = ["typed-header"] }
-base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+chrono ={ version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 hex = "0.4"
 hmac = "0.13"
-jsonwebtoken = "11"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -4,7 +4,7 @@
 //! committed here and delivery is attempted afterwards. A crash between the two loses at worst a
 //! reminder, never a booking, and delivery is retried rather than assumed.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use pustol_domain::allocator::BookingId;
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
@@ -12,6 +12,14 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::ids::{BarId, TelegramUserId};
 use crate::Store;
+
+/// How long a claimed message is kept from other workers while it is being delivered.
+///
+/// Claiming takes a row lock that ends with the claiming statement, so the lock alone cannot stop a
+/// second worker from sending a message the first is still waiting on Telegram about. Pushing the
+/// message out of the due window for longer than a delivery can take does. A worker that dies
+/// mid-delivery leaves the message to come back once this has passed.
+pub const CLAIM_LEASE: TimeDelta = TimeDelta::minutes(5);
 
 /// What a message is for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, sqlx::Type, serde::Serialize)]
@@ -46,7 +54,8 @@ impl Store {
     ///
     /// The text has to be one the bar configured. Accepting free text here would make a borrowed
     /// staff account a way to send anything to every guest who has ever booked, and checking it in
-    /// the handler instead would leave the rule for every future caller to remember.
+    /// the handler instead would leave the rule for every future caller to remember. Checked in
+    /// the transaction that queues it, so a template removed a moment ago cannot slip through.
     pub async fn send_template(
         &self,
         bar: BarId,
@@ -55,14 +64,11 @@ impl Store {
         text: &str,
         now: DateTime<Utc>,
     ) -> Result<Uuid> {
-        let mut connection = self.pool().acquire().await?;
-        let config = crate::bar::load_config(&mut connection, bar).await?;
+        let mut transaction = self.pool().begin().await?;
+        let config = crate::bar::load_config(&mut transaction, bar).await?;
         if !config.message_templates.iter().any(|offered| offered == text) {
             return Err(crate::Error::UnknownMessage);
         }
-        drop(connection);
-
-        let mut transaction = self.pool().begin().await?;
         let id = enqueue(
             &mut transaction,
             bar,
@@ -77,20 +83,36 @@ impl Store {
         Ok(id)
     }
 
-    /// Takes up to `limit` messages that are due, marking each as attempted.
+    /// Takes up to `limit` messages that are due, marking each as attempted and leased.
     ///
-    /// `for update skip locked` is what lets several workers drain the same queue without either
-    /// blocking on each other or sending the same message twice.
+    /// `for update skip locked` keeps two workers from claiming the same row at the same instant;
+    /// [`CLAIM_LEASE`] keeps the second from claiming it while the first is still delivering.
     ///
     /// A reminder is withheld unless the guest asked for reminders, the bot is believed able to
-    /// reach them, the booking still holds a table and the booking has not already started. The
-    /// booking-status test here is the authoritative one: cancelling settles the pending reminder
-    /// too, but only this check is immune to a cancellation that commits a moment later.
+    /// reach them and the booking still holds a table. Messages that can never be worth sending —
+    /// anything about an evening that is over, a reminder for a booking that was cancelled or has
+    /// begun — are settled first, so they stop sitting in front of the ones that can.
     pub async fn claim_due(
         &self,
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<PendingNotification>> {
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query(
+            "update notification n
+             set gave_up_at = $1,
+                 last_error = case when b.ends_at <= $1 then 'the evening is over'
+                                   else 'the booking is no longer upcoming' end
+             from booking b
+             where b.id = n.booking_id
+               and n.sent_at is null and n.gave_up_at is null and n.scheduled_for <= $1
+               and (b.ends_at <= $1
+                    or (n.kind = 'reminder' and (b.status = 'cancelled' or b.starts_at <= $1)))",
+        )
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+
         let rows = sqlx::query(
             "with due as (
                  select n.id
@@ -100,25 +122,22 @@ impl Store {
                  where n.sent_at is null and n.gave_up_at is null and n.scheduled_for <= $1
                    and (
                        n.kind <> 'reminder'
-                       or (
-                           b.status <> 'cancelled'
-                           and b.starts_at > $1
-                           and u.reminders_opted_in
-                           and u.can_receive_messages
-                       )
+                       or (b.table_id is not null and u.reminders_opted_in and u.can_receive_messages)
                    )
                  order by n.scheduled_for
                  limit $2
                  for update of n skip locked
              )
-             update notification set attempts = attempts + 1
+             update notification set attempts = attempts + 1, scheduled_for = $3
              where id in (select id from due)
              returning id, bar_id, booking_id, telegram_user_id, kind, body, attempts",
         )
         .bind(now)
         .bind(limit)
-        .fetch_all(self.pool())
+        .bind(now + CLAIM_LEASE)
+        .fetch_all(&mut *transaction)
         .await?;
+        transaction.commit().await?;
 
         rows.into_iter()
             .map(|row| {
@@ -137,18 +156,40 @@ impl Store {
 
     /// Records a delivered message.
     pub async fn mark_sent(&self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
-        sqlx::query("update notification set sent_at = $2, last_error = null where id = $1")
-            .bind(id)
-            .bind(now)
-            .execute(self.pool())
-            .await?;
+        sqlx::query(
+            "update notification set sent_at = $2, last_error = null
+             where id = $1 and sent_at is null and gave_up_at is null",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(self.pool())
+        .await?;
         Ok(())
     }
 
     /// Records a failed attempt, and when to try again.
     pub async fn defer(&self, id: Uuid, retry_at: DateTime<Utc>, error: &str) -> Result<()> {
         sqlx::query(
-            "update notification set scheduled_for = $2, last_error = $3 where id = $1",
+            "update notification set scheduled_for = $2, last_error = $3
+             where id = $1 and sent_at is null and gave_up_at is null",
+        )
+        .bind(id)
+        .bind(retry_at)
+        .bind(error)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Waits as long as Telegram asked, without counting the wait as a failed attempt.
+    ///
+    /// Being told to slow down says nothing about whether this message can be delivered, so it
+    /// must not bring the message closer to being given up on.
+    pub async fn postpone(&self, id: Uuid, retry_at: DateTime<Utc>, error: &str) -> Result<()> {
+        sqlx::query(
+            "update notification
+             set scheduled_for = $2, last_error = $3, attempts = greatest(attempts - 1, 0)
+             where id = $1 and sent_at is null and gave_up_at is null",
         )
         .bind(id)
         .bind(retry_at)
@@ -161,12 +202,15 @@ impl Store {
     /// Stops trying. Used for refusals that will not change however often they are retried — a
     /// blocked bot, a deleted account — and for a message that has exhausted its attempts.
     pub async fn give_up(&self, id: Uuid, now: DateTime<Utc>, error: &str) -> Result<()> {
-        sqlx::query("update notification set gave_up_at = $2, last_error = $3 where id = $1")
-            .bind(id)
-            .bind(now)
-            .bind(error)
-            .execute(self.pool())
-            .await?;
+        sqlx::query(
+            "update notification set gave_up_at = $2, last_error = $3
+             where id = $1 and sent_at is null and gave_up_at is null",
+        )
+        .bind(id)
+        .bind(now)
+        .bind(error)
+        .execute(self.pool())
+        .await?;
         Ok(())
     }
 }
@@ -200,13 +244,17 @@ pub(crate) async fn enqueue(
     Ok(row.try_get("id")?)
 }
 
-/// Queues the reminder for a new booking.
+/// The reminder a booking should have, for the window it now has.
 ///
-/// A reminder whose moment has already passed is not queued at all: telling somebody three hours
-/// in advance about a table they booked ten minutes ago is noise, not a service. Whether the guest
-/// wants reminders is deliberately *not* checked here — that is settled when the message is about
-/// to go out, so a guest who opts in after booking still gets one.
-pub(crate) async fn enqueue_reminder(
+/// One function for taking a booking and for moving one, because they ask the same question. Kept
+/// as two — insert once, then update what was inserted — a booking taken too late for a reminder
+/// and then moved later got none, and one moved past its reminder and back got none either.
+///
+/// A reminder whose moment has already passed is not kept: telling somebody three hours in advance
+/// about a table they booked ten minutes ago is noise. One already delivered is left alone. Whether
+/// the guest wants reminders is deliberately *not* checked here — that is settled when the message
+/// is about to go out, so a guest who opts in after booking still gets one.
+pub(crate) async fn plan_reminder(
     connection: &mut PgConnection,
     bar: BarId,
     booking: BookingId,
@@ -216,43 +264,19 @@ pub(crate) async fn enqueue_reminder(
     now: DateTime<Utc>,
 ) -> Result<()> {
     if scheduled_for <= now {
-        return Ok(());
+        return abandon_reminder(connection, booking, "the reminder's moment has passed").await;
     }
     sqlx::query(
         "insert into notification (bar_id, booking_id, telegram_user_id, kind, body, scheduled_for)
          values ($1, $2, $3, 'reminder', $4, $5)
-         on conflict (booking_id) where kind = 'reminder' do nothing",
+         on conflict (booking_id) where kind = 'reminder' do update
+           set body = excluded.body, scheduled_for = excluded.scheduled_for,
+               gave_up_at = null, last_error = null, attempts = 0
+           where notification.sent_at is null",
     )
     .bind(bar)
     .bind(booking.0)
     .bind(recipient.0)
-    .bind(body)
-    .bind(scheduled_for)
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
-/// Moves a pending reminder onto a booking's new window.
-///
-/// The body names an hour, so a reminder left behind would contradict the notice just sent.
-/// Rewritten rather than replaced: the queue holds at most one reminder per booking. One whose
-/// new moment has already gone is given up.
-pub(crate) async fn reschedule_reminder(
-    connection: &mut PgConnection,
-    booking: BookingId,
-    body: &str,
-    scheduled_for: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> Result<()> {
-    if scheduled_for <= now {
-        return abandon_reminder(connection, booking, "the booking moved past its reminder").await;
-    }
-    sqlx::query(
-        "update notification set body = $2, scheduled_for = $3
-         where booking_id = $1 and kind = 'reminder' and sent_at is null and gave_up_at is null",
-    )
-    .bind(booking.0)
     .bind(body)
     .bind(scheduled_for)
     .execute(connection)

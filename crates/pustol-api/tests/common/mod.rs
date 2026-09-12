@@ -32,6 +32,7 @@ static NEXT_DATABASE: AtomicI64 = AtomicI64::new(1);
 /// A running app: the router, the state it was built with, and the bar it serves.
 pub struct Harness {
     pub app: Router,
+    pub state: AppState,
     pub bar: BarId,
     pub store: Store,
     pub config: ValidConfig,
@@ -176,8 +177,7 @@ pub async fn harness_at(now: DateTime<Utc>, config: BarConfig) -> Harness {
 fn stopped_at(store: Store, bar: BarId, config: ValidConfig, now: DateTime<Utc>) -> Harness {
     // The bot points at an address nothing listens on: no test here exercises delivery, and a stub
     // that silently accepted sends would make a broken outbox look healthy.
-    let bot = Bot::new(BotToken::new(TOKEN), reqwest::Client::new())
-        .with_base_url("http://127.0.0.1:1");
+    let bot = Bot::new(BotToken::new(TOKEN)).with_base_url("http://127.0.0.1:1");
     let state = AppState::new(
         store.clone(),
         bot,
@@ -186,7 +186,8 @@ fn stopped_at(store: Store, bar: BarId, config: ValidConfig, now: DateTime<Utc>)
         Clock::Fixed(now),
     );
     Harness {
-        app: router(state),
+        app: router(state.clone(), None),
+        state,
         bar,
         store,
         config,
@@ -288,6 +289,11 @@ impl Harness {
     /// an hour goes by, they go home — and a clock that cannot move cannot show any of it.
     pub fn at(&self, now: DateTime<Utc>) -> Self {
         stopped_at(self.store.clone(), self.bar, self.config.clone(), now)
+    }
+
+    /// The whole process as it runs in production: this API, serving a built app as well.
+    pub fn serving(&self, assets: pustol_api::Assets) -> Router {
+        router(self.state.clone(), Some(assets))
     }
 
     async fn call(&self, request: Request<Body>) -> Answer {

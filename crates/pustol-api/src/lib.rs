@@ -15,9 +15,12 @@ pub mod state;
 pub mod worker;
 
 use axum::Router;
+use axum::http::{HeaderValue, header};
 use axum::routing::get;
+use tower_http::compression::CompressionLayer;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
 pub use assets::Assets;
 pub use boot::{bind_address, interrupt_signal};
@@ -31,9 +34,18 @@ use crate::error::ApiError;
 /// one request can make the process allocate until it dies.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// Builds the router.
-pub fn router(state: AppState) -> Router {
-    Router::new()
+/// Who may show the app in a frame: this origin and Telegram's web clients.
+///
+/// Not `X-Frame-Options: DENY`, which would break the app inside web.telegram.org.
+const FRAME_ANCESTORS: HeaderValue =
+    HeaderValue::from_static("frame-ancestors 'self' https://web.telegram.org https://*.telegram.org");
+
+/// Builds the whole process: the API, and the app's build when there is one to serve.
+///
+/// Composed in one place so that what every answer carries — compression, the headers below, the
+/// access log — covers the API and the app's files alike, rather than whichever was wired first.
+pub fn router(state: AppState, assets: Option<Assets>) -> Router {
+    let api = Router::new()
         .route("/health", get(health))
         .nest("/api", routes::guest::routes().fallback(no_such_endpoint))
         .nest(
@@ -41,8 +53,31 @@ pub fn router(state: AppState) -> Router {
             routes::admin::routes().fallback(no_such_endpoint),
         )
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state);
+    // Routes win over a fallback, so `/health` and everything under `/api` keep answering as the
+    // API however the app's build is laid out.
+    let app = match assets {
+        Some(assets) => api.fallback_service(assets.into_router()),
+        None => api,
+    };
+    app.layer(CompressionLayer::new())
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            FRAME_ANCESTORS,
+        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        )
 }
 
 async fn health() -> &'static str {

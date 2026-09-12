@@ -590,7 +590,12 @@ fn conflict_for(config: &ValidConfig, booking: &Booking) -> Option<ScheduleConfl
         });
     }
     let start_minutes = minutes_within(booking.service_day, booking.window.start(), config.timezone);
-    let end_minutes = minutes_within(booking.service_day, booking.window.end(), config.timezone);
+    // Counted from the arrival on the wall, as the grid that offered the arrival counts. Reading
+    // the end off the wall instead puts the last arrival of the spring clock change an hour past
+    // closing, under the very hours that sold it.
+    let end_minutes = start_minutes.saturating_add(
+        i32::try_from(booking.window.minutes()).unwrap_or(i32::MAX),
+    );
     if start_minutes < hours.open_minutes || end_minutes > hours.close_minutes {
         return Some(ScheduleConflict::OutsideOpeningHours {
             booking: booking.id,

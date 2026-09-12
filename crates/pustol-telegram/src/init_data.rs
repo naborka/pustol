@@ -33,6 +33,12 @@ const HASH_FIELD: &str = "hash";
 /// here — that check exists for parties who do *not* hold the bot token, and we do.
 const SIGNATURE_FIELD: &str = "signature";
 
+/// How far ahead of this server's clock a payload may be dated.
+///
+/// `auth_date` comes from Telegram's clock. Two synchronised clocks still drift by seconds, and a
+/// payload dated a moment "in the future" is a guest who cannot open the app, not a forgery.
+const CLOCK_SKEW: TimeDelta = TimeDelta::minutes(1);
+
 /// A Telegram account, as Telegram describes it.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize)]
 pub struct TelegramUser {
@@ -165,7 +171,7 @@ pub fn verify(
         .ok_or_else(|| VerifyError::MalformedAuthDate(auth_date.clone()))?;
 
     let age = now - auth_date;
-    if age < TimeDelta::zero() {
+    if age < -CLOCK_SKEW {
         return Err(VerifyError::SignedInTheFuture);
     }
     if age > max_age {

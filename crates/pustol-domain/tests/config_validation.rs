@@ -701,3 +701,22 @@ fn a_day_off_yesterday_cannot_be_the_running_shift() {
         thursday().checked_add_days(1).unwrap()
     );
 }
+
+#[test]
+fn the_last_arrival_on_the_spring_clock_change_is_not_a_conflict_with_the_hours_that_sold_it() {
+    // Saturday 28 March 2026: at 02:00 on Sunday the clocks jump to 03:00. A two-hour booking at
+    // 01:00 ends at 04:00 on the wall, past a 03:00 closing, yet 01:00 is the last arrival the
+    // grid itself offered. Reading that as a conflict froze every settings save that week.
+    let saturday = ServiceDay::new(chrono::NaiveDate::from_ymd_opt(2026, 3, 28).expect("valid"));
+    let mut config = common::default_config();
+    config.week = WeekSchedule::uniform(DayHours {
+        open_minutes: 600,
+        close_minutes: 1620,
+        closed: false,
+    });
+    let last = booking(1, saturday, 1500, 2, Some(table(1, 2, "Бар")).as_ref(), 120);
+    assert_eq!(
+        schedule_conflicts(&force(config), std::slice::from_ref(&last), utc(2026, 3, 28, 10, 0)),
+        Vec::new()
+    );
+}

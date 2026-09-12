@@ -508,3 +508,36 @@ async fn the_reminder_prompt_is_shown_once_and_then_left_alone() {
     assert!(opted.reminders.opted_in);
     assert!(!opted.reminders.should_ask());
 }
+
+#[tokio::test]
+async fn a_message_being_delivered_is_not_handed_to_a_second_worker() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let account = fresh_account("Рома");
+    store.identify(bar, &account, morning()).await.expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    store
+        .send_template(
+            bar,
+            created.record.booking.id,
+            account.id,
+            "Ваш стол готов, ждём вас!",
+            morning(),
+        )
+        .await
+        .expect("queued");
+
+    assert_eq!(store.claim_due(10, morning()).await.expect("reads").len(), 1);
+    // The first worker is still waiting on Telegram and has recorded nothing yet.
+    assert!(
+        store
+            .claim_due(10, morning() + Duration::seconds(30))
+            .await
+            .expect("reads")
+            .is_empty(),
+        "a second worker would send the same message again"
+    );
+}

@@ -297,3 +297,11 @@ fn a_bot_token_never_prints_itself() {
     assert!(!rendered.contains("AAHfake"));
     assert_eq!(rendered, "BotToken(redacted)");
 }
+
+#[test]
+fn a_payload_a_few_seconds_ahead_of_this_server_is_accepted() {
+    // Telegram's clock and this server's are two clocks. Refusing a payload signed half a minute
+    // "in the future" turns ordinary drift into a guest who cannot open the app.
+    let behind = now() - TimeDelta::seconds(30);
+    assert!(verify(&genuine(999), &token(), behind, MAX_AGE).is_ok());
+}

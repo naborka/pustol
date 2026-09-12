@@ -27,14 +27,23 @@ const IN_FLIGHT: usize = 5;
 /// How long to wait between passes when there was nothing to do.
 const IDLE_PAUSE: Duration = Duration::from_secs(20);
 
-/// How long to wait after a transient failure Telegram did not put a number on.
-const DEFAULT_BACKOFF: TimeDelta = TimeDelta::minutes(2);
+/// How long to wait after the first transient failure. Each one after it waits twice as long.
+const FIRST_BACKOFF: TimeDelta = TimeDelta::minutes(2);
 
-/// After this many attempts a message is abandoned.
+/// The longest wait between two attempts.
+const MAX_BACKOFF: TimeDelta = TimeDelta::hours(1);
+
+/// After this many attempts a message is abandoned: about three hours of waiting in all.
 ///
 /// Without a ceiling a message Telegram keeps refusing for a reason nobody anticipated is retried
-/// for ever, and a queue that never drains hides every later message behind it.
-const MAX_ATTEMPTS: i32 = 6;
+/// for ever, and a queue that never drains hides every later message behind it. A fixed two-minute
+/// wait with a low ceiling gave up on a guest's cancellation notice after ten minutes of outage.
+pub const MAX_ATTEMPTS: i32 = 8;
+
+fn backoff(attempts: i32) -> TimeDelta {
+    let doublings = u32::try_from(attempts.saturating_sub(1)).unwrap_or(0).min(6);
+    (FIRST_BACKOFF * 2_i32.pow(doublings)).min(MAX_BACKOFF)
+}
 
 /// The callback the reminder's button sends back.
 ///
@@ -119,8 +128,20 @@ async fn deliver(
                 .give_up(message.id, clock.now(), &failure.to_string())
                 .await?;
         }
+        Err(SendError::RateLimited {
+            retry_after_seconds,
+        }) => {
+            store
+                .postpone(
+                    message.id,
+                    clock.now() + TimeDelta::seconds(retry_after_seconds),
+                    "telegram asked to wait",
+                )
+                .await?;
+        }
         Err(failure) if failure.is_worth_retrying() => {
             if message.attempts >= MAX_ATTEMPTS {
+                tracing::warn!(id = %message.id, kind = ?message.kind, attempts = message.attempts, error = %failure, "giving up on a message");
                 store
                     .give_up(
                         message.id,
@@ -129,12 +150,8 @@ async fn deliver(
                     )
                     .await?;
             } else {
-                let wait = match &failure {
-                    SendError::RateLimited {
-                        retry_after_seconds,
-                    } => TimeDelta::seconds(*retry_after_seconds),
-                    _ => DEFAULT_BACKOFF,
-                };
+                let wait = backoff(message.attempts);
+                tracing::warn!(id = %message.id, kind = ?message.kind, attempts = message.attempts, retry_in_seconds = wait.num_seconds(), error = %failure, "a delivery failed");
                 store
                     .defer(message.id, clock.now() + wait, &failure.to_string())
                     .await?;
@@ -142,6 +159,7 @@ async fn deliver(
         }
         Err(failure) => {
             // Refused on its merits. Repeating the same request repeats the same refusal.
+            tracing::warn!(id = %message.id, kind = ?message.kind, error = %failure, "telegram refused a message");
             store
                 .give_up(message.id, clock.now(), &failure.to_string())
                 .await?;

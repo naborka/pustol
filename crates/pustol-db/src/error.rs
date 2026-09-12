@@ -107,6 +107,11 @@ pub enum Error {
     #[error("the proposed configuration would strand {} booking(s)", .0.len())]
     WouldStrandBookings(Vec<crate::bar::StrandedBooking>),
 
+    /// The guest already holds a booking on this shift that is still running, such as the table
+    /// they are sitting at.
+    #[error("this guest already has a booking on this shift")]
+    AlreadyBookedThisShift,
+
     /// An instant could not be built from a service day and a wall-clock minute.
     #[error(transparent)]
     Time(#[from] TimeError),
@@ -129,6 +134,7 @@ pub enum Error {
 /// meaningful error into a generic one.
 mod constraint {
     pub const TABLE_OVERLAP: &str = "booking_one_party_per_table_at_a_time";
+    pub const GUEST_PER_SHIFT: &str = "booking_one_live_per_guest_per_shift";
 }
 
 impl Error {
@@ -139,6 +145,7 @@ impl Error {
         };
         match db.constraint() {
             Some(constraint::TABLE_OVERLAP) => Self::TableTakenConcurrently,
+            Some(constraint::GUEST_PER_SHIFT) => Self::AlreadyBookedThisShift,
             _ => Self::Database(error),
         }
     }

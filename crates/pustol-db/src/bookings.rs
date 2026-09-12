@@ -447,7 +447,7 @@ impl Store {
         .await?;
 
         if let (Some(wording), Some(user)) = (request.reminder, user) {
-            notifications::enqueue_reminder(
+            notifications::plan_reminder(
                 &mut transaction,
                 request.bar,
                 id,
@@ -459,11 +459,17 @@ impl Store {
             .await?;
         }
 
+        // The replaced booking's table is capacity appearing on its evening, and capacity
+        // appearing is offered to whoever that evening could not seat.
+        if let Some((_, day)) = replaced {
+            reconcile_shift(&mut transaction, request.bar, &config, day, now).await?;
+        }
+
         let record = fetch_booking(&mut transaction, request.bar, id).await?;
         transaction.commit().await?;
         Ok(CreatedBooking {
             record,
-            replaced,
+            replaced: replaced.map(|(id, _)| id),
             config,
         })
     }
@@ -486,25 +492,11 @@ impl Store {
         user: TelegramUserId,
         now: DateTime<Utc>,
     ) -> Result<Option<BookingRecord>> {
-        let rows = sqlx::query(concat!(
-            "select ",
-            booking_columns!(),
-            " where b.bar_id = $1 and b.telegram_user_id = $2
-                and b.status <> 'cancelled' and b.ends_at > $3
-              order by b.starts_at"
-        ))
-        .bind(bar)
-        .bind(user.0)
-        .bind(now)
-        .fetch_all(self.pool())
-        .await?;
-        for row in &rows {
-            let record = BookingRecord::try_from(row_into(row)?)?;
-            if record.booking.occupancy().is_some_and(|held| held.end() > now) {
-                return Ok(Some(record));
-            }
-        }
-        Ok(None)
+        let mut connection = self.pool().acquire().await?;
+        Ok(running_bookings_of_guest(&mut connection, bar, user, now)
+            .await?
+            .into_iter()
+            .next())
     }
 
     /// Everything on one shift: the bookings and the tables that are shut.
@@ -689,9 +681,11 @@ impl Store {
             )
             .await?;
             guest_notified = true;
-            notifications::reschedule_reminder(
+            notifications::plan_reminder(
                 &mut transaction,
+                bar,
                 booking,
+                recipient,
                 &(words.reminder)(&config, window, current.booking.party_size),
                 window.start() - chrono::Duration::hours(i64::from(config.remind_hours)),
                 now,
@@ -806,64 +800,10 @@ impl Store {
         let mut transaction = self.pool().begin().await?;
         lock_bar(&mut transaction, bar).await?;
         let config = load_config(&mut transaction, bar).await?;
-        // Checked here, against the configuration this transaction read, rather than in whichever
-        // handler happens to call: a rule about what reaches a guest should not depend on every
-        // future caller remembering it.
-        if let Some(reason) = reason
-            && !config.cancel_reasons.iter().any(|offered| offered == reason)
-        {
-            return Err(Error::UnknownCancelReason);
-        }
-        let updated = sqlx::query(
-            "update booking set status = 'cancelled', cancelled_at = $4, cancel_reason = $3
-             where bar_id = $1 and id = $2 and status <> 'cancelled'",
-        )
-        .bind(bar)
-        .bind(booking.0)
-        .bind(reason)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() == 0 {
-            return Err(Error::NotFound { entity: "booking" });
-        }
-        notifications::abandon_reminder(&mut transaction, booking, "the booking was cancelled").await?;
-        let record = fetch_booking(&mut transaction, bar, booking).await?;
-
-        // Queued in the same transaction as the cancellation: a notice that survives a crash the
-        // cancellation did not would tell a guest their table is gone when it is not.
-        let mut guest_notified = false;
-        if let (Some(recipient), Some(reason), Some(wording)) =
-            (record.telegram_user_id, reason, notice)
-        {
-            notifications::enqueue(
-                &mut transaction,
-                bar,
-                booking,
-                recipient,
-                notifications::NotificationKind::Cancelled,
-                &wording(&config, &record, reason),
-                now,
-            )
-            .await?;
-            guest_notified = true;
-        }
-
-        let reconciliation = reconcile_shift(
-            &mut transaction,
-            bar,
-            &config,
-            record.booking.service_day,
-            now,
-        )
-        .await?;
+        let cancelled =
+            cancel_locked(&mut transaction, bar, config, booking, reason, notice, now).await?;
         transaction.commit().await?;
-        Ok(CancelledBooking {
-            record,
-            reconciliation,
-            config,
-            guest_notified,
-        })
+        Ok(cancelled)
     }
 
     /// A guest gives back whichever booking of theirs has not finished.
@@ -877,12 +817,46 @@ impl Store {
         user: TelegramUserId,
         now: DateTime<Utc>,
     ) -> Result<CancelledBooking> {
-        let mine = self
-            .booking_of_guest(bar, user, now)
+        self.cancel_guests_own(bar, user, now, |_| true).await
+    }
+
+    /// A guest gives back the booking a reminder named, from the button under that reminder.
+    ///
+    /// Only while it is still a plan: a reminder can be tapped long after it arrived, and the party
+    /// may by then be sitting at the table it would release.
+    pub async fn cancel_reminded_booking(
+        &self,
+        bar: BarId,
+        user: TelegramUserId,
+        booking: BookingId,
+        now: DateTime<Utc>,
+    ) -> Result<CancelledBooking> {
+        self.cancel_guests_own(bar, user, now, |record| {
+            record.booking.id == booking
+                && record.booking.status == pustol_domain::BookingStatus::Confirmed
+        })
+        .await
+    }
+
+    async fn cancel_guests_own(
+        &self,
+        bar: BarId,
+        user: TelegramUserId,
+        now: DateTime<Utc>,
+        chosen: impl Fn(&BookingRecord) -> bool,
+    ) -> Result<CancelledBooking> {
+        let mut transaction = self.pool().begin().await?;
+        lock_bar(&mut transaction, bar).await?;
+        let config = load_config(&mut transaction, bar).await?;
+        let mine = running_bookings_of_guest(&mut transaction, bar, user, now)
             .await?
+            .into_iter()
+            .find(|record| chosen(record))
             .ok_or(Error::NotFound { entity: "booking" })?;
-        self.cancel_booking(bar, mine.booking.id, None, None, now)
-            .await
+        let cancelled =
+            cancel_locked(&mut transaction, bar, config, mine.booking.id, None, None, now).await?;
+        transaction.commit().await?;
+        Ok(cancelled)
     }
 
     /// Asks the room, one more time, to seat everything it owes a table.
@@ -1435,11 +1409,11 @@ async fn cancel_not_yet_started(
     bar: BarId,
     user: TelegramUserId,
     now: DateTime<Utc>,
-) -> Result<Option<BookingId>> {
+) -> Result<Option<(BookingId, ServiceDay)>> {
     let row = sqlx::query(
         "update booking set status = 'cancelled', cancelled_at = $3
          where bar_id = $1 and telegram_user_id = $2 and status = 'confirmed' and starts_at > $3
-         returning id",
+         returning id, service_date",
     )
     .bind(bar)
     .bind(user.0)
@@ -1449,7 +1423,102 @@ async fn cancel_not_yet_started(
     let Some(row) = row else { return Ok(None) };
     let id = BookingId(row.get("id"));
     notifications::abandon_reminder(&mut *connection, id, "the guest replaced this booking").await?;
-    Ok(Some(id))
+    Ok(Some((id, ServiceDay::new(row.get("service_date")))))
+}
+
+/// The guest's bookings whose table is still held for them, soonest first.
+///
+/// When a booking stops running is [`pustol_domain::Booking::occupancy`] and nothing else. The
+/// query only narrows to the rows that could still be running; restating the rule in SQL would give
+/// this reading an opinion of its own.
+async fn running_bookings_of_guest(
+    connection: &mut PgConnection,
+    bar: BarId,
+    user: TelegramUserId,
+    now: DateTime<Utc>,
+) -> Result<Vec<BookingRecord>> {
+    let rows = sqlx::query(concat!(
+        "select ",
+        booking_columns!(),
+        " where b.bar_id = $1 and b.telegram_user_id = $2
+            and b.status <> 'cancelled' and b.ends_at > $3
+          order by b.starts_at"
+    ))
+    .bind(bar)
+    .bind(user.0)
+    .bind(now)
+    .fetch_all(connection)
+    .await?;
+    let mut running = Vec::new();
+    for row in &rows {
+        let record = BookingRecord::try_from(row_into(row)?)?;
+        if record.booking.occupancy().is_some_and(|held| held.end() > now) {
+            running.push(record);
+        }
+    }
+    Ok(running)
+}
+
+/// Cancels a booking inside a transaction that already holds the bar's lock and read `config`.
+async fn cancel_locked(
+    connection: &mut PgConnection,
+    bar: BarId,
+    config: ValidConfig,
+    booking: BookingId,
+    reason: Option<&str>,
+    notice: Option<CancellationWording>,
+    now: DateTime<Utc>,
+) -> Result<CancelledBooking> {
+    // Checked here, against the configuration this transaction read, rather than in whichever
+    // handler happens to call: a rule about what reaches a guest should not depend on every
+    // future caller remembering it.
+    if let Some(reason) = reason
+        && !config.cancel_reasons.iter().any(|offered| offered == reason)
+    {
+        return Err(Error::UnknownCancelReason);
+    }
+    let updated = sqlx::query(
+        "update booking set status = 'cancelled', cancelled_at = $4, cancel_reason = $3
+         where bar_id = $1 and id = $2 and status <> 'cancelled'",
+    )
+    .bind(bar)
+    .bind(booking.0)
+    .bind(reason)
+    .bind(now)
+    .execute(&mut *connection)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(Error::NotFound { entity: "booking" });
+    }
+    notifications::abandon_reminder(&mut *connection, booking, "the booking was cancelled").await?;
+    let record = fetch_booking(&mut *connection, bar, booking).await?;
+
+    // Queued in the same transaction as the cancellation: a notice that survives a crash the
+    // cancellation did not would tell a guest their table is gone when it is not.
+    let mut guest_notified = false;
+    if let (Some(recipient), Some(reason), Some(wording)) = (record.telegram_user_id, reason, notice)
+    {
+        notifications::enqueue(
+            &mut *connection,
+            bar,
+            booking,
+            recipient,
+            notifications::NotificationKind::Cancelled,
+            &wording(&config, &record, reason),
+            now,
+        )
+        .await?;
+        guest_notified = true;
+    }
+
+    let reconciliation =
+        reconcile_shift(&mut *connection, bar, &config, record.booking.service_day, now).await?;
+    Ok(CancelledBooking {
+        record,
+        reconciliation,
+        config,
+        guest_notified,
+    })
 }
 
 pub(crate) async fn fetch_booking(

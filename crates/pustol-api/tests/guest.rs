@@ -597,3 +597,106 @@ async fn the_first_screen_says_when_tonight_opens_up() {
         "eight in the morning, in the bar's own timezone rather than the phone's"
     );
 }
+
+async fn staff_mark(app: &common::Harness, staff: &Caller, id: &str, attendance: &str) {
+    app.send(
+        "PATCH",
+        &format!("/api/admin/bookings/{id}/attendance"),
+        staff,
+        serde_json::json!({ "attendance": attendance }),
+    )
+    .await
+    .expect_ok();
+}
+
+fn book_at(start_minutes: i32) -> serde_json::Value {
+    serde_json::json!({ "service_date": "2026-07-30", "start_minutes": start_minutes, "party_size": 2 })
+}
+
+#[tokio::test]
+async fn a_guest_who_has_gone_home_can_book_again_the_same_night() {
+    let app = harness().await;
+    let guest = Caller::new("Жора");
+    let id = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let later = app.at(utc(2026, 7, 30, 18, 30));
+    let staff = Caller::manager();
+    staff_mark(&later, &staff, &id, "arrived").await;
+    staff_mark(&later, &staff, &id, "left").await;
+
+    later.post("/api/booking", &guest, book_at(1320)).await.expect_ok();
+}
+
+#[tokio::test]
+async fn a_guest_already_at_their_table_is_told_they_have_tonight_rather_than_an_error() {
+    let app = harness().await;
+    let guest = Caller::new("Лёва");
+    let id = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let later = app.at(utc(2026, 7, 30, 18, 30));
+    staff_mark(&later, &Caller::manager(), &id, "arrived").await;
+
+    let answer = later.post("/api/booking", &guest, book_at(1320)).await;
+    assert_eq!(answer.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(answer.error_code(), Some("already_booked_tonight"));
+}
+
+#[tokio::test]
+async fn rebooking_another_evening_gives_the_table_left_behind_to_a_party_without_one() {
+    let app = harness_at(
+        morning(),
+        config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
+    )
+    .await;
+    let guest = Caller::new("Ира");
+    app.post("/api/booking", &guest, book_at(1200)).await.expect_ok();
+    let staff = Caller::manager();
+    let phoned = app
+        .post(
+            "/api/admin/bookings",
+            &staff,
+            serde_json::json!({
+                "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2,
+                "guest_name": "Пётр"
+            }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    app.post(
+        "/api/admin/blocks",
+        &staff,
+        serde_json::json!({
+            "service_date": "2026-07-30",
+            "table_ids": [phoned["table_id"]],
+            "reason": "Сломан"
+        }),
+    )
+    .await
+    .expect_ok();
+
+    app.post(
+        "/api/booking",
+        &guest,
+        serde_json::json!({ "service_date": "2026-07-31", "start_minutes": 1200, "party_size": 2 }),
+    )
+    .await
+    .expect_ok();
+
+    let shift = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    let peter = shift["bookings"]
+        .as_array()
+        .expect("bookings")
+        .iter()
+        .find(|booking| booking["guest_name"] == "Пётр")
+        .expect("still booked");
+    assert!(!peter["table_id"].is_null(), "the table Ира gave back should seat Пётр: {peter}");
+}

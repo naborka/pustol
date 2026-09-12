@@ -70,13 +70,16 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Server faults are logged in full and reported as a bare code: a stack of database detail
         // in a response body tells an attacker about the schema and tells the guest nothing.
-        if self.status.is_server_error() {
+        let message = if self.status.is_server_error() {
             tracing::error!(code = self.code, message = %self.message, "request failed");
-        }
+            "internal error"
+        } else {
+            &self.message
+        };
         let body = Body {
             error: Payload {
                 code: self.code,
-                message: &self.message,
+                message,
                 detail: &self.detail,
             },
         };
@@ -121,6 +124,9 @@ impl From<DbError> for ApiError {
             // it is *this* one that has gone, and the answer is to pick another.
             DbError::ChosenTableNotFree => {
                 Self::new(Code::CONFLICT, "chosen_table_not_free", error.to_string())
+            }
+            DbError::AlreadyBookedThisShift => {
+                Self::new(Code::CONFLICT, "already_booked_tonight", error.to_string())
             }
             DbError::BookingHasStarted => {
                 Self::new(Code::CONFLICT, "booking_started", error.to_string())

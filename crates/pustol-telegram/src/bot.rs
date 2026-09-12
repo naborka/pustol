@@ -4,6 +4,8 @@
 //! no way to ask whether a chat exists, so the outcome of a send is the only evidence there is —
 //! which is why the failures here are classified by whether retrying could ever help.
 
+use std::time::Duration;
+
 use serde::Serialize;
 
 use crate::init_data::BotToken;
@@ -55,16 +57,41 @@ pub struct Bot {
     client: reqwest::Client,
     token: BotToken,
     base_url: String,
+    timeout: Duration,
 }
+
+/// How long one call to Telegram may take before it counts as a transient failure.
+///
+/// Without a bound, one connection a proxy holds open and never answers stalls the outbox, and
+/// the shutdown that waits for the outbox with it.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long establishing a connection may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Bot {
     /// Builds a client against Telegram.
-    pub fn new(token: BotToken, client: reqwest::Client) -> Self {
+    ///
+    /// The HTTP client is built here rather than handed in, so that no caller can forget the
+    /// timeouts that keep a silent network from hanging the process.
+    pub fn new(token: BotToken) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .expect("a client with only a connect timeout always builds");
         Self {
             client,
             token,
             base_url: "https://api.telegram.org".to_owned(),
+            timeout: REQUEST_TIMEOUT,
         }
+    }
+
+    /// Bounds each call by `timeout` instead of the default.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Points the client at another host, so the send path can be tested end to end against a stub
@@ -104,9 +131,11 @@ impl Bot {
                 self.token.expose()
             ))
             .json(&body)
+            .timeout(self.timeout)
             .send()
             .await
-            .map_err(|error| SendError::Transient(error.to_string()))?;
+            // The URL carries the token, and this text is stored in the outbox.
+            .map_err(|error| SendError::Transient(error.without_url().to_string()))?;
 
         let status = response.status();
         if status.is_success() {
