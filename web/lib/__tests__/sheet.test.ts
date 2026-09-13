@@ -54,7 +54,7 @@ describe("an open sheet when the shift is read again", () => {
       { kind: "walkIn", opened: 1 },
       { kind: "manual", opened: 1 },
       { kind: "guestCancel", booking, opened: 1 },
-      { kind: "conflict", reasons: ["x"], opened: 1 },
+      { kind: "conflict", refusal: { lead: "", reasons: ["x"] }, opened: 1 },
     ];
     for (const sheet of sheets) expect(refreshedSheet(sheet, fresh)).toBe(sheet);
   });

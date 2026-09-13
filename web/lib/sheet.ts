@@ -12,13 +12,14 @@
  */
 
 import type { GuestBooking, ShiftBooking, ShiftTable, ShiftView } from "./api";
+import type { Refusal } from "./outcomes";
 
 export type SheetContent =
   | { kind: "booking"; booking: ShiftBooking }
   | { kind: "templates"; booking: ShiftBooking }
   | { kind: "cancelBooking"; booking: ShiftBooking }
   | { kind: "table"; table: ShiftTable }
-  | { kind: "conflict"; reasons: string[] }
+  | { kind: "conflict"; refusal: Refusal }
   | { kind: "days" }
   | { kind: "walkIn" }
   | { kind: "manual" }

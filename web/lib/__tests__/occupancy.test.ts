@@ -53,6 +53,7 @@ function shift(overrides: Partial<ShiftView> = {}): ShiftView {
   return {
     service_date: "2026-09-11",
     today: "2026-09-11",
+    version: 1,
     hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
     tables: [table("t1", 1, 2), table("t2", 2, 6)],
     bookings: [],

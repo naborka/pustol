@@ -158,7 +158,11 @@ async fn a_session_never_writes_back_a_name_the_account_has_since_changed() {
         username: before.username.as_ref().map(|name| format!("{name}_new")),
         ..before.clone()
     };
-    app.get("/api/session", &after).await.expect_ok();
+    // Signed a second later: two profiles stamped in the same second say nothing about which is newer.
+    app.at(morning() + TimeDelta::seconds(1))
+        .get("/api/session", &after)
+        .await
+        .expect_ok();
 
     let answer = app.send_raw("GET", "/api/session", Some(&session), None).await;
     assert_eq!(answer.expect_ok()["user"]["username"], serde_json::json!(after.username));

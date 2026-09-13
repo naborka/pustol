@@ -140,7 +140,6 @@ pub fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
             .expect("tables")
             .iter()
             .map(|table| serde_json::json!({
-                "kind": "existing",
                 "id": table["id"],
                 "seats": table["seats"],
                 "zone": table["zone"],
@@ -356,6 +355,28 @@ impl Harness {
 
     pub async fn post(&self, path: &str, caller: &Caller, body: serde_json::Value) -> Answer {
         self.send("POST", path, caller, body).await
+    }
+
+    /// A call with the body sent as written, under the content type given, for a body that is not
+    /// JSON or not said to be.
+    pub async fn send_text(
+        &self,
+        method: &str,
+        path: &str,
+        caller: &Caller,
+        content_type: &str,
+        body: &str,
+    ) -> Answer {
+        self.call(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::AUTHORIZATION, caller.credentials(self.now))
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(body.to_owned()))
+                .expect("a request"),
+        )
+        .await
     }
 
     /// A call with no credentials at all.

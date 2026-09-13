@@ -23,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   client as makeClient,
+  draftOf,
   type Attendance,
   type Availability,
   type DayOffer,
@@ -33,22 +34,18 @@ import {
   type ShiftBooking,
   type ShiftView,
 } from "@/lib/api";
-import {
-  invalidReasons,
-  messageFor,
-  needsRelaunch,
-  strandedBookings,
-  type ApiFailure,
-} from "@/lib/errors";
+import { messageFor, needsRelaunch, type ApiFailure } from "@/lib/errors";
 import * as fmt from "@/lib/format";
 import {
   attendanceOutcome,
   closuresToRestore,
   reconciliationReport,
-  strandedLines,
+  refusalOf,
   type Closure,
+  type Refusal,
 } from "@/lib/outcomes";
 import { edited, firstReason, type Edit } from "@/lib/settingsRules";
+import type { Newer } from "@/lib/reads";
 import { isDirty, received, savedInto, type SettingsPair } from "@/lib/settingsSync";
 import {
   NO_SHEET,
@@ -71,6 +68,7 @@ import {
   heldAfter,
   heldOn,
   pickerStart,
+  replacedBy,
 } from "@/components/GuestScreens";
 import { SaveBar, SettingsScreen, type Section } from "@/components/Settings";
 import { useInsets } from "@/components/ThemeProvider";
@@ -113,6 +111,18 @@ const HOME_REFRESH_MS = 60_000;
 
 /** The session is one question, whoever asks it. */
 const SESSION = "session";
+
+/**
+ * So are the settings: they are the bar's, whichever evening is on screen. Only the per-table counts
+ * belong to an evening, and the answer names which.
+ */
+const SETTINGS = "settings";
+
+/** Rooms are ordered by the server's version, not by when they were asked or when they arrived. */
+const newerRoom: Newer<ShiftView> = (next, shown) => next.version >= shown.version;
+
+/** A read whose answers are only drawn, never folded into anything. */
+const nothing = () => {};
 
 const EMPTY_MANUAL = {
   name: "",
@@ -179,23 +189,24 @@ export default function Page() {
   const [partySize, setPartySize] = useState(DEFAULT_PARTY);
   const [serviceDate, setServiceDate] = useState<string | null>(null);
   const [chosenMinutes, setChosenMinutes] = useState<number | null>(null);
-  const [availability, setAvailability] = useState<Availability | null>(null);
-  const [dayRail, setDayRail] = useState<DayOffer[] | null>(null);
 
   const [shiftDate, setShiftDate] = useState<string | null>(null);
   const [pane, setPane] = useState<ShiftPane>("now");
-  const [shift, setShift] = useState<ShiftView | null>(null);
 
-  const [session, changeSession, sessionNow] = useSynced<Session | null>(null);
-  // When the session was last found dead: only a session read answered after that brings it back.
-  const [deadAt, setDeadAt] = useState(0);
+  // When the session was found ended, and the newest word on it since. Only a session read asked
+  // after that, and answered, brings the app back: a guest write answering meanwhile proves nothing.
+  const [ended, setEnded] = useState<{ at: number; failure: ApiFailure } | null>(null);
 
   const [pair, changePair, pairNow] = useSynced<SettingsPair | null>(null);
   // The edits made while a save is on its way, to be made again on top of what it stored.
   const editsDuringSave = useRef<Edit[] | null>(null);
   const [settingsSection, setSettingsSection] = useState<Section | null>(null);
   const [editedWeekday, setEditedWeekday] = useState(1);
-  const [saving, setSaving] = useState(false);
+  const [saving, changeSaving, savingNow] = useSynced(false);
+  // A settings read somebody asked for while a save was on its way, made once it has answered.
+  const settingsWanted = useRef<"quiet" | "asked" | null>(null);
+  // Why the last save was refused, until the next edit or save.
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
 
   const insets = useInsets();
   const [sheet, setSheet] = useState<OpenSheet>(NO_SHEET);
@@ -210,7 +221,6 @@ export default function Page() {
     table: null as string | null,
     party: null as number | null,
   });
-  const [staffTimes, setStaffTimes] = useState<Availability | null>(null);
   const [walkInParty, setWalkInParty] = useState(DEFAULT_PARTY);
   // A preference, not the decision: the sheet resolves it against the tables actually free.
   const [walkInTable, setWalkInTable] = useState<string | null>(null);
@@ -254,39 +264,38 @@ export default function Page() {
     [],
   );
 
-  const showSession = (next: Session) => {
-    changeSession(() => next);
-    setSheet((current) => refreshedGuestSheet(current, next.bookings));
-  };
   const sessionRead = useRead<Session>(
     api ? { key: SESSION, ask: () => api.session() } : null,
     (next) => {
-      showSession(next);
+      setSheet((current) => refreshedGuestSheet(current, next.bookings));
       setServiceDate((current) => current ?? next.bookable_days[0] ?? next.bar.today);
       setShiftDate((current) => current ?? next.bar.today);
     },
-    (failure, tellIt) => report(failure, "guest", tellIt),
+    (failure, { tell: tellIt, number }) => {
+      if (!needsRelaunch(failure)) {
+        setEnded((current) => (current && number > current.at ? { ...current, failure } : current));
+      }
+      report(failure, "guest", tellIt);
+    },
   );
-  const { load: loadSession, put: putSession, failNow: sessionFailed } = sessionRead;
+  const { load: loadSession, put: putSession, mark: markSession } = sessionRead;
+  const session = sessionRead.value;
 
   useEffect(() => {
     reportRef.current = (failure, audience, tellIt = true) => {
       if (needsRelaunch(failure)) {
-        setDeadAt(sessionFailed(SESSION, failure));
+        setEnded({ at: markSession(), failure });
         return;
       }
       if (!tellIt) return;
       haptics.error();
       tell(messageFor(failure, audience));
     };
-  }, [sessionFailed, tell]);
+  }, [markSession, tell]);
 
   /** Puts what a guest write answered on screen at once; a reread afterwards only freshens it. */
   const amendSession = (change: (current: Session) => Session) =>
-    putSession(SESSION, () => {
-      const current = sessionNow.current;
-      if (current) showSession(change(current));
-    });
+    putSession(SESSION, (current) => current && change(current));
 
   useEffect(() => {
     if (!api) return;
@@ -297,8 +306,8 @@ export default function Page() {
   // a different day on the rail is tapped.
   const daysRead = useRead<DayOffer[]>(
     api ? { key: String(partySize), ask: async () => (await api.days(partySize)).days } : null,
-    setDayRail,
-    (failure, tellIt) => report(failure, "guest", tellIt),
+    nothing,
+    (failure, { tell: tellIt }) => report(failure, "guest", tellIt),
   );
   const loadDays = daysRead.load;
 
@@ -316,8 +325,8 @@ export default function Page() {
           ask: () => api.availability(serviceDate, partySize),
         }
       : null,
-    setAvailability,
-    (failure, tellIt) => report(failure, "guest", tellIt),
+    nothing,
+    (failure, { tell: tellIt }) => report(failure, "guest", tellIt),
   );
   const loadTimes = timesRead.load;
 
@@ -326,15 +335,14 @@ export default function Page() {
     void loadTimes();
   }, [screen, serviceDate, partySize, api, loadTimes]);
 
-  /** A shift the server answered, and every sheet brought up to date with it. */
-  const showShift = (next: ShiftView) => {
-    setShift(next);
-    setSheet((current) => refreshedSheet(current, next));
-  };
+  // Every sheet open on the evening on screen is brought up to date with the room it now has.
   const shiftRead = useRead<ShiftView>(
     api && shiftDate !== null ? { key: shiftDate, ask: () => api.shift(shiftDate) } : null,
-    showShift,
-    (failure, tellIt) => report(failure, "staff", tellIt),
+    (room, { onScreen }) => {
+      if (onScreen) setSheet((current) => refreshedSheet(current, room));
+    },
+    (failure, { tell: tellIt }) => report(failure, "staff", tellIt),
+    newerRoom,
   );
   const { load: loadShift, put: putShift } = shiftRead;
 
@@ -358,23 +366,41 @@ export default function Page() {
     HOME_REFRESH_MS,
   );
 
-  // Folded into the edit at the moment it lands, so nothing typed while it loaded is lost.
+  // Folded into the edit at the moment it lands, so nothing typed while it loaded is lost. A read
+  // landing while a save is on its way may or may not have seen that save, so it is dropped and
+  // asked again once the save has answered.
   const settingsRead = useRead<SettingsView>(
-    api && shiftDate !== null ? { key: shiftDate, ask: () => api.settings(shiftDate) } : null,
-    (next, date) => {
-      const outcome = received(pairNow.current, date, next);
+    api && shiftDate !== null ? { key: SETTINGS, ask: () => api.settings(shiftDate) } : null,
+    (next) => {
+      if (savingNow.current) {
+        settingsWanted.current = settingsWanted.current ?? "quiet";
+        return;
+      }
+      const outcome = received(pairNow.current, next);
       changePair(() => outcome.pair);
       if (outcome.notice) tell(outcome.notice);
     },
-    (failure, tellIt) => report(failure, "staff", tellIt),
+    (failure, { tell: tellIt }) => report(failure, "staff", tellIt),
   );
-  const { load: loadSettings, put: putSettings } = settingsRead;
+  const readSettings = settingsRead.load;
+
+  /** Reads the settings now, or once the save on its way has answered. */
+  const loadSettings = useCallback(
+    (quiet = false) => {
+      if (!savingNow.current) {
+        void readSettings(quiet);
+        return;
+      }
+      settingsWanted.current = quiet && settingsWanted.current !== "asked" ? "quiet" : "asked";
+    },
+    [readSettings, savingNow],
+  );
 
   const settingsDirty = pair !== null && isDirty(pair);
 
   useEffect(() => {
     if (tab !== "settings" || shiftDate === null) return;
-    void loadSettings();
+    loadSettings();
   }, [tab, shiftDate, api, loadSettings]);
 
   // Closing Telegram with unsaved settings asks first, the way switching tabs no longer loses them.
@@ -387,6 +413,7 @@ export default function Page() {
   const editDraft = useCallback(
     (change: Edit) => {
       editsDuringSave.current?.push(change);
+      setRefusal(null);
       changePair((current) => current && { ...current, draft: edited(current.draft, change) });
     },
     [changePair],
@@ -394,7 +421,8 @@ export default function Page() {
 
   const revertDraft = useCallback(() => {
     if (editsDuringSave.current) editsDuringSave.current = [];
-    changePair((current) => current && { ...current, draft: current.base });
+    setRefusal(null);
+    changePair((current) => current && { ...current, draft: draftOf(current.settings) });
   }, [changePair]);
 
   // Writing a booking down and moving one ask the same question, so there is one of it. A move
@@ -415,8 +443,8 @@ export default function Page() {
           ask: () => api.staffAvailability(shiftDate, askParty, askIgnoring),
         }
       : null,
-    setStaffTimes,
-    (failure, tellIt) => report(failure, "staff", tellIt),
+    nothing,
+    (failure, { tell: tellIt }) => report(failure, "staff", tellIt),
   );
   const loadStaffTimes = staffTimesRead.load;
 
@@ -483,8 +511,14 @@ export default function Page() {
       </InsetFrame>
     );
   }
-  const dead = deadAt > sessionRead.applied;
-  const blocking = dead || session === null ? sessionRead.failure : null;
+  const dead = ended !== null && sessionRead.answeredUpTo < ended.at ? ended : null;
+  const blocking = dead
+    ? sessionRead.pending
+      ? null
+      : dead.failure
+    : session === null
+      ? sessionRead.failure
+      : null;
   if (blocking) {
     // Retrying with the proof the server just refused refuses again. Only reopening from Telegram
     // brings a new one, so that is the way out offered.
@@ -513,16 +547,16 @@ export default function Page() {
   /** Closes the sheet an action was started from, and no sheet opened since. */
   const closeIfStill = (from: OpenSheet) => setSheet((current) => closedIfStill(current, from));
   // Only the evening asked for is shown: another evening is not a refresh of this one.
-  const shiftOnScreen = shift !== null && shift.service_date === shiftDate ? shift : null;
+  const shiftOnScreen = shiftRead.value;
   // The server's day, not the one this phone read when it opened: a shift left open overnight.
   const today = shiftOnScreen?.today ?? bar.today;
   const isToday = shiftDate === today;
   // ISO dates compare as strings. An evening that is over is read, not written into.
   const isPast = shiftDate < today;
   // An answer to another question must not stand in for one that failed.
-  const days = daysRead.failure ? null : dayRail;
-  const times = timesRead.failure ? null : availability;
-  const shownStaffTimes = staffTimesRead.failure ? null : staffTimes;
+  const days = daysRead.failure ? null : daysRead.shown;
+  const times = timesRead.failure ? null : timesRead.shown;
+  const shownStaffTimes = staffTimesRead.failure ? null : staffTimesRead.shown;
 
   // ---- guest actions --------------------------------------------------------------------------
 
@@ -536,8 +570,12 @@ export default function Page() {
 
   const book = exclusive(async () => {
     if (chosenMinutes === null) return;
+    // What the button said this booking replaces. The server refuses rather than replace otherwise.
+    const replacing = session.bookings
+      .filter((held) => replacedBy(held, serviceDate))
+      .map((held) => held.id);
     try {
-      const answer = await api.book(serviceDate, chosenMinutes, partySize);
+      const answer = await api.book(serviceDate, chosenMinutes, partySize, replacing);
       haptics.success();
       setTaken({ booking: answer.booking, moved: answer.replaced.length > 0 });
       // The answer already says what was booked. Showing it does not wait on rereading the home
@@ -549,7 +587,15 @@ export default function Page() {
       setScreen("done");
       void loadSession(true);
     } catch (error) {
-      report(failureOf(error), "guest");
+      const failure = failureOf(error);
+      report(failure, "guest");
+      if (failure.code === "booking_changed") {
+        // What the guest holds changed since the button was drawn. The picker stays as it is; the
+        // button redraws from what they hold now, for them to look at and press again.
+        void loadSession(true);
+        void loadDays(true);
+        return;
+      }
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
       // showing a time that no longer exists.
       setChosenMinutes(null);
@@ -558,22 +604,8 @@ export default function Page() {
     }
   });
 
-  /** Books the same slot again, for a guest who has just changed their mind about cancelling. */
-  const rebook = exclusive(async (was: GuestBooking) => {
-    try {
-      const answer = await api.book(was.service_date, was.start_minutes, was.party_size);
-      haptics.success();
-      amendSession((current) => ({
-        ...current,
-        bookings: heldAfter(current.bookings, answer.replaced, answer.booking),
-      }));
-      tell("Бронь вернулась.");
-    } catch (error) {
-      report(failureOf(error), "guest");
-    }
-    void loadSession(true);
-  });
-
+  // No undo: the confirmation sheet was the protection. Booking the slot again could replace another
+  // booking the guest holds, and could never bring back one that had begun.
   const cancelMine = exclusive(async (from: OpenSheet, was: GuestBooking) => {
     try {
       await api.cancelMine(was.id);
@@ -583,10 +615,7 @@ export default function Page() {
         ...current,
         bookings: heldAfter(current.bookings, [was.id], null),
       }));
-      say({
-        text: "Бронь отменена. Стол снова свободен.",
-        undo: { label: "Вернуть", run: () => void rebook(was) },
-      });
+      tell("Бронь отменена. Стол снова свободен.");
       void loadSession(true);
     } catch (error) {
       report(failureOf(error), "guest");
@@ -615,7 +644,7 @@ export default function Page() {
     }
   });
 
-  const offer = dayRail?.find((day) => day.service_date === serviceDate);
+  const offer = daysRead.shown?.find((day) => day.service_date === serviceDate);
   const decision = bookingDecision(
     partySize,
     serviceDate,
@@ -645,7 +674,7 @@ export default function Page() {
    * shown where it now sits, and a sheet on a booking that is gone closes.
    */
   const showAnswered = (room: ShiftView) => {
-    putShift(room.service_date, () => showShift(room));
+    putShift(room.service_date, () => room);
   };
 
   /**
@@ -865,7 +894,9 @@ export default function Page() {
               ? `${now.guest_name} за ${where}.`
               : `${now.guest_name}: ${fmt.guests(now.party_size)}, ${where}.`
             : `${now.guest_name}: ${fmt.time(now.start_minutes)}, ${where}. ` +
-              (answer.guest_notified ? "Гостю сообщили." : "Гость не в боте — предупредите сами.");
+              (answer.guest_notified
+                ? "Гостю сообщили."
+                : "Бот не может написать гостю — предупредите сами.");
         say({
           text: [told, reconciliationReport(answer.reconciliation)].filter(Boolean).join(" "),
         });
@@ -879,19 +910,14 @@ export default function Page() {
   const saveSettings = exclusive(async () => {
     const sent = pairNow.current?.draft;
     if (!sent) return;
-    const date = shiftDate;
     const openedBefore = openings.current;
-    setSaving(true);
+    setRefusal(null);
+    changeSaving(() => true);
     editsDuringSave.current = [];
     try {
-      const saved = await api.saveSettings(date, sent);
+      const saved = await api.saveSettings(shiftDate, sent);
       const meanwhile = editsDuringSave.current ?? [];
-      const shown = putSettings(date, () =>
-        changePair((current) => savedInto(current, date, sent, saved.settings, meanwhile)),
-      );
-      // Saved for an evening no longer on screen: its per-table counts are that evening's, so the
-      // one on screen is read instead.
-      if (!shown) void loadSettings(true);
+      changePair((current) => savedInto(current, saved.settings, meanwhile));
       const parts = ["Настройки сохранены.", reconciliationReport(saved.reconciliation)];
       if (saved.above_cap > 0) {
         parts.push(`${fmt.bookings(saved.above_cap)} больше нового лимита — они остаются в силе.`);
@@ -901,23 +927,21 @@ export default function Page() {
     } catch (error) {
       const failure = failureOf(error);
       report(failure, "staff");
-      // A sheet opened while the save was on its way is somebody's next decision; the toast alone
-      // reports the refusal rather than a sheet thrown over theirs.
-      const undisturbed = openings.current === openedBefore;
-      if (failure.code === "would_strand_bookings") {
-        // Named, with their times. The API has always sent both; showing one general sentence
-        // instead left a manager to work out which of thirty evenings was in the way.
-        if (undisturbed) {
-          openSheet({ kind: "conflict", reasons: strandedLines(strandedBookings(failure)) });
-        }
-      } else if (failure.code === "settings_invalid") {
-        if (undisturbed) openSheet({ kind: "conflict", reasons: invalidReasons(failure) });
+      const refused = refusalOf(failure);
+      if (refused) {
+        // Kept on the save bar. A sheet opened while the save was on its way is somebody's next
+        // decision, so the reasons wait there rather than being thrown over it.
+        setRefusal(refused);
+        if (openings.current === openedBefore) openSheet({ kind: "conflict", refusal: refused });
       } else if (failure.code === "settings_changed") {
-        void loadSettings();
+        loadSettings();
       }
     } finally {
       editsDuringSave.current = null;
-      setSaving(false);
+      changeSaving(() => false);
+      const wanted = settingsWanted.current;
+      settingsWanted.current = null;
+      if (wanted !== null) void readSettings(wanted === "quiet");
     }
   });
 
@@ -940,6 +964,7 @@ export default function Page() {
         saving={saving}
         onSave={() => void saveSettings()}
         onRevert={revertDraft}
+        onWhy={refusal ? () => openSheet({ kind: "conflict", refusal }) : null}
       />
     ) : undefined;
 
@@ -1109,7 +1134,7 @@ export default function Page() {
 
           <ConflictSheet
             open={sheet.kind === "conflict"}
-            reasons={sheet.kind === "conflict" ? sheet.reasons : []}
+            refusal={sheet.kind === "conflict" ? sheet.refusal : null}
             onClose={closeSheet}
           />
         </>
@@ -1193,11 +1218,18 @@ export default function Page() {
           <SettingsScreen
             settings={pair.settings}
             draft={pair.draft}
+            serviceDate={shiftDate}
             editedWeekday={editedWeekday}
             onEdit={editDraft}
             onEditWeekday={setEditedWeekday}
             section={settingsSection}
             onSection={setSettingsSection}
+          />
+        ) : settingsRead.failure ? (
+          <Failure
+            message="Не удалось прочитать настройки."
+            actionLabel="Попробовать снова"
+            onAction={() => loadSettings()}
           />
         ) : (
           <Spinner label="Читаем настройки" />

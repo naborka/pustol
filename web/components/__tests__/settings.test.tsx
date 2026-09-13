@@ -28,6 +28,7 @@ function open(overrides: Partial<Omit<ScreenProps, "section" | "onSection">> = {
     <Settings
       settings={view}
       draft={draftOf(view)}
+      serviceDate="2026-09-11"
       editedWeekday={5}
       onEdit={noop}
       onEditWeekday={noop}
@@ -77,6 +78,7 @@ describe("the index", () => {
     const draw = () => (
       <Settings
         settings={view}
+        serviceDate="2026-09-11"
         draft={current}
         editedWeekday={5}
         onEdit={(change) => {
@@ -106,6 +108,7 @@ describe("the index", () => {
     const draw = () => (
       <Settings
         settings={view}
+        serviceDate="2026-09-11"
         draft={current}
         editedWeekday={5}
         onEdit={(change) => {
@@ -122,6 +125,55 @@ describe("the index", () => {
     expect(current.message_templates.at(-1)).toBe("");
     expect(screen.queryByDisplayValue("Новое сообщение")).toBeNull();
     expect(firstReason(current, LIMITS)).toBe("Пустое сообщение отправить нельзя.");
+  });
+
+  it("counts a table's bookings only for the evening on screen", async () => {
+    const view = settingsView({
+      service_date: "2026-09-11",
+      tables: [{ id: "t1", number: 7, seats: 2, zone: "Стойка", bookings_today: 3 }],
+      max_party: 2,
+    });
+    const { rerender } = open({ settings: view, draft: draftOf(view) });
+    await userEvent.click(screen.getByText("Зал"));
+    expect(screen.getByText("3 брони")).toBeDefined();
+
+    rerender(
+      <Settings
+        settings={view}
+        draft={draftOf(view)}
+        serviceDate="2026-09-12"
+        editedWeekday={5}
+        onEdit={noop}
+        onEditWeekday={noop}
+      />,
+    );
+    expect(screen.getByText("Стол 7")).toBeDefined();
+    expect(screen.queryByText("3 брони")).toBeNull();
+  });
+
+  it("names a table it adds before saving, so a second save of it is the same table", async () => {
+    const view = settingsView();
+    let current: SettingsDraft = draftOf(view);
+    const draw = () => (
+      <Settings
+        settings={view}
+        serviceDate="2026-09-11"
+        draft={current}
+        editedWeekday={5}
+        onEdit={(change) => {
+          current = edited(current, change);
+          rerender(draw());
+        }}
+        onEditWeekday={noop}
+      />
+    );
+    const { rerender } = render(draw());
+
+    await userEvent.click(screen.getByText("Зал"));
+    await userEvent.click(screen.getByText("+ Добавить стол"));
+    const added = current.tables.at(-1);
+    expect(added?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(added).toMatchObject({ seats: 4, zone: "Зал" });
   });
 
   it("reaches every section it advertises", async () => {
@@ -144,6 +196,7 @@ describe("the save bar", () => {
         saving={false}
         onSave={onSave}
         onRevert={onRevert}
+        onWhy={null}
       />,
     );
     expect(
@@ -161,7 +214,19 @@ describe("the save bar", () => {
 
   it("saves once the proposal is legal", async () => {
     const onSave = vi.fn();
-    render(<SaveBar reason={null} saving={false} onSave={onSave} onRevert={noop} />);
+    render(<SaveBar reason={null} saving={false} onSave={onSave} onRevert={noop} onWhy={null} />);
+    await userEvent.click(screen.getByText("Сохранить"));
+    expect(onSave).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Не сохранено.")).toBeNull();
+  });
+
+  it("keeps a refused save's reasons one tap away, and lets it be saved again", async () => {
+    const onWhy = vi.fn();
+    const onSave = vi.fn();
+    render(<SaveBar reason={null} saving={false} onSave={onSave} onRevert={noop} onWhy={onWhy} />);
+    expect(screen.getByText("Не сохранено.")).toBeDefined();
+    await userEvent.click(screen.getByText("Почему"));
+    expect(onWhy).toHaveBeenCalledOnce();
     await userEvent.click(screen.getByText("Сохранить"));
     expect(onSave).toHaveBeenCalledOnce();
   });

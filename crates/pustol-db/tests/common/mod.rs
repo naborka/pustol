@@ -208,7 +208,7 @@ pub async fn draft_of(store: &Store, bar: BarId) -> Draft {
         zones: config.zones.iter().map(ToString::to_string).collect(),
         tables: config
             .active_tables()
-            .map(|table| TableDraft::Existing {
+            .map(|table| TableDraft {
                 id: table.id.0,
                 seats: table.seats,
                 zone: table.zone.to_string(),
@@ -249,9 +249,19 @@ pub fn guest_booking(
             user: account.id,
             name: account.first_name.clone(),
             username: account.username.clone(),
+            replacing: Vec::new(),
         },
         reminder: Some(reminder_wording),
     }
+}
+
+/// A guest's `request` saying it replaces exactly `ids`, as the guest's app would have said.
+pub fn replacing(mut request: NewBooking, ids: &[pustol_domain::BookingId]) -> NewBooking {
+    let Channel::Guest { replacing, .. } = &mut request.channel else {
+        panic!("only a guest's booking replaces anything");
+    };
+    *replacing = ids.to_vec();
+    request
 }
 
 /// A booking staff took by telephone or at the door.

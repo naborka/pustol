@@ -16,8 +16,9 @@
 
 import { useState, type ReactNode } from "react";
 
-import type { Limits, SettingsDraft, SettingsView, TableDraft } from "@/lib/api";
+import type { Limits, SettingsDraft, SettingsView } from "@/lib/api";
 import * as fmt from "@/lib/format";
+import { uuid } from "@/lib/ids";
 import {
   largestTable,
   lastArrivalMinutes,
@@ -61,6 +62,8 @@ type Ask = (change: Edit) => boolean;
 interface Context {
   draft: SettingsDraft;
   settings: SettingsView;
+  /** The settings counted each table's bookings for the evening on screen. */
+  countsShown: boolean;
   limits: Limits;
   editedWeekday: number;
   onEditWeekday: (weekday: number) => void;
@@ -93,6 +96,7 @@ export function sectionValue(section: Section, draft: SettingsDraft, weekday: nu
 export function SettingsScreen({
   settings,
   draft,
+  serviceDate,
   editedWeekday,
   onEdit,
   onEditWeekday,
@@ -101,6 +105,8 @@ export function SettingsScreen({
 }: {
   settings: SettingsView;
   draft: SettingsDraft;
+  /** The evening on screen. A table's bookings are counted only once the settings were read for it. */
+  serviceDate: fmt.IsoDate;
   editedWeekday: number;
   onEdit: (change: Edit) => void;
   onEditWeekday: (weekday: number) => void;
@@ -118,6 +124,7 @@ export function SettingsScreen({
   const context: Context = {
     draft,
     settings,
+    countsShown: settings.service_date === serviceDate,
     limits,
     editedWeekday,
     onEditWeekday,
@@ -433,7 +440,7 @@ function HoursSection({ ctx }: { ctx: Context }) {
 }
 
 function RoomSection({ ctx }: { ctx: Context }) {
-  const { draft, settings, limits, edit, allowed } = ctx;
+  const { draft, settings, countsShown, limits, edit, allowed } = ctx;
   const totalSeats = draft.tables.reduce((total, table) => total + table.seats, 0);
   const largest = largestTable(draft);
   /** The number a row that has only just been tapped into being will be given. */
@@ -446,12 +453,9 @@ function RoomSection({ ctx }: { ctx: Context }) {
       </Note>
 
       {draft.tables.map((table, index) => {
-        const existing =
-          table.kind === "existing"
-            ? settings.tables.find((stored) => stored.id === table.id)
-            : undefined;
+        const existing = settings.tables.find((stored) => stored.id === table.id);
         const number = existing?.number ?? provisional++;
-        const bookingsToday = existing?.bookings_today ?? 0;
+        const bookingsToday = countsShown ? (existing?.bookings_today ?? 0) : 0;
         const zoneIndex = draft.zones.indexOf(table.zone);
         const nextZone =
           draft.zones[(zoneIndex + 1) % Math.max(1, draft.zones.length)] ?? table.zone;
@@ -469,7 +473,7 @@ function RoomSection({ ctx }: { ctx: Context }) {
 
         return (
           <div
-            key={table.kind === "existing" ? table.id : `new-${index}`}
+            key={table.id}
             style={{
               display: "flex",
               alignItems: "center",
@@ -563,13 +567,14 @@ function RoomSection({ ctx }: { ctx: Context }) {
 
       <CardAction
         label="+ Добавить стол"
-        onClick={() =>
+        onClick={() => {
+          // Named outside the edit: an edit made while a save is on its way is made again on top of
+          // what the save stored, and must add the same table.
+          const id = uuid();
           edit((next) => {
-            const zone = next.zones[0] ?? "Зал";
-            const added: TableDraft = { kind: "new", seats: 4, zone };
-            next.tables.push(added);
-          })
-        }
+            next.tables.push({ id, seats: 4, zone: next.zones[0] ?? "Зал" });
+          });
+        }}
       />
 
       <Note>
@@ -818,22 +823,49 @@ function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
  *
  * Only then: a save button that is always there and usually inert teaches people to ignore it. When
  * the draft is illegal the button is inert and the line beside it names the first reason, so the
- * refusal arrives before the request rather than after it.
+ * refusal arrives before the request rather than after it. A save the server refused says so here
+ * until the next edit or save, with its reasons one tap away, whatever sheet came and went meanwhile.
  */
 export function SaveBar({
   reason,
   saving,
   onSave,
   onRevert,
+  onWhy,
 }: {
   reason: string | null;
   saving: boolean;
   onSave: () => void;
   onRevert: () => void;
+  /** Opens why the last save was refused; null when it was not. */
+  onWhy: (() => void) | null;
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
       {reason ? <Note tone="dest">Так сохранить нельзя. {reason}</Note> : null}
+      {onWhy ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: SPACE[2],
+          }}
+        >
+          <Note tone="dest">Не сохранено.</Note>
+          <Pressable
+            onClick={onWhy}
+            style={{
+              fontSize: TEXT.base,
+              fontWeight: 600,
+              color: "var(--link)",
+              padding: `0 ${SPACE[1]}px`,
+            }}
+          >
+            Почему
+          </Pressable>
+        </div>
+      ) : null}
       <div style={{ display: "flex", gap: SPACE[2] }}>
         <Pressable
           onClick={onRevert}

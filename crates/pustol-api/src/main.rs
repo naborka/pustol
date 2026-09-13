@@ -52,13 +52,7 @@ async fn main() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let inbox = tokio::spawn(
-        Inbox {
-            store: store.clone(),
-            bot: bot.clone(),
-            bar,
-            clock: Clock::System,
-        }
-        .run(shutdown_rx.clone()),
+        Inbox::new(store.clone(), bot.clone(), bar, Clock::System).run(shutdown_rx.clone()),
     );
     let outbox = tokio::spawn(worker::run(store, bot, Clock::System, shutdown_rx));
 

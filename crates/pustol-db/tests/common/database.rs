@@ -4,17 +4,28 @@
 //! database is named, made and cleared away.
 //!
 //! A test never drops its own database: its pool is still open when it returns, and a test that
-//! panics returns nowhere. Every database is named after the process that made it instead, and the
-//! first test of each process drops the databases of processes that have ended, so a suite leaves
-//! behind at most the databases of its own last run.
+//! panics returns nowhere. Every database is named after the second it was made instead, and the
+//! first test of each process drops the ones that are long abandoned.
+//!
+//! Abandoned is judged by the cluster alone, never by which processes this machine can see: a suite
+//! in another container or pid namespace is invisible from here, and its pid can be reused by an
+//! unrelated process. A database is dropped only when it is older than any run takes and nobody is
+//! connected to it, and without force, so a connection made in between keeps it.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pustol_db::Store;
 
 const PREFIX: &str = "pustol_t";
 
-static NEXT_DATABASE: AtomicI64 = AtomicI64::new(1);
+/// How old a test database with nobody connected has to be before it counts as abandoned.
+///
+/// Far longer than a whole suite takes, so a database made a moment ago by a run that has not
+/// connected to it yet is never taken for one left behind.
+pub const ABANDONED_AFTER: Duration = Duration::from_mins(30);
+
+static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
 static SWEPT: AtomicBool = AtomicBool::new(false);
 
 pub fn cluster_url() -> String {
@@ -37,29 +48,43 @@ fn pointing_at(url: &str, database: &str) -> String {
 
 /// A pool on the cluster's maintenance database, where databases are made and dropped.
 pub async fn maintenance() -> sqlx::PgPool {
-    let url = pointing_at(&cluster_url(), "postgres");
+    connect_to("postgres").await
+}
+
+/// A pool on one database of the cluster.
+pub async fn connect_to(database: &str) -> sqlx::PgPool {
+    let url = pointing_at(&cluster_url(), database);
     sqlx::PgPool::connect(&url)
         .await
         .unwrap_or_else(|error| panic!("no cluster at {url}: {error}\nrun scripts/pg.sh start"))
+}
+
+/// Seconds since the epoch, the clock database names are written in.
+pub fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// The name of a test database made at `made_at` by process `pid`, the `counter`th it made.
+pub fn database_name(made_at: u64, pid: u32, counter: u64) -> String {
+    format!("{PREFIX}{made_at}_{pid}_{counter}")
 }
 
 /// A migrated database of this test's own, with a pool belonging to this test's runtime.
 pub async fn fresh_store() -> Store {
     let admin = maintenance().await;
     if !SWEPT.swap(true, Ordering::SeqCst) {
-        sweep_ended_runs(&admin).await;
+        sweep_abandoned(&admin, unix_seconds()).await;
     }
-    let name = format!(
-        "{PREFIX}{}_{}",
-        std::process::id(),
-        NEXT_DATABASE.fetch_add(1, Ordering::Relaxed)
-    );
-    // `create database` takes no bind parameters, so the name has to be interpolated. It is built
-    // here from a process id and a counter and never from anything a caller supplies.
-    sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
-        .execute(&admin)
-        .await
-        .unwrap_or_else(|error| panic!("cannot create {name}: {error}"));
+    let name = create_database(&admin, || {
+        database_name(
+            unix_seconds(),
+            std::process::id(),
+            NEXT_DATABASE.fetch_add(1, Ordering::Relaxed),
+        )
+    })
+    .await;
     admin.close().await;
 
     let store = Store::connect(&pointing_at(&cluster_url(), &name), 12)
@@ -69,39 +94,70 @@ pub async fn fresh_store() -> Store {
     store
 }
 
-/// Drops every test database whose process has ended.
+/// Creates a database under the first name `next` offers that nobody has taken, and gives the name.
 ///
-/// A process is alive while `/proc/<pid>` exists. That sees only this machine's processes, so a
-/// suite running in another container against the same cluster would look ended; the cluster
-/// `scripts/pg.sh` starts is private to the machine that started it.
-pub async fn sweep_ended_runs(admin: &sqlx::PgPool) {
-    let names: Vec<String> =
-        sqlx::query_scalar("select datname from pg_database where datname like 'pustol\\_t%'")
-            .fetch_all(admin)
+/// The second, the pid and the counter keep the names of one machine apart, but two suites in
+/// different pid namespaces can be the same pid in the same second. Creating a database either takes
+/// the name or fails without touching anything, so a taken name is passed over for the next one.
+pub async fn create_database(admin: &sqlx::PgPool, mut next: impl FnMut() -> String) -> String {
+    loop {
+        let name = next();
+        // `create database` takes no bind parameters, so the name has to be interpolated. It is built
+        // from numbers by `database_name` and never from anything a caller supplies.
+        match sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
+            .execute(admin)
             .await
-            .expect("the cluster lists its databases");
-    for name in names {
-        let Some(pid) = process_of(&name) else {
-            continue;
-        };
-        if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-            continue;
+        {
+            Ok(_) => return name,
+            Err(error) if is_taken(&error) => {}
+            Err(error) => panic!("cannot create {name}: {error}"),
         }
-        // Interpolated for the same reason as `create database`; `process_of` has admitted only
-        // names made of letters, digits and underscores.
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "drop database if exists \"{name}\" with (force)"
-        )))
-        .execute(admin)
-        .await
-        .unwrap_or_else(|error| panic!("cannot drop {name}: {error}"));
     }
 }
 
-/// The process a test database was made by, or `None` for a name this suite never makes.
-fn process_of(name: &str) -> Option<u32> {
+/// Whether creating a database failed only because its name is taken. A concurrent creation under
+/// the same name can report the catalogue's unique index instead of the name itself.
+fn is_taken(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| code == "42P04" || code == "23505")
+}
+
+/// Drops every test database older than [`ABANDONED_AFTER`] at `now` that nobody is connected to.
+///
+/// Without force: a connection made after the list was read makes the drop fail, and that database
+/// is left for a later sweep.
+pub async fn sweep_abandoned(admin: &sqlx::PgPool, now: u64) {
+    let idle: Vec<String> = sqlx::query_scalar(
+        "select datname from pg_database d
+         where datname like 'pustol\\_t%'
+           and not exists (select 1 from pg_stat_activity a where a.datid = d.oid)",
+    )
+    .fetch_all(admin)
+    .await
+    .expect("the cluster lists its databases");
+    for name in idle {
+        let Some(made_at) = made_at(&name) else {
+            continue;
+        };
+        if now.saturating_sub(made_at) < ABANDONED_AFTER.as_secs() {
+            continue;
+        }
+        // Interpolated for the same reason as `create database`; `made_at` has admitted only names
+        // made of letters, digits and underscores.
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "drop database if exists \"{name}\""
+        )))
+        .execute(admin)
+        .await;
+    }
+}
+
+/// The second a test database was made, or `None` for a name this suite never makes.
+fn made_at(name: &str) -> Option<u64> {
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
-    name.strip_prefix(PREFIX)?.split_once('_')?.0.parse().ok()
+    name.strip_prefix(PREFIX)?.split('_').next()?.parse().ok()
 }

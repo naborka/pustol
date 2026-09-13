@@ -34,7 +34,7 @@ async fn closing_a_table_moves_the_party_sitting_at_it() {
     assert_eq!(outcome.reconciliation.outcome.moved.len(), 1);
     assert_eq!(outcome.reconciliation.outcome.moved[0].to_number, 2);
 
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store.evening(bar, thursday(), common::morning()).await.expect("reads");
     assert_eq!(shift.blocks.len(), 1);
     assert_eq!(shift.bookings[0].table_number, Some(2));
 }
@@ -123,7 +123,7 @@ async fn closing_a_whole_zone_reseats_what_it_can_and_strands_the_rest() {
     assert_eq!(outcome.reconciliation.outcome.moved, Vec::new(), "the room is full");
     assert_eq!(outcome.reconciliation.outcome.orphaned.len(), 1);
 
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store.evening(bar, thursday(), common::morning()).await.expect("reads");
     assert_eq!(
         shift
             .bookings
@@ -163,7 +163,7 @@ async fn opening_a_table_again_seats_the_party_that_was_left_without_one() {
     assert_eq!(reopened.reconciliation.outcome.moved.len(), 1);
     assert_eq!(reopened.reconciliation.outcome.moved[0].to_number, 1);
 
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store.evening(bar, thursday(), common::morning()).await.expect("reads");
     assert!(shift.blocks.is_empty());
     assert_eq!(shift.bookings[0].table_number, Some(1));
 }
@@ -182,7 +182,7 @@ async fn closing_the_same_table_twice_on_one_shift_is_harmless() {
         .await
         .expect("closing again is not an error");
 
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store.evening(bar, thursday(), common::morning()).await.expect("reads");
     assert_eq!(shift.blocks.len(), 1);
     assert_eq!(
         shift.blocks[0].reason, "Дождь",
@@ -317,7 +317,13 @@ async fn rebooking_stops_the_reminder_for_the_booking_it_replaced() {
         .await
         .expect("free");
     let second = store
-        .create_booking(&guest_booking(bar, &account, 1320, 2), morning())
+        .create_booking(
+            &common::replacing(
+                guest_booking(bar, &account, 1320, 2),
+                &[first.record.booking.id],
+            ),
+            morning(),
+        )
         .await
         .expect("free");
     assert_eq!(second.replaced, vec![first.record.booking.id]);

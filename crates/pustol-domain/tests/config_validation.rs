@@ -702,6 +702,96 @@ fn a_day_off_yesterday_cannot_be_the_running_shift() {
     );
 }
 
+/// The bar open 10:00 to `close_minutes` every day, with two-hour sittings.
+fn closing_at(close_minutes: i32) -> pustol_domain::config::ValidConfig {
+    let mut config = default_config();
+    config.week = WeekSchedule::uniform(DayHours {
+        open_minutes: 600,
+        close_minutes,
+        closed: false,
+    });
+    force(config)
+}
+
+fn date(year: i32, month: u32, day: u32) -> ServiceDay {
+    ServiceDay::new(chrono::NaiveDate::from_ymd_opt(year, month, day).expect("valid date"))
+}
+
+#[test]
+fn on_the_night_the_clocks_go_back_the_running_shift_never_goes_back() {
+    // Saturday 24 October 2026 closes at 02:30. At 03:00 on Sunday the clocks go back to 02:00, so
+    // 02:30 happens twice: at 00:30Z and again at 01:30Z. The shift ends the first time.
+    let config = closing_at(1590);
+    let saturday = date(2026, 10, 24);
+    let sunday = date(2026, 10, 25);
+    let read = [
+        (utc(2026, 10, 25, 0, 15), saturday),
+        (utc(2026, 10, 25, 0, 29), saturday),
+        (utc(2026, 10, 25, 0, 31), sunday),
+        (utc(2026, 10, 25, 0, 45), sunday),
+        (utc(2026, 10, 25, 1, 15), sunday),
+        (utc(2026, 10, 25, 1, 29), sunday),
+        (utc(2026, 10, 25, 1, 31), sunday),
+    ];
+    for (now, expected) in read {
+        assert_eq!(config.current_service_day(now), expected, "at {now}");
+    }
+}
+
+#[test]
+fn on_the_night_the_clocks_go_forward_the_shift_runs_until_its_last_sitting_ends() {
+    // Saturday 28 March 2026 closes at 03:00, and at 02:00 on Sunday the clocks jump to 03:00. The
+    // last sitting arrives at 01:00 (00:00Z) and holds its table two real hours, to 02:00Z.
+    let config = closing_at(1620);
+    let saturday = date(2026, 3, 28);
+    let read = [
+        (utc(2026, 3, 29, 0, 59), saturday),
+        (utc(2026, 3, 29, 1, 0), saturday),
+        (utc(2026, 3, 29, 1, 59), saturday),
+        (utc(2026, 3, 29, 2, 0), date(2026, 3, 29)),
+    ];
+    for (now, expected) in read {
+        assert_eq!(config.current_service_day(now), expected, "at {now}");
+    }
+}
+
+#[test]
+fn the_shift_stops_running_at_the_very_moment_its_last_sitting_is_over() {
+    // "Today" and "finished" answer one question about a close after midnight: a shift whose last
+    // sitting still holds its table is running, and one whose last sitting is over is not.
+    for (close_minutes, day) in [
+        (1560, thursday()),
+        (1590, date(2026, 10, 24)),
+        (1620, date(2026, 3, 28)),
+    ] {
+        let config = closing_at(close_minutes);
+        let last = booking(
+            1,
+            day,
+            close_minutes - config.turn_minutes,
+            2,
+            None,
+            config.turn_minutes,
+        );
+        let end = last.window.end();
+        let before = end - chrono::TimeDelta::minutes(1);
+        let next = day.checked_add_days(1).expect("in range");
+
+        assert!(!last.has_finished(before), "{close_minutes} on {day:?}");
+        assert_eq!(
+            config.current_service_day(before),
+            day,
+            "{close_minutes} on {day:?}"
+        );
+        assert!(last.has_finished(end), "{close_minutes} on {day:?}");
+        assert_eq!(
+            config.current_service_day(end),
+            next,
+            "{close_minutes} on {day:?}"
+        );
+    }
+}
+
 #[test]
 fn the_last_arrival_on_the_spring_clock_change_is_not_a_conflict_with_the_hours_that_sold_it() {
     // Saturday 28 March 2026: at 02:00 on Sunday the clocks jump to 03:00. A two-hour booking at

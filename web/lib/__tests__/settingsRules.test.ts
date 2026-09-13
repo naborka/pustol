@@ -39,9 +39,9 @@ function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
     })),
     zones: ["Бар", "Зал", "Терраса"],
     tables: [
-      { kind: "existing", id: "t1", seats: 2, zone: "Бар" },
-      { kind: "existing", id: "t2", seats: 4, zone: "Зал" },
-      { kind: "existing", id: "t3", seats: 6, zone: "Терраса" },
+      { id: "t1", seats: 2, zone: "Бар" },
+      { id: "t2", seats: 4, zone: "Зал" },
+      { id: "t3", seats: 6, zone: "Терраса" },
     ],
     turn_minutes: 120,
     slot_step_minutes: 30,
@@ -133,13 +133,13 @@ describe("what makes a proposal legal", () => {
   it("refuses an empty room and an unreasonable table", () => {
     expect(kinds(draft({ tables: [] }))).toContain("no_tables");
     const huge = draft();
-    huge.tables[0] = { kind: "existing", id: "t1", seats: 20, zone: "Бар" };
+    huge.tables[0] = { id: "t1", seats: 20, zone: "Бар" };
     expect(kinds(huge)).toContain("seats_out_of_range");
   });
 
   it("refuses a table standing in a zone the bar does not have", () => {
     const stray = draft();
-    stray.tables[0] = { kind: "existing", id: "t1", seats: 2, zone: "Подвал" };
+    stray.tables[0] = { id: "t1", seats: 2, zone: "Подвал" };
     expect(kinds(stray)).toContain("unknown_zone");
   });
 

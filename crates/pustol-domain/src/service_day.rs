@@ -165,6 +165,20 @@ pub fn resolve(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, T
     }
 }
 
+/// Resolves a wall-clock minute that marks a boundary rather than an arrival.
+///
+/// Exactly [`resolve`], except for a minute the spring clock change skips: nobody can arrive at a
+/// time that never happens, but a boundary set there still passes, at the moment the clocks jump
+/// over it.
+pub fn resolve_boundary(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
+    match resolve(day, minutes, tz) {
+        Err(skipped @ TimeError::LocalTimeSkipped { .. }) => (1..=24 * 60)
+            .find_map(|later| resolve(day, minutes + later, tz).ok())
+            .ok_or(skipped),
+        resolved => resolved,
+    }
+}
+
 /// Wall-clock minutes from the start of `day` to `instant`, the inverse of [`resolve`].
 ///
 /// The result may exceed 1440 for a shift that runs past midnight, and is negative for an
@@ -247,6 +261,20 @@ mod tests {
         assert_eq!(
             resolve(day(2026, 7, 30), MAX_SERVICE_MINUTE + 1, BELGRADE),
             Err(TimeError::MinutesOutOfRange(MAX_SERVICE_MINUTE + 1))
+        );
+    }
+
+    #[test]
+    fn a_boundary_the_spring_clock_change_skips_passes_when_the_clocks_jump() {
+        // Belgrade jumps 02:00 -> 03:00 on 2026-03-29, at 01:00Z.
+        assert_eq!(
+            resolve_boundary(day(2026, 3, 29), 2 * 60 + 30, BELGRADE),
+            Ok(utc(2026, 3, 29, 1, 0))
+        );
+        assert_eq!(
+            resolve_boundary(day(2026, 10, 25), 2 * 60 + 30, BELGRADE),
+            resolve(day(2026, 10, 25), 2 * 60 + 30, BELGRADE),
+            "anything else resolves as an arrival does"
         );
     }
 

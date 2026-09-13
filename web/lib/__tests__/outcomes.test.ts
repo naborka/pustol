@@ -9,8 +9,42 @@ import {
   attendanceOutcome,
   closuresToRestore,
   reconciliationReport,
+  refusalOf,
   strandedLines,
 } from "../outcomes";
+
+describe("a refused settings save, kept for «Почему»", () => {
+  it("names the bookings a change would strand, and why they stand", () => {
+    expect(
+      refusalOf({
+        code: "would_strand_bookings",
+        message: "",
+        detail: { conflicts: [{ guest_name: "Саша", start_minutes: 1_260 }, { guest_name: "Глеб" }] },
+      }),
+    ).toEqual({
+      lead: "Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их — тогда настройку можно будет сохранить.",
+      reasons: ["Саша · 21:00", "Глеб"],
+    });
+  });
+
+  it("lists what the server found wrong with the values, without calling them bookings", () => {
+    expect(
+      refusalOf({
+        code: "settings_invalid",
+        message: "",
+        detail: { reasons: ["Стол 1: столько мест не бывает."] },
+      }),
+    ).toEqual({
+      lead: "Сервер не принял эти значения. Исправьте их и сохраните снова.",
+      reasons: ["Стол 1: столько мест не бывает."],
+    });
+  });
+
+  it("is nothing for a failure that has no reasons to keep", () => {
+    expect(refusalOf({ code: "settings_changed", message: "" })).toBeNull();
+    expect(refusalOf({ code: "network", message: "" })).toBeNull();
+  });
+});
 
 function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
   return {

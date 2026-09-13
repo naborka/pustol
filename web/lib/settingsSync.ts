@@ -1,22 +1,19 @@
 /**
  * Settings that change under a manager's edits.
  *
- * The screen holds three things: the settings as the server last gave them, the proposal those
- * settings make untouched (`base`), and the manager's proposal (`draft`). Whatever arrives — a
- * reread, the reread after a save refused as stale, a save's own answer — is folded in at the moment
- * it arrives, against the draft as it is then, so an edit typed while a read was loading is never
- * the thing that gets lost. Nothing older than what is on screen ever replaces it.
+ * The screen holds two things: the settings as the server last gave them, and the manager's
+ * proposal (`draft`). An edit is measured against the proposal those settings make untouched, never
+ * against a copy kept beside them, so the manager's own save is never mistaken for somebody else's.
+ * Whatever arrives — a reread, the reread after a save refused as stale, a save's own answer — is
+ * folded in at the moment it arrives, against the draft as it is then, so an edit typed while a read
+ * was loading is never the thing that gets lost. Nothing older than what is on screen replaces it.
  */
 
 import { draftOf, type SettingsDraft, type SettingsView } from "./api";
-import type { IsoDate } from "./format";
 import { copyDraft, differs, edited, type Edit } from "./settingsRules";
 
 export interface SettingsPair {
-  /** The evening the settings were read for: only the per-table counts depend on it. */
-  date: IsoDate;
   settings: SettingsView;
-  base: SettingsDraft;
   draft: SettingsDraft;
 }
 
@@ -74,12 +71,12 @@ export function compareVersions(left: string, right: string): number {
 }
 
 /** The settings as they came, with nothing edited. */
-export function fresh(date: IsoDate, settings: SettingsView): SettingsPair {
-  return { date, settings, base: draftOf(settings), draft: draftOf(settings) };
+export function fresh(settings: SettingsView): SettingsPair {
+  return { settings, draft: draftOf(settings) };
 }
 
 export function isDirty(pair: SettingsPair): boolean {
-  return differs(pair.draft, pair.base);
+  return differs(pair.draft, draftOf(pair.settings));
 }
 
 function same(left: unknown, right: unknown): boolean {
@@ -111,17 +108,16 @@ export function mergeDrafts(
 /** Settings read from the server, folded into what is on screen, and what to tell the manager. */
 export function received(
   current: SettingsPair | null,
-  date: IsoDate,
   next: SettingsView,
 ): { pair: SettingsPair; notice: string | null } {
-  if (current === null) return { pair: fresh(date, next), notice: null };
+  if (current === null) return { pair: fresh(next), notice: null };
   const newer = compareVersions(next.version, current.settings.version);
   if (newer < 0) return { pair: current, notice: null };
-  if (!isDirty(current)) return { pair: fresh(date, next), notice: null };
-  if (newer === 0) return { pair: { ...current, date, settings: next }, notice: null };
+  if (!isDirty(current)) return { pair: fresh(next), notice: null };
+  if (newer === 0) return { pair: { ...current, settings: next }, notice: null };
 
-  const { draft, conflicts } = mergeDrafts(current.base, current.draft, draftOf(next));
-  const pair = { date, settings: next, base: draftOf(next), draft };
+  const { draft, conflicts } = mergeDrafts(draftOf(current.settings), current.draft, draftOf(next));
+  const pair = { settings: next, draft };
   if (conflicts.length > 0) {
     const fields = conflicts.map((field) => FIELD_NAME[field]).join(", ");
     return {
@@ -138,23 +134,16 @@ export function received(
 }
 
 /**
- * A save's own answer. The edits made while it was on its way are made again on top of what it
- * stored, so a table the save has just given an id is changed rather than added a second time.
+ * A save's own answer, whatever evening is on screen now: the settings are the bar's, and the counts
+ * say which evening they are for. The edits made while it was on its way are made again on top of
+ * what it stored, which is the server's own wording of what was sent.
  */
 export function savedInto(
   current: SettingsPair | null,
-  date: IsoDate,
-  sent: SettingsDraft,
   stored: SettingsView,
   meanwhile: Edit[],
 ): SettingsPair {
-  if (current === null) return fresh(date, stored);
+  if (current === null) return fresh(stored);
   if (compareVersions(stored.version, current.settings.version) < 0) return current;
-  const untouched = !differs(current.draft, sent);
-  return {
-    date,
-    settings: stored,
-    base: draftOf(stored),
-    draft: untouched ? draftOf(stored) : meanwhile.reduce(edited, draftOf(stored)),
-  };
+  return { settings: stored, draft: meanwhile.reduce(edited, draftOf(stored)) };
 }

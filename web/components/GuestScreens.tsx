@@ -61,6 +61,28 @@ export function heldAfter(
   );
 }
 
+/**
+ * Whether a booking can be moved from its card. A held no-show is replaced only by a booking on its
+ * own evening, so only while that evening still takes arrivals by the bar's clock.
+ */
+export function movable(
+  held: GuestBooking,
+  bar: Pick<BarView, "today" | "now_minutes" | "last_arrival_minutes">,
+): boolean {
+  switch (held.rebooking_replaces) {
+    case "any_evening":
+      return true;
+    case "same_evening":
+      return (
+        held.service_date === bar.today &&
+        bar.last_arrival_minutes !== null &&
+        bar.now_minutes < bar.last_arrival_minutes
+      );
+    case null:
+      return false;
+  }
+}
+
 /** Whether the guest already holds `serviceDate` with a booking a new one there would not replace. */
 export function heldOn(bookings: GuestBooking[], serviceDate: fmt.IsoDate): boolean {
   return bookings.some(
@@ -140,7 +162,7 @@ export function BookingCard({
 }: {
   booking: GuestBooking;
   bar: BarView;
-  /** Null when a new booking would never replace this one, so there is nothing to move it with. */
+  /** Null when no booking the guest can make now would replace this one. */
   onMove: (() => void) | null;
   onCancel: () => void;
 }) {
@@ -289,7 +311,7 @@ export function HomeScreen({
             key={held.id}
             booking={held}
             bar={bar}
-            onMove={held.rebooking_replaces === null ? null : () => onMove(held)}
+            onMove={movable(held, bar) ? () => onMove(held) : null}
             onCancel={() => onCancel(held)}
           />
         ))

@@ -25,6 +25,7 @@ import type {
 } from "@/lib/api";
 import * as fmt from "@/lib/format";
 import { tableOffers, walkInOffers } from "@/lib/occupancy";
+import type { Refusal } from "@/lib/outcomes";
 import type { TableOffer } from "@/lib/occupancy";
 import { trimmed } from "@/lib/settingsRules";
 import { standingOf, statusLabel } from "@/lib/status";
@@ -244,9 +245,7 @@ export function BookingSheet({
 
         <CardAction
           label={
-            booking.reachable_by_bot
-              ? "Написать гостю"
-              : "Гость без Telegram — написать нельзя"
+            booking.reachable_by_bot ? "Написать гостю" : "Бот не может написать гостю"
           }
           disabled={!booking.reachable_by_bot}
           onClick={onOpenTemplates}
@@ -385,25 +384,23 @@ export function ConfirmSheet({
   );
 }
 
+/** Why the last settings save was refused, in the words the kind of refusal needs. */
 export function ConflictSheet({
   open,
-  reasons,
+  refusal,
   onClose,
 }: {
   open: boolean;
-  reasons: string[];
+  refusal: Refusal | null;
   onClose: () => void;
 }) {
   return (
     <Sheet open={open} onClose={onClose} title="Так сохранить нельзя">
       <div style={{ display: "flex", flexDirection: "column", gap: SPACE[3] }}>
         <SheetTitle tone="destructive">Так сохранить нельзя</SheetTitle>
-        <Note>
-          Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их — тогда
-          настройку можно будет сохранить.
-        </Note>
+        <Note>{refusal?.lead}</Note>
         <div style={{ display: "flex", flexDirection: "column", gap: SPACE[1] + 2 }}>
-          {reasons.map((reason) => (
+          {(refusal?.reasons ?? []).map((reason) => (
             <span
               key={reason}
               style={{
@@ -1059,7 +1056,7 @@ export function GuestCancelSheet({
       restated={`${fmt.whenLabel(booking.service_date, today, booking.start_minutes)} · ${fmt.guests(
         booking.party_size,
       )}`}
-      detail="Стол сразу уйдёт другим гостям. Вернуть его получится, только если он останется свободен."
+      detail="Стол сразу уйдёт другим гостям — вернуть эту бронь не получится."
       confirmLabel="Отменить бронь"
       onConfirm={onConfirm}
       onClose={onClose}

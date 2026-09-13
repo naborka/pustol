@@ -1,104 +1,146 @@
 /**
  * Which answers reach the screen, and which failures it admits to — one rule for every read.
  *
- * Every read and every write that puts its own answer on screen gets a number, and every read names
- * its question: the evening, the party and the date, the session. An answer is applied when the
- * screen still asks its question and it is newer than the answer already there — not only when it
- * is the newest asked, which dropped a good answer whenever a background tick overtook it and then
- * failed. A failure is a fact about one question, derived when drawn rather than a flag something
- * must remember to clear.
+ * Every read names its question — the evening, the party and the date, the session — and gets a
+ * number. Each question keeps its own last value and its own last failure, so an answer about
+ * tomorrow never decides whether an answer about tonight is news: one number shared by every
+ * question dropped a good answer whenever another question had answered in between.
+ *
+ * An answer replaces the value on record when it was asked later, or, for a question the server
+ * orders itself (a room carries a version), when the server says it is at least as new. A failure
+ * is recorded only when it was asked after the value on record, is cleared by any answer applied
+ * after it, and is shown only while nothing else is on its way for that question.
  */
 
 import type { ApiFailure } from "./errors";
 
-export interface Ledger {
-  /** The number the newest read or write was given. */
-  readonly asked: number;
-  /** The number of the answer on screen; 0 before the first. */
-  readonly applied: number;
-  readonly inFlight: readonly { readonly number: number; readonly key: string }[];
-  /** The newest failure of each question. */
-  readonly failures: Readonly<Record<string, { readonly number: number; readonly failure: ApiFailure }>>;
+/** Whether `next` may replace `shown`. Without one, the later ask wins. */
+export type Newer<T> = (next: T, shown: T) => boolean;
+
+export interface Entry<T> {
+  /** The value on record, and the number of the read or write that brought it. */
+  readonly value?: { readonly number: number; readonly data: T };
+  readonly failure?: { readonly number: number; readonly failure: ApiFailure };
+  /** The newest read of this question that answered, applied or not; 0 before any. */
+  readonly answered: number;
 }
 
-export const EMPTY_LEDGER: Ledger = { asked: 0, applied: 0, inFlight: [], failures: {} };
+export interface Ledger<T> {
+  /** The number the newest read, write or mark was given. */
+  readonly asked: number;
+  readonly inFlight: readonly { readonly number: number; readonly key: string }[];
+  readonly entries: Readonly<Record<string, Entry<T>>>;
+}
+
+export const EMPTY_LEDGER: Ledger<never> = { asked: 0, inFlight: [], entries: {} };
+
+const NOTHING: Entry<never> = { answered: 0 };
+
+function entryOf<T>(ledger: Ledger<T>, key: string): Entry<T> {
+  return ledger.entries[key] ?? NOTHING;
+}
+
+function withEntry<T>(ledger: Ledger<T>, key: string, entry: Entry<T>): Ledger<T> {
+  return { ...ledger, entries: { ...ledger.entries, [key]: entry } };
+}
+
+function landed<T>(ledger: Ledger<T>, number: number): Ledger<T> {
+  return { ...ledger, inFlight: ledger.inFlight.filter((read) => read.number !== number) };
+}
 
 /** A read of `key` starting, and the number it goes by. */
-export function begun(ledger: Ledger, key: string): [Ledger, number] {
+export function begun<T>(ledger: Ledger<T>, key: string): [Ledger<T>, number] {
   const number = ledger.asked + 1;
   return [{ ...ledger, asked: number, inFlight: [...ledger.inFlight, { number, key }] }, number];
 }
 
-function landed(ledger: Ledger, number: number): Ledger {
-  return { ...ledger, inFlight: ledger.inFlight.filter((read) => read.number !== number) };
+/** A number later than every read asked so far and earlier than every read asked after. */
+export function marked<T>(ledger: Ledger<T>): [Ledger<T>, number] {
+  const number = ledger.asked + 1;
+  return [{ ...ledger, asked: number }, number];
 }
 
-/** A read answered: applied when the screen still asks `key` and nothing newer is on it. */
-export function answered(
-  ledger: Ledger,
+/** A read of `key` answered with `data`: applied when it is newer than the value on record. */
+export function answered<T>(
+  ledger: Ledger<T>,
   number: number,
   key: string,
-  keyNow: string | null,
-): { ledger: Ledger; apply: boolean } {
+  data: T,
+  newer?: Newer<T>,
+): { ledger: Ledger<T>; apply: boolean } {
   const next = landed(ledger, number);
-  const apply = key === keyNow && number > ledger.applied;
-  return { ledger: apply ? { ...next, applied: number } : next, apply };
+  const entry = entryOf(next, key);
+  const shown = entry.value;
+  const apply =
+    shown === undefined || (newer ? newer(data, shown.data) : number > shown.number);
+  const answeredUpTo = Math.max(entry.answered, number);
+  if (!apply) return { ledger: withEntry(next, key, { ...entry, answered: answeredUpTo }), apply };
+  return {
+    ledger: withEntry(next, key, {
+      value: { number: Math.max(number, shown?.number ?? 0), data },
+      answered: answeredUpTo,
+    }),
+    apply,
+  };
 }
 
-function recorded(ledger: Ledger, number: number, key: string, failure: ApiFailure): Ledger {
-  const known = ledger.failures[key];
-  if (known && known.number > number) return ledger;
-  return { ...ledger, failures: { ...ledger.failures, [key]: { number, failure } } };
-}
-
-/** A read of `key` failed. */
-export function failed(ledger: Ledger, number: number, key: string, failure: ApiFailure): Ledger {
-  return recorded(landed(ledger, number), number, key, failure);
-}
-
-/** A failure that did not come from a read of `key` but says `key` is broken, as of now. */
-export function failedNow(ledger: Ledger, key: string, failure: ApiFailure): [Ledger, number] {
-  const number = ledger.asked + 1;
-  return [recorded({ ...ledger, asked: number }, number, key, failure), number];
+/** A read of `key` failed: recorded only when it was asked after the value on record. */
+export function failed<T>(
+  ledger: Ledger<T>,
+  number: number,
+  key: string,
+  failure: ApiFailure,
+): { ledger: Ledger<T>; recorded: boolean } {
+  const next = landed(ledger, number);
+  const entry = entryOf(next, key);
+  const recorded = number > (entry.value?.number ?? 0);
+  if (!recorded || (entry.failure && entry.failure.number > number)) {
+    return { ledger: next, recorded };
+  }
+  return { ledger: withEntry(next, key, { ...entry, failure: { number, failure } }), recorded };
 }
 
 /**
- * A write's own answer: on screen at once when the screen asks `key`, newer than every read asked
- * before it — each of those was asked before the write happened.
+ * A write's own answer about `key`, made on the value on record: newer than every read asked before
+ * it, unless the question is ordered by the server and the server says otherwise.
  */
-export function written(
-  ledger: Ledger,
+export function written<T>(
+  ledger: Ledger<T>,
   key: string,
-  keyNow: string | null,
-): { ledger: Ledger; apply: boolean } {
-  if (key !== keyNow) return { ledger, apply: false };
-  const number = ledger.asked + 1;
-  return { ledger: { ...ledger, asked: number, applied: number }, apply: true };
+  change: (current: T | undefined) => T | undefined,
+  newer?: Newer<T>,
+): { ledger: Ledger<T>; apply: boolean; data: T | undefined } {
+  const entry = entryOf(ledger, key);
+  const data = change(entry.value?.data);
+  const apply =
+    data !== undefined && (entry.value === undefined || !newer || newer(data, entry.value.data));
+  if (!apply) return { ledger, apply, data };
+  const [next, number] = marked(ledger);
+  return {
+    ledger: withEntry(next, key, { value: { number, data }, answered: entry.answered }),
+    apply,
+    data,
+  };
 }
 
 /** Whether a read of `key` is on its way. */
-export function pendingOn(ledger: Ledger, key: string | null): boolean {
+export function pendingOn<T>(ledger: Ledger<T>, key: string | null): boolean {
   return ledger.inFlight.some((read) => read.key === key);
 }
 
-/** The failure to show for the question on screen, if it is still the latest word on it. */
-export function failureOn(ledger: Ledger, key: string | null): ApiFailure | null {
+/** The value on record for `key`, or null. */
+export function valueOn<T>(ledger: Ledger<T>, key: string | null): T | null {
   if (key === null) return null;
-  const known = ledger.failures[key];
-  if (!known || known.number <= ledger.applied || pendingOn(ledger, key)) return null;
-  return known.failure;
+  return entryOf(ledger, key).value?.data ?? null;
 }
 
-/**
- * Whether a failed read is worth a word. A refresh nobody asked for never is: a toast every thirty
- * seconds because the bar's Wi-Fi dropped buries the one that matters.
- */
-export function shouldTell(
-  ledger: Ledger,
-  number: number,
-  key: string,
-  keyNow: string | null,
-  quiet: boolean,
-): boolean {
-  return !quiet && key === keyNow && number > ledger.applied;
+/** The failure to show for `key`: the latest word on it, once nothing else is on its way. */
+export function failureOn<T>(ledger: Ledger<T>, key: string | null): ApiFailure | null {
+  if (key === null || pendingOn(ledger, key)) return null;
+  return entryOf(ledger, key).failure?.failure ?? null;
+}
+
+/** The number of the newest read of `key` that answered; 0 before any. */
+export function answeredUpTo<T>(ledger: Ledger<T>, key: string | null): number {
+  return key === null ? 0 : entryOf(ledger, key).answered;
 }

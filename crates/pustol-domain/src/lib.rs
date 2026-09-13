@@ -38,7 +38,7 @@ pub use config::{
     schedule_conflicts,
 };
 pub use draft::{DayHoursDraft, Draft, DraftError, StaffDraft, TableDraft};
-pub use rebooking::Rebooking;
+pub use rebooking::{HoldingConflict, Rebooking};
 pub use reconcile::{Reconciliation, Reseating};
 pub use schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 pub use service_day::{Interval, ServiceDay, TimeError, minutes_within, resolve};

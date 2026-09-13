@@ -8,7 +8,7 @@
 
 import type { Attendance, Reconciliation, ShiftBooking } from "./api";
 import { time } from "./format";
-import type { StrandedBooking } from "./errors";
+import { invalidReasons, strandedBookings, type ApiFailure, type StrandedBooking } from "./errors";
 
 /** Something the app just did, and — where the act is reversible — the way back. */
 export interface Outcome {
@@ -92,4 +92,27 @@ export function strandedLines(stranded: StrandedBooking[]): string[] {
       ? booking.guestName
       : `${booking.guestName} · ${time(booking.startMinutes)}`,
   );
+}
+
+/** Why a settings save was refused, kept until the next edit or save so it can be read again. */
+export interface Refusal {
+  lead: string;
+  reasons: string[];
+}
+
+export function refusalOf(failure: ApiFailure): Refusal | null {
+  switch (failure.code) {
+    case "would_strand_bookings":
+      return {
+        lead: "Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их — тогда настройку можно будет сохранить.",
+        reasons: strandedLines(strandedBookings(failure)),
+      };
+    case "settings_invalid":
+      return {
+        lead: "Сервер не принял эти значения. Исправьте их и сохраните снова.",
+        reasons: invalidReasons(failure),
+      };
+    default:
+      return null;
+  }
 }

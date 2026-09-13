@@ -244,7 +244,13 @@ async fn booking_again_replaces_the_booking_the_guest_had_not_yet_started() {
         .await
         .expect("free");
     let second = store
-        .create_booking(&guest_booking(bar, &account, 1320, 4), morning())
+        .create_booking(
+            &common::replacing(
+                guest_booking(bar, &account, 1320, 4),
+                &[first.record.booking.id],
+            ),
+            morning(),
+        )
         .await
         .expect("free");
 
@@ -301,7 +307,7 @@ async fn booking_again_does_not_take_the_table_from_a_guest_already_sitting_at_i
     );
 
     let still_seated = store
-        .shift(bar, thursday())
+        .evening(bar, thursday(), common::morning())
         .await
         .expect("reads")
         .bookings
@@ -353,7 +359,7 @@ async fn only_one_of_many_guests_racing_for_the_last_table_gets_it() {
         }
     }
 
-    let live = store.shift(bar, thursday()).await.expect("reads").bookings;
+    let live = store.evening(bar, thursday(), common::morning()).await.expect("reads").bookings;
     assert_eq!(live.len(), 1, "and the room holds exactly one booking");
 }
 
@@ -757,7 +763,7 @@ async fn a_booking_cannot_be_moved_onto_a_table_that_is_not_free_for_it() {
     }
     assert_eq!(
         store
-            .shift(bar, thursday())
+            .evening(bar, thursday(), common::morning())
             .await
             .expect("reads")
             .bookings
@@ -937,7 +943,7 @@ async fn only_one_of_many_walk_ins_racing_for_the_last_table_gets_it() {
             );
         }
     }
-    let live = store.shift(bar, thursday()).await.expect("reads").bookings;
+    let live = store.evening(bar, thursday(), common::morning()).await.expect("reads").bookings;
     assert_eq!(live.len(), 1);
 }
 
@@ -955,15 +961,15 @@ async fn a_note_is_written_rubbed_out_and_never_longer_than_a_row() {
     assert_eq!(created.record.note, None);
 
     let noted = store
-        .set_note(bar, id, Some("  День рождения  "))
+        .set_note(bar, id, Some("  День рождения  "), morning())
         .await
         .expect("written");
-    assert_eq!(noted.note.as_deref(), Some("День рождения"));
+    assert_eq!(noted.record.note.as_deref(), Some("День рождения"));
 
-    let blanked = store.set_note(bar, id, Some("   ")).await.expect("rubbed out");
-    assert_eq!(blanked.note, None, "whitespace is not a note");
+    let blanked = store.set_note(bar, id, Some("   "), morning()).await.expect("rubbed out");
+    assert_eq!(blanked.record.note, None, "whitespace is not a note");
 
-    let refused = store.set_note(bar, id, Some(&"я".repeat(121))).await;
+    let refused = store.set_note(bar, id, Some(&"я".repeat(121)), morning()).await;
     assert!(
         matches!(refused, Err(Error::NoteTooLong { .. })),
         "got {refused:?}"
@@ -1190,7 +1196,7 @@ async fn a_guest_of_one_bar_is_invisible_to_another() {
     );
     assert!(
         store
-            .shift(second_bar, thursday())
+            .evening(second_bar, thursday(), common::morning())
             .await
             .expect("reads")
             .bookings
@@ -1220,7 +1226,7 @@ async fn the_shift_view_reports_the_bookings_and_the_tables_that_are_shut() {
         .await
         .expect("closed");
 
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store.evening(bar, thursday(), common::morning()).await.expect("reads");
     assert_eq!(shift.bookings.len(), 1);
     assert_eq!(shift.blocks.len(), 2);
     assert!(shift.blocks.iter().all(|block| block.reason == "Дождь"));
@@ -1254,7 +1260,7 @@ async fn a_booking_at_one_in_the_morning_belongs_to_the_evening_it_started_in() 
     );
     assert!(
         store
-            .shift(bar, thursday())
+            .evening(bar, thursday(), common::morning())
             .await
             .expect("reads")
             .bookings
@@ -1523,7 +1529,12 @@ async fn a_seated_guest_holds_tonight_and_their_plan_for_another_evening_is_set_
         "for anybody else Friday is sold out"
     );
 
-    let mut again = guest_booking(bar, &account, 1080, 2);
+    // Asked honestly, as the app asks: booking tonight would replace their Friday plan, and tonight
+    // is still refused.
+    let mut again = common::replacing(
+        guest_booking(bar, &account, 1080, 2),
+        &[planned.record.booking.id],
+    );
     again.service_day = thursday();
     let refused = store.create_booking(&again, now).await;
     assert!(
@@ -1702,34 +1713,148 @@ async fn moving_only_the_table_or_the_party_keeps_what_staff_recorded() {
 }
 
 #[tokio::test]
-async fn a_test_database_left_behind_by_a_run_that_has_ended_is_dropped() {
-    let _own = store().await;
-    let mut child = std::process::Command::new("true")
-        .spawn()
-        .expect("a process");
-    let ended = child.id();
-    child.wait().expect("it ends");
-    let admin = common::database::maintenance().await;
-    let left_behind = format!("pustol_t{ended}_left_behind");
-    let running = format!("pustol_t{}_still_running", std::process::id());
-    for name in [&left_behind, &running] {
-        sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
-            .execute(&admin)
+async fn an_evening_is_one_moment_of_the_room_whatever_commits_while_it_is_read() {
+    // A version read a moment after the bookings would call an older room newer than it is, and a
+    // screen that keeps the newest evening would keep that one.
+    let store = store().await;
+    let (bar, config) = default_bar(&store).await;
+    let before = store
+        .evening(bar, thursday(), morning())
+        .await
+        .expect("read");
+
+    // Another transaction holds the version still, so the reading waits there, having already read
+    // the bookings. While it waits, that transaction takes a booking and commits.
+    let mut other = store.pool().begin().await.expect("begun");
+    sqlx::query("lock table room_version in access exclusive mode")
+        .execute(&mut *other)
+        .await
+        .expect("locked");
+    let reading = tokio::spawn({
+        let store = store.clone();
+        async move { store.evening(bar, thursday(), morning()).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_locks
+                 where relation = 'room_version'::regclass and not granted",
+            )
+            .fetch_one(store.pool())
             .await
-            .expect("created");
+            .expect("counted");
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reading waits for the version");
+    sqlx::query(
+        "insert into booking (bar_id, table_id, service_date, starts_at, ends_at, party_size,
+                              guest_name, source)
+         values ($1, $2, $3, $4, $5, 2, 'Пётр', 'staff')",
+    )
+    .bind(bar)
+    .bind(config.tables[0].id.0)
+    .bind(thursday().date())
+    .bind(at(thursday(), 1200))
+    .bind(at(thursday(), 1320))
+    .execute(&mut *other)
+    .await
+    .expect("booked");
+    other.commit().await.expect("committed");
+
+    let evening = reading.await.expect("did not panic").expect("read");
+    let after = store
+        .evening(bar, thursday(), morning())
+        .await
+        .expect("read");
+    assert!(evening.bookings.is_empty());
+    assert_eq!(
+        evening.version, before.version,
+        "the version is the one the bookings it came with were read at"
+    );
+    assert_eq!(after.bookings.len(), 1);
+    assert!(after.version > evening.version);
+}
+
+mod test_databases {
+    use crate::common::database::{
+        ABANDONED_AFTER, connect_to, create_database, database_name, maintenance, sweep_abandoned,
+        unix_seconds,
+    };
+
+    /// A pid no process of this machine has, and a counter no other test draws, so the names these
+    /// tests make are theirs alone.
+    fn unused_name(made_at: u64) -> String {
+        database_name(made_at, u32::MAX, uuid::Uuid::new_v4().as_u64_pair().0)
     }
 
-    common::database::sweep_ended_runs(&admin).await;
-
-    let remaining: Vec<String> =
-        sqlx::query_scalar("select datname from pg_database where datname = any($1::text[])")
-            .bind(vec![left_behind.clone(), running.clone()])
-            .fetch_all(&admin)
+    async fn exists(admin: &sqlx::PgPool, name: &str) -> bool {
+        sqlx::query_scalar("select exists (select 1 from pg_database where datname = $1)")
+            .bind(name)
+            .fetch_one(admin)
             .await
-            .expect("listed");
-    assert_eq!(remaining, vec![running.clone()]);
-    sqlx::query(sqlx::AssertSqlSafe(format!("drop database \"{running}\"")))
-        .execute(&admin)
+            .expect("listed")
+    }
+
+    async fn drop_database(admin: &sqlx::PgPool, name: &str) {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "drop database if exists \"{name}\" with (force)"
+        )))
+        .execute(admin)
         .await
         .expect("dropped");
+    }
+
+    #[tokio::test]
+    async fn a_young_test_database_nobody_is_connected_to_is_kept() {
+        let admin = maintenance().await;
+        let now = unix_seconds();
+        let young = create_database(&admin, || unused_name(now)).await;
+
+        sweep_abandoned(&admin, now).await;
+
+        assert!(exists(&admin, &young).await, "a run may not have connected to it yet");
+        drop_database(&admin, &young).await;
+    }
+
+    #[tokio::test]
+    async fn an_old_test_database_is_dropped_only_once_nobody_is_connected_to_it() {
+        // Another run, in a container this machine cannot see into, is still using it.
+        let admin = maintenance().await;
+        let now = unix_seconds();
+        let old = create_database(&admin, || {
+            unused_name(now - ABANDONED_AFTER.as_secs() - 60)
+        })
+        .await;
+        let user = connect_to(&old).await;
+        let held = user.acquire().await.expect("connected");
+
+        sweep_abandoned(&admin, now).await;
+        assert!(exists(&admin, &old).await, "somebody is connected to it");
+
+        drop(held);
+        user.close().await;
+        sweep_abandoned(&admin, now).await;
+        assert!(!exists(&admin, &old).await, "old, and nobody is connected");
+    }
+
+    #[tokio::test]
+    async fn a_name_another_process_has_taken_is_passed_over() {
+        // Two suites in different pid namespaces can be the same pid in the same second.
+        let admin = maintenance().await;
+        let now = unix_seconds();
+        let taken = create_database(&admin, || unused_name(now)).await;
+        let mut offered = vec![unused_name(now), taken.clone()];
+
+        let made = create_database(&admin, || offered.pop().expect("a name")).await;
+
+        assert_ne!(made, taken);
+        assert!(exists(&admin, &made).await);
+        drop_database(&admin, &taken).await;
+        drop_database(&admin, &made).await;
+    }
 }

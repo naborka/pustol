@@ -12,7 +12,7 @@ async fn saving_a_proposal_that_changes_nothing_leaves_everything_alone() {
     let store = store().await;
     let (bar, config) = default_bar(&store).await;
     let saved = store
-        .save_settings(bar, &draft_of(&store, bar).await, morning())
+        .save_settings(bar, &draft_of(&store, bar).await, thursday(), morning())
         .await
         .expect("saved");
     assert!(saved.reconciliation.is_empty());
@@ -29,7 +29,7 @@ async fn renaming_the_bar_takes_effect_and_survives_a_reload() {
     draft.name = "Бар «Чердак»".to_owned();
     draft.address = "Кнез Михаилова 1, Белград".to_owned();
     store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
 
@@ -43,12 +43,13 @@ async fn adding_a_table_gives_it_the_next_number_and_makes_it_bookable() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let mut draft = draft_of(&store, bar).await;
-    draft.tables.push(TableDraft::New {
+    draft.tables.push(TableDraft {
+        id: uuid::Uuid::new_v4(),
         seats: 4,
         zone: "Зал".to_owned(),
     });
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
 
@@ -71,9 +72,9 @@ async fn a_removed_table_is_retired_and_keeps_its_number_for_good() {
     let mut draft = draft_of(&store, bar).await;
     draft
         .tables
-        .retain(|entry| !matches!(entry, TableDraft::Existing { id, .. } if *id == last.id.0));
+        .retain(|entry| entry.id != last.id.0);
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
     assert_eq!(saved.config.active_tables().count(), 14);
@@ -84,12 +85,13 @@ async fn a_removed_table_is_retired_and_keeps_its_number_for_good() {
 
     // Add a table: it must be sixteen, never a second fifteen.
     let mut draft = draft_of(&store, bar).await;
-    draft.tables.push(TableDraft::New {
+    draft.tables.push(TableDraft {
+        id: uuid::Uuid::new_v4(),
         seats: 2,
         zone: "Бар".to_owned(),
     });
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
     let numbers: Vec<i32> = saved.config.tables.iter().map(|table| table.number).collect();
@@ -111,10 +113,10 @@ async fn retiring_a_table_moves_the_party_sitting_at_it() {
 
     let mut draft = draft_of(&store, bar).await;
     draft.tables.retain(
-        |entry| !matches!(entry, TableDraft::Existing { id, .. } if *id == numbered(&config.tables, 11).id.0),
+        |entry| entry.id != numbered(&config.tables, 11).id.0,
     );
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
 
@@ -154,23 +156,21 @@ async fn shrinking_the_room_until_a_party_no_longer_fits_leaves_them_without_a_t
     // Shrink one of them: its party has nowhere to go.
     let mut draft = draft_of(&store, bar).await;
     for entry in &mut draft.tables {
-        if let TableDraft::Existing { id, seats, .. } = entry
-            && *id == numbered(&config.tables, 12).id.0
-        {
-            *seats = 2;
+        if entry.id == numbered(&config.tables, 12).id.0 {
+            entry.seats = 2;
         }
     }
     // The cap has to come down with the room, or the configuration is illegal.
     draft.max_party = 6;
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
 
     assert_eq!(saved.reconciliation.outcome.moved, Vec::new());
     assert_eq!(saved.reconciliation.outcome.orphaned.len(), 1);
 
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store.evening(bar, thursday(), common::morning()).await.expect("reads");
     let orphan = shift
         .bookings
         .iter()
@@ -205,15 +205,13 @@ async fn a_party_left_without_a_table_is_seated_the_moment_the_room_can_take_the
 
     let mut draft = draft_of(&store, bar).await;
     for entry in &mut draft.tables {
-        if let TableDraft::Existing { id, seats, .. } = entry
-            && *id == numbered(&config.tables, 12).id.0
-        {
-            *seats = 2;
+        if entry.id == numbered(&config.tables, 12).id.0 {
+            entry.seats = 2;
         }
     }
     draft.max_party = 6;
     store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
 
@@ -222,18 +220,19 @@ async fn a_party_left_without_a_table_is_seated_the_moment_the_room_can_take_the
         .reconcile_shift(bar, thursday(), morning())
         .await
         .expect("the attempt itself succeeds");
-    assert_eq!(still_stuck.outcome.moved, Vec::new());
-    assert_eq!(still_stuck.outcome.orphaned, vec![stranded.record.booking.id]);
+    assert_eq!(still_stuck.reconciliation.outcome.moved, Vec::new());
+    assert_eq!(still_stuck.reconciliation.outcome.orphaned, vec![stranded.record.booking.id]);
 
     // Give the room a six-top back. Nobody has to remember to press anything: the party the bar
     // still owes a table is seated as part of applying the change.
     let mut draft = draft_of(&store, bar).await;
-    draft.tables.push(TableDraft::New {
+    draft.tables.push(TableDraft {
+        id: uuid::Uuid::new_v4(),
         seats: 6,
         zone: "Зал".to_owned(),
     });
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
     assert_eq!(saved.reconciliation.outcome.orphaned, Vec::new());
@@ -242,7 +241,7 @@ async fn a_party_left_without_a_table_is_seated_the_moment_the_room_can_take_the
     assert_eq!(saved.reconciliation.outcome.moved[0].to_number, 13);
 
     let seated = store
-        .shift(bar, thursday())
+        .evening(bar, thursday(), common::morning())
         .await
         .expect("reads")
         .bookings
@@ -264,7 +263,7 @@ async fn asking_a_sound_shift_to_reconcile_moves_nobody() {
         .reconcile_shift(bar, thursday(), morning())
         .await
         .expect("nothing to do");
-    assert!(outcome.is_empty());
+    assert!(outcome.reconciliation.is_empty());
 }
 
 #[tokio::test]
@@ -287,15 +286,13 @@ async fn cancelling_a_booking_hands_the_freed_table_to_a_party_that_was_owed_one
 
     let mut draft = draft_of(&store, bar).await;
     for entry in &mut draft.tables {
-        if let TableDraft::Existing { id, seats, .. } = entry
-            && *id == numbered(&config.tables, 12).id.0
-        {
-            *seats = 2;
+        if entry.id == numbered(&config.tables, 12).id.0 {
+            entry.seats = 2;
         }
     }
     draft.max_party = 6;
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
     assert_eq!(saved.reconciliation.outcome.orphaned, vec![stranded.record.booking.id]);
@@ -333,7 +330,7 @@ async fn closing_a_day_that_has_bookings_on_it_is_refused_with_the_bookings_name
     // Thursday, index 4 counting from Sunday.
     draft.week[4].closed = true;
     let refused = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect_err("a promised booking cannot be shut out");
     match refused {
@@ -352,7 +349,7 @@ async fn a_day_with_no_bookings_left_on_it_can_be_closed() {
     let mut draft = draft_of(&store, bar).await;
     draft.week[4].closed = true;
     store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
     assert!(store.config(bar).await.expect("loads").week.all()[4].closed);
@@ -372,7 +369,7 @@ async fn a_booking_that_has_already_finished_never_blocks_a_settings_change() {
     let mut draft = draft_of(&store, bar).await;
     draft.week[4].closed = true;
     store
-        .save_settings(bar, &draft, later)
+        .save_settings(bar, &draft, thursday(), later)
         .await
         .expect("history does not hold the settings hostage");
 }
@@ -390,7 +387,7 @@ async fn moving_opening_hours_past_a_live_booking_is_refused() {
     let mut draft = draft_of(&store, bar).await;
     draft.week[4].open_minutes = 1020;
     let refused = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect_err("refused");
     assert!(
@@ -418,13 +415,13 @@ async fn lengthening_the_turn_does_not_retroactively_extend_anyones_table() {
     let mut draft = draft_of(&store, bar).await;
     draft.turn_minutes = 240;
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("nobody already seated is affected");
     assert!(saved.reconciliation.is_empty());
 
     // Both bookings keep the two hours they were promised.
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store.evening(bar, thursday(), common::morning()).await.expect("reads");
     assert!(
         shift
             .bookings
@@ -455,7 +452,7 @@ async fn lowering_the_party_cap_reports_the_bookings_above_it_without_refusing()
     let mut draft = draft_of(&store, bar).await;
     draft.max_party = 4;
     let saved = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
     assert_eq!(saved.above_cap, 1);
@@ -472,7 +469,7 @@ async fn a_party_cap_no_table_can_seat_is_refused_as_illegal() {
     let mut draft = draft_of(&store, bar).await;
     draft.max_party = 10;
     let refused = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect_err("no table seats ten");
     match refused {
@@ -491,13 +488,13 @@ async fn a_proposal_naming_a_table_from_another_bar_cannot_even_be_interpreted()
     let (_, other_config) = default_bar(&store).await;
 
     let mut draft = draft_of(&store, first_bar).await;
-    draft.tables.push(TableDraft::Existing {
+    draft.tables.push(TableDraft {
         id: other_config.tables[0].id.0,
         seats: 4,
         zone: "Зал".to_owned(),
     });
     let refused = store
-        .save_settings(first_bar, &draft, morning())
+        .save_settings(first_bar, &draft, thursday(), morning())
         .await
         .expect_err("that table is not in this room");
     assert!(
@@ -507,13 +504,102 @@ async fn a_proposal_naming_a_table_from_another_bar_cannot_even_be_interpreted()
 }
 
 #[tokio::test]
+async fn a_table_the_app_adds_keeps_the_identity_the_app_gave_it() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let named = uuid::Uuid::new_v4();
+    let mut draft = draft_of(&store, bar).await;
+    draft.tables.push(TableDraft {
+        id: named,
+        seats: 4,
+        zone: "Зал".to_owned(),
+    });
+    let saved = store
+        .save_settings(bar, &draft, thursday(), morning())
+        .await
+        .expect("saved");
+    let added = saved
+        .config
+        .active_tables()
+        .find(|table| table.id.0 == named)
+        .expect("stored under the id it was sent with");
+    assert_eq!(added.number, 16);
+}
+
+#[tokio::test]
+async fn the_same_proposal_saved_twice_adds_its_table_once() {
+    // The answer to the first save was lost, and the app sends the same rows again, made from the
+    // settings as they now are.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let named = uuid::Uuid::new_v4();
+    let mut draft = draft_of(&store, bar).await;
+    draft.tables.push(TableDraft {
+        id: named,
+        seats: 4,
+        zone: "Зал".to_owned(),
+    });
+    let first = store
+        .save_settings(bar, &draft, thursday(), morning())
+        .await
+        .expect("saved");
+    draft.version = first.version;
+    let second = store
+        .save_settings(bar, &draft, thursday(), morning())
+        .await
+        .expect("saved again");
+
+    assert_eq!(second.config.tables.len(), 16, "one table was added, not two");
+    assert_eq!(second.next_table_number, 17);
+    let tables: Vec<i64> =
+        sqlx::query_scalar("select count(*) from bar_table where bar_id = $1")
+            .bind(bar)
+            .fetch_all(store.pool())
+            .await
+            .expect("counted");
+    assert_eq!(tables, vec![16]);
+}
+
+#[tokio::test]
+async fn a_retired_table_named_again_comes_back_under_its_own_number() {
+    let store = store().await;
+    let (bar, config) = default_bar(&store).await;
+    let last = numbered(&config.tables, 15).clone();
+    let mut draft = draft_of(&store, bar).await;
+    draft.tables.retain(|entry| entry.id != last.id.0);
+    store
+        .save_settings(bar, &draft, thursday(), morning())
+        .await
+        .expect("retired");
+
+    let mut draft = draft_of(&store, bar).await;
+    draft.tables.push(TableDraft {
+        id: last.id.0,
+        seats: 4,
+        zone: "Терраса".to_owned(),
+    });
+    let saved = store
+        .save_settings(bar, &draft, thursday(), morning())
+        .await
+        .expect("revived");
+    let back = saved
+        .config
+        .active_tables()
+        .find(|table| table.id == last.id)
+        .expect("in the room again");
+    assert_eq!(back.number, 15);
+    assert_eq!(back.seats, 4);
+    assert_eq!(saved.config.tables.len(), 15, "nothing new was made");
+}
+
+#[tokio::test]
 async fn the_last_admin_cannot_be_removed() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let mut draft = draft_of(&store, bar).await;
     draft.staff.clear();
     let refused = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect_err("that would lock everyone out");
     match refused {
@@ -542,7 +628,7 @@ async fn a_bound_admin_keeps_their_seat_through_a_settings_save() {
         username: "pavel_bar".to_owned(),
     });
     store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
 
@@ -675,7 +761,7 @@ async fn editing_the_guest_messages_and_cancellation_reasons_replaces_the_lists(
     draft.message_templates = vec!["Стол готов".to_owned(), "Держим ещё 15 минут".to_owned()];
     draft.cancel_reasons = vec!["Дождь".to_owned()];
     store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
 
@@ -691,7 +777,7 @@ async fn a_blank_guest_message_is_refused() {
     let mut draft = draft_of(&store, bar).await;
     draft.message_templates = vec!["   ".to_owned()];
     let refused = store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect_err("an empty message would be sent to a guest");
     assert!(
@@ -710,7 +796,7 @@ async fn applying_one_days_hours_to_the_whole_week_is_just_a_proposal_like_any_o
         day.close_minutes = 1440;
     }
     store
-        .save_settings(bar, &draft, morning())
+        .save_settings(bar, &draft, thursday(), morning())
         .await
         .expect("saved");
     let reloaded = store.config(bar).await.expect("loads");
@@ -730,17 +816,17 @@ async fn a_contact_for_guests_is_saved_cleared_and_checked() {
 
     let mut draft = draft_of(&store, bar).await;
     draft.contact = "  @podval_bar ".to_owned();
-    store.save_settings(bar, &draft, morning()).await.expect("saved");
+    store.save_settings(bar, &draft, thursday(), morning()).await.expect("saved");
     assert_eq!(store.config(bar).await.expect("loads").contact.as_deref(), Some("@podval_bar"));
 
     draft.version = store.settings(bar).await.expect("reads").version;
     draft.contact = String::new();
-    store.save_settings(bar, &draft, morning()).await.expect("saved");
+    store.save_settings(bar, &draft, thursday(), morning()).await.expect("saved");
     assert_eq!(store.config(bar).await.expect("loads").contact, None, "blank means none");
 
     draft.version = store.settings(bar).await.expect("reads").version;
     draft.contact = "звоните".to_owned();
-    let refused = store.save_settings(bar, &draft, morning()).await;
+    let refused = store.save_settings(bar, &draft, thursday(), morning()).await;
     assert!(matches!(refused, Err(Error::ProposedConfigInvalid(_))), "{refused:?}");
 }
 
@@ -757,7 +843,7 @@ async fn invite(
             username: (*username).to_owned(),
         });
     }
-    store.save_settings(bar, &draft, at).await.expect("saved");
+    store.save_settings(bar, &draft, thursday(), at).await.expect("saved");
 }
 
 async fn holder_of(store: &pustol_db::Store, bar: pustol_db::BarId, username: &str) -> Option<i64> {
@@ -855,6 +941,47 @@ async fn an_older_payload_claims_nothing_under_a_name_the_account_has_moved_on_f
     );
     assert_eq!(viewer.account.username.as_deref(), Some("renamed_since"));
     assert_eq!(holder_of(&store, bar, "pavel_bar").await, None);
+}
+
+#[tokio::test]
+async fn a_payload_of_the_same_second_as_the_stored_profile_rewrites_it_only_when_it_says_the_same() {
+    // Telegram stamps whole seconds. The account was renamed within the second, and the payload
+    // still carrying the old name is not known to be the older one; it must not claim a seat under a
+    // name the server has already seen the account give up.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    invite(&store, bar, &["pavel_bar"], morning()).await;
+    let second = morning() + chrono::TimeDelta::minutes(10);
+    let mut renamed = fresh_account("Павел");
+    renamed.username = Some("renamed_v".to_owned());
+    store
+        .identify(bar, &renamed, signed(second), second)
+        .await
+        .expect("identified");
+
+    let mut same_second = renamed.clone();
+    same_second.username = Some("pavel_bar".to_owned());
+    let viewer = store
+        .identify(bar, &same_second, signed(second), second)
+        .await
+        .expect("identified");
+    assert!(!viewer.is_staff);
+    assert_eq!(viewer.account.username.as_deref(), Some("renamed_v"));
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, None);
+
+    let again = store
+        .identify(bar, &renamed, signed(second), second)
+        .await
+        .expect("the very same payload is still accepted");
+    assert_eq!(again.account.username.as_deref(), Some("renamed_v"));
+
+    let later = second + chrono::TimeDelta::seconds(1);
+    let viewer = store
+        .identify(bar, &same_second, signed(later), later)
+        .await
+        .expect("identified");
+    assert!(viewer.is_staff, "a strictly newer payload rewrites as ever");
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, Some(renamed.id.0));
 }
 
 #[tokio::test]

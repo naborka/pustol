@@ -13,6 +13,7 @@ use pustol_telegram::messages;
 use uuid::Uuid;
 
 use crate::auth::Authenticated;
+use crate::body::JsonBody;
 use crate::dto::{
     Availability, AvailabilityQuery, BarView, BookingRequest, DayOffer, DayRail, DayRailQuery,
     GuestBooking, RemindersView, Session, UserView,
@@ -180,7 +181,7 @@ pub struct BookingTaken {
 async fn book(
     State(state): State<AppState>,
     caller: Authenticated,
-    Json(request): Json<BookingRequest>,
+    JsonBody(request): JsonBody<BookingRequest>,
 ) -> ApiResult<Json<BookingTaken>> {
     let now = state.now();
     // The account has to exist before a booking can point at it, and the name the booking is filed
@@ -199,6 +200,7 @@ async fn book(
                     user: viewer.account.id,
                     name: viewer.account.first_name,
                     username: viewer.account.username,
+                    replacing: request.replacing.into_iter().map(BookingId).collect(),
                 },
                 reminder: Some(word_reminder),
             },
@@ -207,7 +209,7 @@ async fn book(
         .await?;
 
     Ok(Json(BookingTaken {
-        booking: GuestBooking::of(&created.record, &created.config, now),
+        booking: GuestBooking::of(&created.record, &created.evening.config, now),
         replaced: created.replaced.iter().map(|id| id.0).collect(),
     }))
 }
@@ -236,7 +238,7 @@ async fn cancel(
         .await?;
     Ok(Json(GuestBooking::of(
         &cancelled.record,
-        &cancelled.config,
+        &cancelled.evening.config,
         now,
     )))
 }

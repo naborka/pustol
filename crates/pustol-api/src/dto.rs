@@ -8,12 +8,13 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use pustol_db::bookings::Attendance;
-use pustol_db::identity::{ReminderStanding, Viewer};
 use pustol_db::bookings::Reseated;
-use pustol_db::records::{BookingRecord, BookingSource};
+use pustol_db::evening::Evening;
+use pustol_db::identity::{ReminderStanding, Viewer};
+use pustol_db::records::{BookingRecord, BookingSource, blocks_of, bookings_of};
 use pustol_domain::config::{DayHours, LIMITS, ValidConfig};
 use pustol_domain::slots::{PartOfDay, Slot, SlotAvailability};
-use pustol_domain::{BookingStatus, Rebooking, ServiceDay, minutes_within};
+use pustol_domain::{BookingStatus, Interval, Rebooking, ServiceDay, TableId, minutes_within};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -344,8 +345,9 @@ pub struct ShiftBooking {
     pub source: Source,
     /// What staff wrote on this booking. Staff-facing only: nothing sends it anywhere.
     pub note: Option<String>,
-    /// Whether the bot could ever message this guest. False for a booking taken at the door, which
-    /// has no Telegram account behind it at all.
+    /// Whether the bot can message this guest. False for a booking taken at the door, which has no
+    /// Telegram account behind it at all, and for a guest the bot has found it cannot reach: in both
+    /// cases a person has to call.
     pub reachable_by_bot: bool,
     /// Whether the window has begun, by the server's clock.
     pub started: bool,
@@ -392,7 +394,7 @@ impl ShiftBooking {
             status: record.booking.status.into(),
             source: record.source.into(),
             note: record.note.clone(),
-            reachable_by_bot: record.has_telegram_account(),
+            reachable_by_bot: record.reachable_by_bot,
             started: record.booking.has_started(now),
             finished: record.booking.has_finished(now),
         }
@@ -429,6 +431,11 @@ pub struct ShiftDay {
 #[derive(Debug, Serialize)]
 pub struct ShiftView {
     pub service_date: NaiveDate,
+    /// How far the bar's room had moved on when this evening was read.
+    ///
+    /// Answers do not arrive in the order they were asked for, so a screen draws an evening only when
+    /// its version is not older than the one it already shows for that date.
+    pub version: i64,
     /// The shift running by the bar's clock, whichever day is on screen. What "today" and "past"
     /// mean to the screen, answered by the server rather than by a phone in another timezone.
     pub today: NaiveDate,
@@ -452,6 +459,102 @@ pub struct ShiftView {
     pub guest_horizon_days: i32,
     pub cancel_reasons: Vec<String>,
     pub message_templates: Vec<String>,
+}
+
+impl ShiftView {
+    /// The evening as the shift screen draws it: for `GET /shift` and for the answer to every write,
+    /// from one reading of the room, so the two can never be drawn by different rules.
+    pub fn of(evening: &Evening) -> Self {
+        let Evening {
+            now,
+            day,
+            today,
+            config,
+            bookings,
+            blocks,
+            days,
+            version,
+        } = evening;
+        let (now, day) = (*now, *day);
+
+        let tables: Vec<ShiftTable> = config
+            .active_tables()
+            .map(|table| ShiftTable {
+                id: table.id.0,
+                number: table.number,
+                seats: table.seats,
+                zone: table.zone.as_str().to_owned(),
+                blocked_because: blocks
+                    .iter()
+                    .find(|block| block.block.table_id == table.id && block.block.service_day == day)
+                    .map(|block| block.reason.clone()),
+            })
+            .collect();
+
+        // "Free now", the now-line and "who fits" are only meaningful on the shift that is actually
+        // running. On any other day an invented number would be worse than a blank.
+        let is_running = *today == day;
+        let free_now = is_running.then(|| {
+            tables
+                .iter()
+                .filter(|table| table.blocked_because.is_none())
+                .filter(|table| {
+                    // The one occupancy rule, asked of the one function: a party that has left or
+                    // never came does not hold a table staff can see standing empty.
+                    !bookings.iter().any(|record| {
+                        record.booking.occupancy().is_some_and(|held| {
+                            record.booking.table_id == Some(TableId(table.id))
+                                && held.start() <= now
+                                && now < held.end()
+                        })
+                    })
+                })
+                .count()
+        });
+        let now_minutes = is_running.then(|| minutes_within(day, now, config.timezone));
+        let largest_party_seatable_now = is_running
+            .then(|| Interval::from_duration(now, config.turn_minutes).ok())
+            .flatten()
+            .and_then(|window| {
+                pustol_domain::largest_party_seatable(
+                    config,
+                    day,
+                    window,
+                    &bookings_of(bookings),
+                    &blocks_of(blocks),
+                )
+            });
+
+        Self {
+            service_date: day.date(),
+            version: *version,
+            today: today.date(),
+            hours: config.week.for_service_day(day).into(),
+            tables,
+            bookings: bookings
+                .iter()
+                .map(|record| ShiftBooking::of(record, config, now))
+                .collect(),
+            stats: ShiftStats {
+                bookings: bookings.len(),
+                guests: bookings.iter().map(|record| record.booking.party_size).sum(),
+                free_now,
+            },
+            now_minutes,
+            largest_party_seatable_now,
+            days: days
+                .iter()
+                .map(|count| ShiftDay {
+                    service_date: count.day.date(),
+                    closed: config.week.for_service_day(count.day).closed,
+                    bookings: count.bookings,
+                })
+                .collect(),
+            guest_horizon_days: config.horizon_days,
+            cancel_reasons: config.cancel_reasons.clone(),
+            message_templates: config.message_templates.clone(),
+        }
+    }
 }
 
 /// What a change to the room did to the bookings on it.
@@ -517,6 +620,13 @@ pub struct BookingRequest {
     pub service_date: NaiveDate,
     pub start_minutes: i32,
     pub party_size: i32,
+    /// The bookings the app said this one replaces, which is what its «Перенести» promised. Refused
+    /// as `booking_changed` unless that is exactly what it would replace.
+    ///
+    /// Absent reads as none. A Mini App already open from before this field keeps booking wherever
+    /// its booking replaces nothing, and is refused, not obeyed, wherever it would replace something.
+    #[serde(default)]
+    pub replacing: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -644,6 +754,8 @@ pub struct SettingsView {
     pub cancel_reasons: Vec<String>,
     pub staff: Vec<StaffView>,
     pub next_table_number: i32,
+    /// The evening each table's `bookings_today` counts.
+    pub service_date: NaiveDate,
     pub limits: LimitsView,
 }
 

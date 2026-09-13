@@ -21,7 +21,7 @@ const v1 = settingsView({ version: "2026-09-13T08:00:00Z" });
 const v2 = settingsView({ version: "2026-09-13T08:00:00.000001Z" });
 
 function editing(settings: SettingsView, change: (draft: SettingsDraft) => void): SettingsPair {
-  const pair = fresh("2026-09-11", settings);
+  const pair = fresh(settings);
   return { ...pair, draft: edited(pair.draft, change) };
 }
 
@@ -63,27 +63,26 @@ describe("merging somebody else's save into an edit", () => {
 describe("settings that arrive", () => {
   it("are taken whole when nothing is being edited", () => {
     const next = settingsView({ name: "Подвал", version: v2.version });
-    expect(received(null, "2026-09-11", next)).toEqual({ pair: fresh("2026-09-11", next), notice: null });
-    expect(received(fresh("2026-09-11", v1), "2026-09-11", next).pair).toEqual(
-      fresh("2026-09-11", next),
-    );
+    expect(received(null, next)).toEqual({ pair: fresh(next), notice: null });
+    expect(received(fresh(v1), next).pair).toEqual(fresh(next));
   });
 
   it("never replace newer settings with older ones", () => {
-    const current = fresh("2026-09-11", settingsView({ name: "Подвал", version: v2.version }));
-    expect(received(current, "2026-09-11", v1)).toEqual({ pair: current, notice: null });
+    const current = fresh(settingsView({ name: "Подвал", version: v2.version }));
+    expect(received(current, v1)).toEqual({ pair: current, notice: null });
   });
 
-  it("of the same version bring another day's counts without touching the edit", () => {
+  it("of the same version bring another evening's counts without touching the edit", () => {
     const current = editing(v1, (draft) => {
       draft.name = "Чердак";
     });
     const tomorrow = settingsView({
       version: v1.version,
+      service_date: "2026-09-12",
       tables: v1.tables.map((table) => ({ ...table, bookings_today: 3 })),
     });
-    const { pair, notice } = received(current, "2026-09-12", tomorrow);
-    expect(pair).toEqual({ ...current, date: "2026-09-12", settings: tomorrow });
+    const { pair, notice } = received(current, tomorrow);
+    expect(pair).toEqual({ ...current, settings: tomorrow });
     expect(notice).toBeNull();
   });
 
@@ -92,9 +91,8 @@ describe("settings that arrive", () => {
       draft.name = "Мансарда";
     });
     const next = settingsView({ address: "Невский, 1", version: v2.version });
-    const { pair, notice } = received(current, "2026-09-11", next);
+    const { pair, notice } = received(current, next);
     expect(pair.draft).toMatchObject({ name: "Мансарда", address: "Невский, 1", version: v2.version });
-    expect(pair.base).toEqual(draftOf(next));
     expect(pair.settings).toBe(next);
     expect(notice).toBe("Пока вы редактировали, настройки обновились. Ваши правки на месте — проверьте и сохраните.");
   });
@@ -105,7 +103,7 @@ describe("settings that arrive", () => {
       draft.cancel_reasons = ["Потоп"];
     });
     const next = settingsView({ name: "Подвал", cancel_reasons: ["Ремонт"], version: v2.version });
-    const { pair, notice } = received(current, "2026-09-11", next);
+    const { pair, notice } = received(current, next);
     expect(pair.draft).toMatchObject({ name: "Мансарда", cancel_reasons: ["Потоп"] });
     expect(notice).toBe(
       "Пока вы редактировали, кто-то изменил настройки: название, причины отмены. Оставили ваши значения — проверьте и сохраните.",
@@ -117,9 +115,31 @@ describe("settings that arrive", () => {
       draft.name = "Чердак";
     });
     const next = settingsView({ name: "Чердак", version: v2.version });
-    const { pair, notice } = received(current, "2026-09-11", next);
+    const { pair, notice } = received(current, next);
     expect(isDirty(pair)).toBe(false);
     expect(notice).toBeNull();
+  });
+
+  it("are measured against the settings last applied, so a save of one's own is nobody else's", () => {
+    const table = { id: "4d1e6a0c-7b0f-4c55-8f7e-9f0a1b2c3d4e", seats: 4, zone: "Зал" };
+    const adding = (draft: SettingsDraft) => {
+      draft.tables.push(table);
+    };
+    const typing = (draft: SettingsDraft) => {
+      draft.address = "Невский, 1";
+    };
+    const stored = settingsView({
+      version: v2.version,
+      tables: [...v1.tables, { ...table, number: 9, bookings_today: 0 }],
+    });
+    const saved = savedInto(editing(v1, adding), stored, []);
+    expect(isDirty(saved)).toBe(false);
+
+    const later = settingsView({ ...stored, name: "Подвал", version: "2026-09-13T09:00:00Z" });
+    const { pair, notice } = received({ ...saved, draft: edited(saved.draft, typing) }, later);
+    expect(pair.draft.tables).toEqual(draftOf(stored).tables);
+    expect(pair.draft).toMatchObject({ name: "Подвал", address: "Невский, 1" });
+    expect(notice).toBe("Пока вы редактировали, настройки обновились. Ваши правки на месте — проверьте и сохраните.");
   });
 });
 
@@ -129,21 +149,25 @@ describe("a save that answers", () => {
       draft.name = "Чердак";
     });
     const stored = settingsView({ name: "Чердак", version: v2.version });
-    const untouched = { ...fresh("2026-09-11", v1), draft: sent };
-    expect(savedInto(untouched, "2026-09-11", sent, stored, [])).toEqual(fresh("2026-09-11", stored));
+    const untouched = { ...fresh(v1), draft: sent };
+    expect(savedInto(untouched, stored, [])).toEqual(fresh(stored));
 
     const typing = (draft: SettingsDraft) => {
       draft.address = "Невский, 1";
     };
     const meanwhile = { ...untouched, draft: edited(sent, typing) };
-    const pair = savedInto(meanwhile, "2026-09-11", sent, stored, [typing]);
+    const pair = savedInto(meanwhile, stored, [typing]);
     expect(pair.draft).toMatchObject({ name: "Чердак", address: "Невский, 1", version: v2.version });
-    expect(pair.base).toEqual(draftOf(stored));
+    expect(pair.settings).toBe(stored);
+  });
+
+  it("is applied whatever evening its counts are for", () => {
+    const stored = settingsView({ name: "Чердак", version: v2.version, service_date: "2026-09-12" });
+    expect(savedInto(fresh(v1), stored, [])).toEqual(fresh(stored));
   });
 
   it("never puts older settings over newer ones that arrived meanwhile", () => {
-    const newer = fresh("2026-09-11", settingsView({ name: "Подвал", version: "2026-09-13T10:00:00Z" }));
-    const sent = draftOf(v1);
-    expect(savedInto(newer, "2026-09-11", sent, v2, [])).toBe(newer);
+    const newer = fresh(settingsView({ name: "Подвал", version: "2026-09-13T10:00:00Z" }));
+    expect(savedInto(newer, v2, [])).toBe(newer);
   });
 });

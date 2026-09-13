@@ -28,12 +28,41 @@ struct Telegram {
     base_url: String,
     calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     updates: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// When set, `getUpdates` with nothing to hand over waits as Telegram does, until something
+    /// arrives or the wait asked for is over. Otherwise it answers at once, so a test that polls
+    /// once more is not held for the whole long poll.
+    long_polls: Arc<AtomicBool>,
+    /// Wakes a `getUpdates` that is waiting for something to arrive.
+    arrived: Arc<Notify>,
+    /// When set, an offset past every update Telegram now has is not honoured, as after Telegram
+    /// has counted update ids afresh.
+    forgets_stale_offsets: Arc<AtomicBool>,
     /// When set, a reply to a guest is held until `release` is notified.
     hold_replies: Arc<AtomicBool>,
     release: Arc<Notify>,
 }
 
 impl Telegram {
+    /// What `getUpdates` hands over from `offset`.
+    async fn pending(&self, offset: Option<i64>) -> Vec<serde_json::Value> {
+        let updates = self.updates.lock().await;
+        let id = |update: &serde_json::Value| update["update_id"].as_i64().unwrap_or(0);
+        let newest = updates.iter().map(id).max();
+        let stale = offset.is_some_and(|offset| newest.is_none_or(|newest| offset > newest + 1));
+        let from = if stale && self.forgets_stale_offsets.load(Ordering::Relaxed) {
+            0
+        } else {
+            offset.unwrap_or(0)
+        };
+        updates.iter().filter(|update| id(update) >= from).cloned().collect()
+    }
+
+    /// Hands new updates over, waking a long poll that is waiting for them.
+    async fn replace_updates(&self, updates: Vec<serde_json::Value>) {
+        *self.updates.lock().await = updates;
+        self.arrived.notify_waiters();
+    }
+
     async fn calls_to(&self, method: &str) -> Vec<serde_json::Value> {
         self.calls
             .lock()
@@ -64,16 +93,25 @@ async fn method(
         stub.release.notified().await;
     }
     if method == "getUpdates" {
-        let offset = body["offset"].as_i64().unwrap_or(0);
-        let result: Vec<serde_json::Value> = stub
-            .updates
-            .lock()
-            .await
-            .iter()
-            .filter(|update| update["update_id"].as_i64().unwrap_or(0) >= offset)
-            .cloned()
-            .collect();
-        return Json(serde_json::json!({ "ok": true, "result": result }));
+        // A long poll, as Telegram answers one: at once when something is there, otherwise when
+        // something arrives or the wait asked for is over.
+        let offset = body["offset"].as_i64();
+        let wait = if stub.long_polls.load(Ordering::Relaxed) {
+            body["timeout"].as_u64().unwrap_or(0)
+        } else {
+            0
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
+        loop {
+            let arrived = stub.arrived.notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+            let result = stub.pending(offset).await;
+            if !result.is_empty() || tokio::time::Instant::now() >= deadline {
+                return Json(serde_json::json!({ "ok": true, "result": result }));
+            }
+            let _ = tokio::time::timeout_at(deadline, arrived).await;
+        }
     }
     Json(serde_json::json!({ "ok": true, "result": true }))
 }
@@ -97,13 +135,9 @@ async fn stub_telegram() -> (Bot, Telegram) {
     (bot, stub)
 }
 
+/// An inbox of its own: a process of its own, as far as claiming updates goes.
 fn inbox(app: &Harness, bot: Bot) -> Inbox {
-    Inbox {
-        store: app.store.clone(),
-        bot,
-        bar: app.bar,
-        clock: Clock::Fixed(app.now),
-    }
+    Inbox::new(app.store.clone(), bot, app.bar, Clock::Fixed(app.now))
 }
 
 /// A tap on a button under one of the bot's messages, in the shape Telegram sends it.
@@ -325,29 +359,24 @@ async fn starting_the_bot_plainly_says_where_to_go_and_who_answers() {
 #[tokio::test]
 async fn start_addressed_to_the_bot_by_name_is_start() {
     // Telegram clients write `/start@PodvalBot` when a command is picked from a list, and a payload
-    // follows the name.
+    // follows the name. In a private chat every message is this bot's, whatever name it carries.
     let app = harness().await;
+    let welcome = messages::welcome(&app.config.name, None);
+    let reminders = messages::reminders_on(app.config.remind_hours);
     let cases = [
-        (
-            20,
-            "/start@PodvalBot",
-            messages::welcome(&app.config.name, None),
-        ),
-        (
-            21,
-            "/start@PodvalBot reminders",
-            messages::reminders_on(app.config.remind_hours),
-        ),
+        (20, "/start@PodvalBot", welcome.clone()),
+        (21, "/start@PodvalBot reminders", reminders.clone()),
         (
             22,
             "/started",
             messages::nobody_reads_this(&app.config.name, None),
         ),
-        (
-            23,
-            "/start@",
-            messages::nobody_reads_this(&app.config.name, None),
-        ),
+        (23, "/start@", welcome.clone()),
+        (24, "/start@SomeOtherName reminders", reminders.clone()),
+        (25, "/start\treminders", reminders.clone()),
+        (26, "/start\nreminders", reminders.clone()),
+        (27, "/start   reminders", reminders.clone()),
+        (28, "/start@PodvalBot\u{a0}reminders", reminders.clone()),
     ];
     for (update_id, text, expected) in cases {
         let (bot, stub) = stub_telegram().await;
@@ -602,6 +631,94 @@ async fn an_update_that_cannot_be_claimed_is_left_for_the_next_fetch() {
     );
     assert_eq!(polls.len(), 1, "it waits before asking again: {polls:?}");
     assert!(stub.answered().await.is_empty());
+}
+
+#[tokio::test]
+async fn after_telegram_counts_update_ids_afresh_the_next_update_is_answered_once_and_confirmed() {
+    // After a quiet week Telegram numbers updates from a random start, which can be below the offset
+    // the inbox last confirmed. An offset kept at the old high id confirms nothing Telegram now has,
+    // and the same update comes back on every poll.
+    let app = harness().await;
+    let (bot, stub) = stub_telegram().await;
+    stub.forgets_stale_offsets.store(true, Ordering::Relaxed);
+    stub.long_polls.store(true, Ordering::Relaxed);
+    stub.replace_updates(vec![said(900, 77, "привет")]).await;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(inbox(&app, bot).run(stopped));
+
+    let answered = |count: usize| {
+        let stub = stub.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while stub.answered().await.len() < count {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("answered");
+        }
+    };
+    answered(1).await;
+    stub.replace_updates(vec![said(5, 78, "снова мы")]).await;
+    answered(2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let polls = stub.calls_to("getUpdates").await.len();
+    stop.send(true).expect("the inbox is listening");
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the inbox stopped")
+        .expect("the inbox did not panic");
+
+    assert!(polls <= 4, "the inbox asked {polls} times in a moment");
+    assert_eq!(
+        stub.answered().await,
+        vec![serde_json::json!(77), serde_json::json!(78)]
+    );
+    let last = stub.calls_to("getUpdates").await.last().cloned().expect("polled");
+    assert_eq!(last["offset"], 6, "update 5 is confirmed: {last}");
+}
+
+#[tokio::test]
+async fn an_update_taken_in_hand_but_not_answered_is_answered_on_the_next_fetch_exactly_once() {
+    // The claim is written, and then the inbox cannot read what the answer needs — or the database
+    // wrote the claim and the reply saying so was lost. Nothing has been said to the guest; the claim
+    // is this inbox's own, so the next fetch takes it again and answers.
+    let app = harness().await;
+    let (bot, stub) = stub_telegram().await;
+    stub.replace_updates(vec![said(7, 77, "привет")]).await;
+    let first = inbox(&app, bot.clone());
+    let set_timezone = |name: &'static str| {
+        let pool = app.store.pool().clone();
+        let bar = app.bar;
+        async move {
+            sqlx::query("update bar set timezone = $2 where id = $1")
+                .bind(bar)
+                .bind(name)
+                .execute(&pool)
+                .await
+                .expect("written");
+        }
+    };
+
+    set_timezone("Mars/Olympus").await;
+    let failed = first.poll_once(None).await;
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(stub.answered().await.is_empty());
+
+    set_timezone("Europe/Belgrade").await;
+    let next = first.poll_once(None).await.expect("answered");
+    assert_eq!(next, Some(8));
+    assert_eq!(stub.answered().await, vec![serde_json::json!(77)]);
+
+    inbox(&app, bot)
+        .poll_once(None)
+        .await
+        .expect("telegram answered");
+    assert_eq!(
+        stub.answered().await,
+        vec![serde_json::json!(77)],
+        "another process still leaves it alone"
+    );
 }
 
 #[tokio::test]

@@ -101,8 +101,9 @@ describe("one booking", () => {
   });
 
   it("says why the guest cannot be written to, rather than offering and failing", () => {
+    // Unreachable is also a guest with Telegram who stopped the bot: «без Telegram» was not true.
     bookingSheet(shiftBooking({ reachable_by_bot: false }));
-    const button = screen.getByText("Гость без Telegram — написать нельзя");
+    const button = screen.getByText("Бот не может написать гостю");
     expect(button.closest("button")?.disabled).toBe(true);
     expect(screen.queryByText("Написать гостю")).toBeNull();
   });

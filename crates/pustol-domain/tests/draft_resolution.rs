@@ -5,18 +5,8 @@ mod common;
 use pustol_domain::config::StaffMember;
 use pustol_domain::draft::{DayHoursDraft, Draft, DraftError, StaffDraft, TableDraft};
 use pustol_domain::{BarConfig, TableId, Zone};
-use uuid::Uuid;
 
 use common::{default_config, id};
-
-/// Identities for added tables, drawn in order so the assertions can name them.
-fn minter(from: u128) -> impl FnMut() -> Uuid {
-    let mut next = from;
-    move || {
-        next += 1;
-        id(next)
-    }
-}
 
 fn draft_of(config: &BarConfig) -> Draft {
     Draft {
@@ -35,7 +25,7 @@ fn draft_of(config: &BarConfig) -> Draft {
         zones: config.zones.iter().map(ToString::to_string).collect(),
         tables: config
             .active_tables()
-            .map(|table| TableDraft::Existing {
+            .map(|table| TableDraft {
                 id: table.id.0,
                 seats: table.seats,
                 zone: table.zone.to_string(),
@@ -64,7 +54,7 @@ fn draft_of(config: &BarConfig) -> Draft {
 fn a_proposal_that_changes_nothing_resolves_to_what_is_already_in_force() {
     let current = default_config();
     let resolved = draft_of(&current)
-        .resolve(&current, minter(1000))
+        .resolve(&current)
         .expect("resolvable");
     assert_eq!(resolved, current);
 }
@@ -81,17 +71,18 @@ fn an_added_table_is_given_the_next_number_that_has_never_been_used() {
         .retired = true;
 
     let mut draft = draft_of(&current);
-    draft.tables.push(TableDraft::New {
+    draft.tables.push(TableDraft {
+        id: id(1001),
         seats: 4,
         zone: "Зал".to_owned(),
     });
 
-    let resolved = draft.resolve(&current, minter(1000)).expect("resolvable");
+    let resolved = draft.resolve(&current).expect("resolvable");
     let added = resolved
         .tables
         .iter()
         .find(|table| table.id == TableId(id(1001)))
-        .expect("the new table got the first minted identity");
+        .expect("the new table keeps the identity the app gave it");
     assert_eq!(
         added.number, 16,
         "the retired fifteenth still owns its number"
@@ -103,13 +94,14 @@ fn an_added_table_is_given_the_next_number_that_has_never_been_used() {
 fn several_added_tables_take_consecutive_numbers() {
     let current = default_config();
     let mut draft = draft_of(&current);
-    for _ in 0..3 {
-        draft.tables.push(TableDraft::New {
+    for sequence in 0..3 {
+        draft.tables.push(TableDraft {
+            id: id(2001 + sequence),
             seats: 2,
             zone: "Бар".to_owned(),
         });
     }
-    let resolved = draft.resolve(&current, minter(2000)).expect("resolvable");
+    let resolved = draft.resolve(&current).expect("resolvable");
     let added: Vec<i32> = resolved
         .tables
         .iter()
@@ -132,9 +124,9 @@ fn a_table_the_proposal_leaves_out_is_retired_with_its_number_and_history_intact
     let mut draft = draft_of(&current);
     draft
         .tables
-        .retain(|table| !matches!(table, TableDraft::Existing { id, .. } if *id == removed.id.0));
+        .retain(|table| table.id != removed.id.0);
 
-    let resolved = draft.resolve(&current, minter(1000)).expect("resolvable");
+    let resolved = draft.resolve(&current).expect("resolvable");
     let still_there = resolved
         .tables
         .iter()
@@ -155,7 +147,7 @@ fn a_table_already_retired_stays_retired() {
     let mut current = default_config();
     current.tables[0].retired = true;
     let resolved = draft_of(&current)
-        .resolve(&current, minter(1000))
+        .resolve(&current)
         .expect("resolvable");
     assert!(resolved.tables.iter().any(|table| table.retired));
 }
@@ -166,14 +158,12 @@ fn resizing_and_moving_a_table_keeps_its_identity_and_number() {
     let mut draft = draft_of(&current);
     let target = current.tables[0].id.0;
     for table in &mut draft.tables {
-        if let TableDraft::Existing { id, seats, zone } = table
-            && *id == target
-        {
-            *seats = 6;
-            *zone = "Терраса".to_owned();
+        if table.id == target {
+            table.seats = 6;
+            table.zone = "Терраса".to_owned();
         }
     }
-    let resolved = draft.resolve(&current, minter(1000)).expect("resolvable");
+    let resolved = draft.resolve(&current).expect("resolvable");
     let moved = resolved
         .tables
         .iter()
@@ -185,19 +175,48 @@ fn resizing_and_moving_a_table_keeps_its_identity_and_number() {
 }
 
 #[test]
-fn a_proposal_naming_a_table_this_bar_does_not_have_is_refused() {
+fn a_retired_table_named_again_comes_back_with_its_own_number() {
+    let mut current = default_config();
+    let retired = current
+        .tables
+        .iter_mut()
+        .find(|table| table.number == 7)
+        .expect("fixture table");
+    retired.retired = true;
+    let revived = retired.id;
+
+    let mut draft = draft_of(&current);
+    draft.tables.push(TableDraft {
+        id: revived.0,
+        seats: 2,
+        zone: "Бар".to_owned(),
+    });
+    let resolved = draft.resolve(&current).expect("resolvable");
+    let back = resolved
+        .tables
+        .iter()
+        .find(|table| table.id == revived)
+        .expect("still the same table");
+    assert!(!back.retired);
+    assert_eq!(back.number, 7, "its number was never anybody else's");
+    assert_eq!(back.seats, 2);
+    assert_eq!(resolved.tables.len(), current.tables.len(), "no table was added");
+}
+
+#[test]
+fn a_proposal_saved_again_after_it_took_effect_adds_no_second_table() {
+    // The answer to a save can be lost on the way back. The app sends the same rows again, and the
+    // table it added the first time is by then simply a table the bar has.
     let current = default_config();
     let mut draft = draft_of(&current);
-    let stranger = id(9999);
-    draft.tables.push(TableDraft::Existing {
-        id: stranger,
+    draft.tables.push(TableDraft {
+        id: id(3001),
         seats: 4,
         zone: "Зал".to_owned(),
     });
-    assert_eq!(
-        draft.resolve(&current, minter(1000)),
-        Err(DraftError::UnknownTable { id: stranger })
-    );
+    let once = draft.resolve(&current).expect("resolvable");
+    let twice = draft.resolve(&once).expect("resolvable");
+    assert_eq!(twice, once);
 }
 
 #[test]
@@ -205,13 +224,13 @@ fn a_proposal_naming_the_same_table_twice_is_refused() {
     let current = default_config();
     let mut draft = draft_of(&current);
     let repeated = current.tables[0].id.0;
-    draft.tables.push(TableDraft::Existing {
+    draft.tables.push(TableDraft {
         id: repeated,
         seats: 2,
         zone: "Бар".to_owned(),
     });
     assert_eq!(
-        draft.resolve(&current, minter(1000)),
+        draft.resolve(&current),
         Err(DraftError::RepeatedTable { id: repeated })
     );
 }
@@ -222,7 +241,7 @@ fn a_timezone_the_system_cannot_compute_in_is_refused() {
     let mut draft = draft_of(&current);
     draft.timezone = "Europe/Belgrad".to_owned();
     assert_eq!(
-        draft.resolve(&current, minter(1000)),
+        draft.resolve(&current),
         Err(DraftError::UnknownTimezone {
             name: "Europe/Belgrad".to_owned()
         })
@@ -242,7 +261,7 @@ fn an_existing_binding_survives_a_round_trip_through_the_settings_screen() {
         .clone();
 
     let resolved = draft_of(&current)
-        .resolve(&current, minter(1000))
+        .resolve(&current)
         .expect("resolvable");
     assert_eq!(
         resolved
@@ -261,7 +280,7 @@ fn a_newly_invited_member_starts_unbound() {
     draft.staff.push(StaffDraft {
         username: "marko_bg".to_owned(),
     });
-    let resolved = draft.resolve(&current, minter(1000)).expect("resolvable");
+    let resolved = draft.resolve(&current).expect("resolvable");
     assert!(resolved.staff.contains(&StaffMember {
         username: "marko_bg".to_owned(),
         telegram_user_id: None,
@@ -280,7 +299,7 @@ fn a_member_reinvited_under_a_different_case_keeps_their_binding() {
     let mut draft = draft_of(&current);
     draft.staff[0].username = bound.username.to_uppercase();
 
-    let resolved = draft.resolve(&current, minter(1000)).expect("resolvable");
+    let resolved = draft.resolve(&current).expect("resolvable");
     assert_eq!(resolved.staff[0].telegram_user_id, bound.telegram_user_id);
 }
 
@@ -290,7 +309,7 @@ fn surrounding_whitespace_is_stripped_rather_than_stored() {
     let mut draft = draft_of(&current);
     draft.name = "  Бар «Подвал»  ".to_owned();
     draft.message_templates = vec!["  Ваш стол готов  ".to_owned()];
-    let resolved = draft.resolve(&current, minter(1000)).expect("resolvable");
+    let resolved = draft.resolve(&current).expect("resolvable");
     assert_eq!(resolved.name, "Бар «Подвал»");
     assert_eq!(resolved.message_templates, vec!["Ваш стол готов"]);
 }
@@ -301,7 +320,7 @@ fn a_blank_zone_name_is_refused_before_anything_else_is_considered() {
     let mut draft = draft_of(&current);
     draft.zones.push("   ".to_owned());
     assert!(matches!(
-        draft.resolve(&current, minter(1000)),
+        draft.resolve(&current),
         Err(DraftError::Zone(_))
     ));
 }

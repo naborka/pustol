@@ -121,6 +121,26 @@ pub enum Error {
     #[error("this guest already has a booking on this shift")]
     AlreadyBookedThisShift,
 
+    /// A change by staff would leave the guest with two plans: two bookings not yet begun. Booking
+    /// again replaces a plan, so a guest never makes two; staff restoring or moving a booking must
+    /// not make them either.
+    #[error("this guest already has another plan")]
+    GuestHasAnotherPlan,
+
+    /// A guest's booking would replace other bookings than the ones their app said it would.
+    ///
+    /// The app words its button from what booking again replaces — «Перенести» or «Забронировать» —
+    /// and the guest agreed to that. By the time the tap arrives a plan may have begun or staff may
+    /// have marked a no-show, and carrying on would give up a booking the guest meant to keep, or
+    /// keep one they meant to give up. Nothing is written.
+    #[error("what this booking would replace is not what the app said it would")]
+    BookingChanged,
+
+    /// A booking set back to a status that holds its table, when that table has been given to
+    /// another party since it was released. Pick another table or leave the booking as it is.
+    #[error("that table has been given to another party since")]
+    TableTaken,
+
     /// An instant could not be built from a service day and a wall-clock minute.
     #[error(transparent)]
     Time(#[from] TimeError),

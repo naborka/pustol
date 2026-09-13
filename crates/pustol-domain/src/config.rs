@@ -15,7 +15,7 @@ use chrono_tz::Tz;
 
 use crate::allocator::{Booking, BookingId};
 use crate::schedule::{BarTable, Zone};
-use crate::service_day::{ServiceDay, minutes_within};
+use crate::service_day::{Interval, ServiceDay, minutes_within, resolve_boundary};
 
 /// An inclusive integer range a setting must fall in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -228,18 +228,36 @@ impl BarConfig {
     /// yesterday's shift, and a guest tapping "tonight" means the evening they are currently
     /// sitting in. Getting this wrong would move the whole day strip forward by one at midnight
     /// and show staff an empty room while the room is full.
+    ///
+    /// Decided on instants, never on the wall clock: yesterday runs until [`Self::shift_end`]. The
+    /// wall clock repeats an hour in autumn, and reading it made a shift that had closed at the first
+    /// 02:30 start running again at the second 02:00, an hour after every table was free.
     #[must_use]
     pub fn current_service_day(&self, now: DateTime<Utc>) -> ServiceDay {
         let today = ServiceDay::new(now.with_timezone(&self.timezone).date_naive());
-        if let Some(yesterday) = today.checked_sub_days(1) {
-            let hours = self.week.for_service_day(yesterday);
-            if !hours.closed
-                && minutes_within(yesterday, now, self.timezone) < hours.close_minutes
-            {
-                return yesterday;
-            }
+        match today.checked_sub_days(1) {
+            Some(yesterday) if self.shift_end(yesterday).is_some_and(|end| now < end) => yesterday,
+            _ => today,
         }
-        today
+    }
+
+    /// The moment the last sitting `day` allows is over, or `None` on a day off.
+    ///
+    /// The last arrival is resolved as the grid resolves every arrival, and held for one turn of real
+    /// time as every booking is, so a shift stops running exactly when its last possible booking
+    /// finishes. On the night the clocks go forward that is an hour after closing on the wall, which
+    /// is the hour the last sitting really has. A last arrival the clocks skip counts from the moment
+    /// they jump past it: nobody can arrive then, but the evening still ends a turn later.
+    fn shift_end(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
+        let hours = self.week.for_service_day(day);
+        if hours.closed {
+            return None;
+        }
+        let last_arrival =
+            resolve_boundary(day, hours.close_minutes - self.turn_minutes, self.timezone).ok()?;
+        Interval::from_duration(last_arrival, self.turn_minutes)
+            .ok()
+            .map(Interval::end)
     }
 
     /// Every reason this configuration is illegal. Empty means legal.

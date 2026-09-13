@@ -66,10 +66,46 @@ describe("what a failure says", () => {
       "would_strand_bookings",
       "shift_not_bookable",
       "party_too_large",
+      "guest_has_another_plan",
+      "table_taken",
+      "text_invalid",
     ]) {
       expect(messageFor(failure(code), "staff"), code).not.toBe(
         messageFor(failure("something_unmapped"), "staff"),
       );
+    }
+  });
+});
+
+describe("what the newest refusals say", () => {
+  it("tells a guest their bookings changed under the button, and to look before pressing again", () => {
+    expect(messageFor(failure("booking_changed"), "guest")).toBe(
+      "Ваши брони изменились — проверьте и нажмите ещё раз.",
+    );
+  });
+
+  it("tells staff the guest already holds another evening, and what to do about it", () => {
+    expect(messageFor(failure("guest_has_another_plan"), "staff")).toBe(
+      "У гостя уже есть бронь на другой вечер — сначала перенесите или отмените её.",
+    );
+  });
+
+  it("names a character no text may hold, to whoever typed it", () => {
+    expect(messageFor(failure("text_invalid"), "staff")).toBe("В тексте есть недопустимый символ.");
+    expect(messageFor(failure("text_invalid"), "guest")).toBe("В тексте есть недопустимый символ.");
+  });
+
+  it("tells staff a table taken since is taken, and where to reseat", () => {
+    expect(messageFor(failure("table_taken"), "staff")).toBe(
+      "Стол уже заняли — пересадите бронь через «Перенести».",
+    );
+  });
+
+  it("points a manager at the reasons a refused save keeps, not at marks the screen never draws", () => {
+    for (const code of ["settings_invalid", "would_strand_bookings"]) {
+      const said = messageFor(failure(code), "staff");
+      expect(said, code).toMatch(/«Почему»/);
+      expect(said, code).not.toMatch(/отмеченн|^Эти брони/);
     }
   });
 });

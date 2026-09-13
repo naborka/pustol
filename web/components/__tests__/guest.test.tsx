@@ -119,14 +119,19 @@ describe("the guest's home screen", () => {
   });
 
   it("offers a move exactly when a new booking would replace this one, and always a cancel", () => {
-    // The server says what a new booking would do to each; the card does not work it out again.
-    const cases: [string, GuestBooking, boolean][] = [
-      ["a plan not yet begun", booking, true],
-      ["a no-show whose table is still held", heldNoShow, true],
-      ["a party at the table", seated, false],
+    // The server says what a new booking would do to each; the card does not work it out again. A
+    // held no-show is replaced only by a booking on its own evening, so only while that evening
+    // still takes arrivals by the bar's clock.
+    const cases: [string, GuestBooking, typeof bar, boolean][] = [
+      ["a plan not yet begun", booking, bar, true],
+      ["a no-show whose table is still held", heldNoShow, bar, true],
+      ["a held no-show after the last arrival", heldNoShow, { ...bar, now_minutes: 1_440 }, false],
+      ["a held no-show once the bar's day has moved on", heldNoShow, { ...bar, today: "2026-09-12" }, false],
+      ["a held no-show on an evening with no arrivals", heldNoShow, { ...bar, last_arrival_minutes: null }, false],
+      ["a party at the table", seated, bar, false],
     ];
-    for (const [name, held, movable] of cases) {
-      home({ bookings: [held] });
+    for (const [name, held, clock, movable] of cases) {
+      home({ bookings: [held], bar: clock });
       expect(screen.queryByText("Перенести") !== null, name).toBe(movable);
       expect(screen.getByText("Отменить"), name).toBeDefined();
       expect(screen.queryByText("Другой вечер"), name).toBeNull();
@@ -424,7 +429,7 @@ describe("cancelling", () => {
     expect(within(sheet).getByText("Сегодня в 21:30 · 4 гостя")).toBeDefined();
     expect(
       within(sheet).getByText(
-        "Стол сразу уйдёт другим гостям. Вернуть его получится, только если он останется свободен.",
+        "Стол сразу уйдёт другим гостям — вернуть эту бронь не получится.",
       ),
     ).toBeDefined();
 

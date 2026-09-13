@@ -84,6 +84,7 @@ pub(crate) struct BookingRow {
     pub guest_name: String,
     pub guest_username: Option<String>,
     pub telegram_user_id: Option<i64>,
+    pub reachable_by_bot: bool,
     pub status: StoredStatus,
     pub source: BookingSource,
     pub note: Option<String>,
@@ -101,6 +102,12 @@ pub struct BookingRecord {
     pub guest_name: String,
     pub guest_username: Option<String>,
     pub telegram_user_id: Option<TelegramUserId>,
+    /// Whether the bot can message this guest: there is an account behind the booking, and the last
+    /// thing the bot learned about it is that messages reach it.
+    ///
+    /// Read with the booking, from the account row, so a screen and a decision made on the same
+    /// reading cannot disagree about it.
+    pub reachable_by_bot: bool,
     pub source: BookingSource,
     /// What staff wrote on this booking: "День рождения", "У окна". Never sent to the guest.
     pub note: Option<String>,
@@ -135,6 +142,7 @@ impl TryFrom<BookingRow> for BookingRecord {
             guest_name: row.guest_name,
             guest_username: row.guest_username,
             telegram_user_id: row.telegram_user_id.map(TelegramUserId),
+            reachable_by_bot: row.reachable_by_bot,
             source: row.source,
             note: row.note,
             cancel_reason: row.cancel_reason,

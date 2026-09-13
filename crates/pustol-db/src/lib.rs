@@ -16,6 +16,7 @@
 pub mod bar;
 pub mod bookings;
 pub mod error;
+pub mod evening;
 pub mod identity;
 pub mod ids;
 pub mod inbox;
@@ -65,6 +66,15 @@ impl Store {
     pub async fn migrate(&self) -> Result<()> {
         MIGRATOR.run(&self.pool).await?;
         Ok(())
+    }
+
+    /// A read-only transaction that sees the database as it was at its first statement, for a reading
+    /// whose parts have to describe one moment.
+    pub(crate) async fn snapshot(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        Ok(self
+            .pool
+            .begin_with("begin isolation level repeatable read read only")
+            .await?)
     }
 }
 

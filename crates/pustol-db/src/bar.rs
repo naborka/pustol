@@ -5,6 +5,7 @@ use chrono_tz::Tz;
 use pustol_domain::config::{BarConfig, DayHours, StaffMember, ValidConfig, WeekSchedule};
 use pustol_domain::draft::Draft;
 use pustol_domain::schedule::{BarTable, TableId, Zone, next_table_number};
+use pustol_domain::service_day::ServiceDay;
 use pustol_domain::{parties_above_cap, schedule_conflicts};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
@@ -53,6 +54,22 @@ pub struct SavedSettings {
     /// The number a table added next would be given, so the settings screen can label a row it
     /// has only just created.
     pub next_table_number: i32,
+    /// The evening the settings screen is showing.
+    pub day: ServiceDay,
+    /// That evening's bookings as the save left them, read before it committed: what each table's
+    /// count on the screen is made from.
+    pub bookings: Vec<crate::records::BookingRecord>,
+}
+
+/// The settings in force and the bookings of the evening the settings screen is showing, read on one
+/// snapshot.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SettingsOn {
+    pub config: ValidConfig,
+    pub version: DateTime<Utc>,
+    pub next_table_number: i32,
+    pub day: ServiceDay,
+    pub bookings: Vec<crate::records::BookingRecord>,
 }
 
 /// The configuration in force, and the version a proposal made from it carries.
@@ -76,6 +93,23 @@ impl Store {
         load_settings(&mut connection, bar).await
     }
 
+    /// The settings in force, with the bookings of `day` each table's count is made from.
+    ///
+    /// On one snapshot, so a count never describes a room other than the one listed beside it.
+    pub async fn settings_on(&self, bar: BarId, day: ServiceDay) -> Result<SettingsOn> {
+        let mut snapshot = self.snapshot().await?;
+        let settings = load_settings(&mut snapshot, bar).await?;
+        let bookings = bookings::load_shift(&mut snapshot, bar, day).await?;
+        snapshot.commit().await?;
+        Ok(SettingsOn {
+            next_table_number: next_table_number(&settings.config.tables),
+            config: settings.config,
+            version: settings.version,
+            day,
+            bookings,
+        })
+    }
+
     /// The number a newly added table would be given.
     pub async fn next_table_number(&self, bar: BarId) -> Result<i32> {
         let mut connection = self.pool().acquire().await?;
@@ -96,10 +130,14 @@ impl Store {
     /// Inventory changes are applied and the bookings reconciled rather than refused: the screen
     /// describes the room as it now physically is, and a system that will not record that just
     /// gets worked around.
+    ///
+    /// `day` is the evening the settings screen is showing; its bookings come back as the save left
+    /// them, read before it commits.
     pub async fn save_settings(
         &self,
         bar: BarId,
         draft: &Draft,
+        day: ServiceDay,
         now: DateTime<Utc>,
     ) -> Result<SavedSettings> {
         let mut transaction = self.pool().begin().await?;
@@ -110,7 +148,7 @@ impl Store {
             return Err(Error::SettingsChanged);
         }
         let proposed = draft
-            .resolve(&current.config, Uuid::new_v4)
+            .resolve(&current.config)
             .map_err(|error| Error::UnusableProposal(error.to_string()))?;
         let proposed = ValidConfig::new(proposed).map_err(Error::ProposedConfigInvalid)?;
 
@@ -134,6 +172,7 @@ impl Store {
             bookings::reconcile_from(&mut transaction, bar, &proposed, now).await?;
 
         let next_table_number = next_table_number(&proposed.tables);
+        let bookings = bookings::load_shift(&mut transaction, bar, day).await?;
         transaction.commit().await?;
 
         Ok(SavedSettings {
@@ -142,6 +181,8 @@ impl Store {
             reconciliation,
             above_cap,
             next_table_number,
+            day,
+            bookings,
         })
     }
 }
@@ -392,7 +433,11 @@ async fn write_tables(
 
     // `coalesce(existing.retired_at, now())` keeps the moment a table was first retired, so the
     // shift history can still say when the room changed.
-    sqlx::query(
+    //
+    // The app names the tables it adds, so an identity can be one another bar already uses. That row
+    // is never touched: the update is limited to this bar's rows, and a row it skipped is counted
+    // and refused, in the one statement no other writer can slip between.
+    let written = sqlx::query(
         "insert into bar_table (id, bar_id, number, seats, zone, retired_at)
          select proposed.id, $1, proposed.number, proposed.seats, proposed.zone,
                 case when proposed.retired then coalesce(existing.retired_at, now()) end
@@ -402,16 +447,22 @@ async fn write_tables(
          on conflict (id) do update set
             seats = excluded.seats,
             zone = excluded.zone,
-            retired_at = excluded.retired_at",
+            retired_at = excluded.retired_at
+         where bar_table.bar_id = excluded.bar_id",
     )
     .bind(bar)
-    .bind(ids)
+    .bind(&ids)
     .bind(numbers)
     .bind(seats)
     .bind(zones)
     .bind(retired)
     .execute(connection)
     .await?;
+    if usize::try_from(written.rows_affected()).ok() != Some(ids.len()) {
+        return Err(Error::UnusableProposal(
+            "the proposal names a table that belongs to another bar".to_owned(),
+        ));
+    }
     Ok(())
 }
 

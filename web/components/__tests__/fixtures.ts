@@ -135,6 +135,7 @@ export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
   return {
     service_date: "2026-09-11",
     today: "2026-09-11",
+    version: 1,
     hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
     tables: [
       shiftTable(),
@@ -201,6 +202,7 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     next_table_number: 9,
     limits: LIMITS,
     contact: "",
+    service_date: "2026-09-11",
     version: "2026-09-13T08:00:00Z",
     ...overrides,
   };

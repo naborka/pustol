@@ -128,6 +128,7 @@ export interface ShiftBooking {
   source: Source;
   /** What staff wrote on this booking. Never shown to the guest and never sent anywhere. */
   note: string | null;
+  /** The guest has a Telegram account and the bot may write to it. */
   reachable_by_bot: boolean;
   /** Its window has begun, by the server's clock: its time is history from then on. */
   started: boolean;
@@ -154,6 +155,11 @@ export interface ShiftView {
   service_date: IsoDate;
   /** The bar's running service day by the server's clock, which a phone left open overnight is not. */
   today: IsoDate;
+  /**
+   * The bar's counter of changes, read in the same snapshot as the rest. A room with a lower version is
+   * older than the one on screen, whenever it arrives.
+   */
+  version: number;
   hours: Hours;
   tables: ShiftTable[];
   bookings: ShiftBooking[];
@@ -176,8 +182,8 @@ export interface Reconciliation {
 
 /**
  * Every staff write that can change the room answers with the evening as it stands after the write,
- * read once it was committed: a room the phone patched itself kept every other booking the server
- * had just reseated where it used to be.
+ * read inside the write's own transaction: a room the phone patched itself kept every other booking
+ * the server had just reseated where it used to be.
  */
 interface WithShift {
   shift: ShiftView;
@@ -186,6 +192,7 @@ interface WithShift {
 export interface CancelledByStaff extends WithShift {
   booking: ShiftBooking;
   reconciliation: Reconciliation;
+  /** A notice was queued and the bot can reach the guest. */
   guest_notified: boolean;
 }
 
@@ -256,6 +263,8 @@ export interface SettingsView {
   week: Hours[];
   zones: string[];
   tables: SettingsTable[];
+  /** The evening every `bookings_today` counts bookings for. */
+  service_date: IsoDate;
   turn_minutes: number;
   slot_step_minutes: number;
   max_party: number;
@@ -277,10 +286,15 @@ export interface SavedSettings {
   above_cap: number;
 }
 
-/** A table in a proposal: one that exists, or one being added. */
-export type TableDraft =
-  | { kind: "existing"; id: string; seats: number; zone: string }
-  | { kind: "new"; seats: number; zone: string };
+/**
+ * A table in a proposal. The app names a new table itself, so saving the same proposal twice updates
+ * the table the first save made rather than adding a second.
+ */
+export interface TableDraft {
+  id: string;
+  seats: number;
+  zone: string;
+}
 
 export interface SettingsDraft {
   name: string;
@@ -412,11 +426,13 @@ export function client(credentials: string) {
 
     days: (partySize: number) => get<DayRail>(`/api/days?${query({ party_size: partySize })}`),
 
-    book: (serviceDate: IsoDate, startMinutes: number, partySize: number) =>
+    /** `replacing` is what the guest was told this booking replaces; the server refuses otherwise. */
+    book: (serviceDate: IsoDate, startMinutes: number, partySize: number, replacing: string[]) =>
       send<BookingTaken>("POST", "/api/booking", {
         service_date: serviceDate,
         start_minutes: startMinutes,
         party_size: partySize,
+        replacing,
       }),
 
     cancelMine: (bookingId: string) =>
@@ -529,7 +545,6 @@ export function draftOf(settings: SettingsView): SettingsDraft {
     week: settings.week.map((hours) => ({ ...hours })),
     zones: [...settings.zones],
     tables: settings.tables.map((table) => ({
-      kind: "existing" as const,
       id: table.id,
       seats: table.seats,
       zone: table.zone,

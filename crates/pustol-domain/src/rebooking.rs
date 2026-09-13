@@ -45,6 +45,12 @@ impl Booking {
         }
     }
 
+    /// Whether this booking is a plan at `now`: confirmed, and its time not yet come.
+    #[must_use]
+    pub fn is_plan(&self, now: DateTime<Utc>) -> bool {
+        self.rebooking(now) == Some(Rebooking::AnyEvening)
+    }
+
     fn replaced_by_booking_on(&self, day: ServiceDay, now: DateTime<Utc>) -> bool {
         match self.rebooking(now) {
             Some(Rebooking::AnyEvening) => true,
@@ -65,6 +71,39 @@ pub fn replaced_on(guest: &[Booking], day: ServiceDay, now: DateTime<Utc>) -> Ve
         .collect();
     replaced.sort_unstable_by_key(|booking| (booking.window.start(), booking.id));
     replaced.into_iter().map(|booking| booking.id).collect()
+}
+
+/// A rule about what one guest may hold, broken by one of their bookings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HoldingConflict {
+    /// Another booking of theirs still holds a table on the same evening.
+    SameEvening,
+    /// The booking is a plan, and so is another booking of theirs.
+    AnotherPlan,
+}
+
+/// **What a guest may hold.** At most one running booking on any evening, and at most one plan.
+///
+/// Answers which of the two rules `booking` breaks among `guest` — every booking that guest holds —
+/// at `now`. Booking again keeps both by replacing; this is the statement of them that any other
+/// change to a guest's booking, such as staff restoring or moving one, is checked against.
+#[must_use]
+pub fn holding_conflict(
+    guest: &[Booking],
+    booking: BookingId,
+    now: DateTime<Utc>,
+) -> Option<HoldingConflict> {
+    let this = guest
+        .iter()
+        .find(|held| held.id == booking && !held.has_finished(now))?;
+    let mut others = guest
+        .iter()
+        .filter(|held| held.id != booking && !held.has_finished(now));
+    if others.clone().any(|other| other.service_day == this.service_day) {
+        return Some(HoldingConflict::SameEvening);
+    }
+    (this.is_plan(now) && others.any(|other| other.is_plan(now)))
+        .then_some(HoldingConflict::AnotherPlan)
 }
 
 /// Whether a new booking of this guest on `day` is refused, because they already hold that evening
@@ -203,6 +242,52 @@ mod tests {
         }
         assert!(replaced_on(&finished, thursday(), over).is_empty());
         assert!(!refused_on(&finished, thursday(), over));
+    }
+
+    #[test]
+    fn a_guest_holds_at_most_one_plan_and_one_booking_an_evening() {
+        let now = at(thursday(), 10);
+        let saturday = thursday().checked_add_days(2).expect("in range");
+        let thursday_plan = booking(1, thursday(), BookingStatus::Confirmed);
+        let friday_plan = booking(2, friday(), BookingStatus::Confirmed);
+        assert_eq!(
+            holding_conflict(&[thursday_plan.clone(), friday_plan.clone()], thursday_plan.id, now),
+            Some(HoldingConflict::AnotherPlan)
+        );
+
+        let second_thursday = Booking {
+            window: Interval::from_duration(at(thursday(), 21), 60).expect("positive"),
+            ..booking(3, thursday(), BookingStatus::Arrived)
+        };
+        assert_eq!(
+            holding_conflict(&[thursday_plan.clone(), second_thursday], thursday_plan.id, now),
+            Some(HoldingConflict::SameEvening),
+            "two on one evening, whatever else"
+        );
+
+        let seated = at(thursday(), 19);
+        let at_the_table = booking(4, thursday(), BookingStatus::Arrived);
+        assert_eq!(
+            holding_conflict(&[at_the_table, friday_plan.clone()], friday_plan.id, seated),
+            None,
+            "a table tonight and a plan for Friday is what a guest may hold"
+        );
+
+        let over = booking(5, thursday(), BookingStatus::Confirmed);
+        assert_eq!(
+            holding_conflict(
+                &[over, friday_plan.clone()],
+                friday_plan.id,
+                at(thursday(), 21)
+            ),
+            None,
+            "an evening that is over holds nothing"
+        );
+        let unrelated = booking(6, saturday, BookingStatus::Confirmed);
+        assert_eq!(
+            holding_conflict(std::slice::from_ref(&unrelated), unrelated.id, now),
+            None
+        );
     }
 
     #[test]

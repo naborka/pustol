@@ -28,7 +28,9 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` keeps a request body as it was sent while it is checked, so it is read into its type
+# from the very bytes that arrived.
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 # `fs` serves the app's static build, `set-status` turns the 404 page into an actual 404,

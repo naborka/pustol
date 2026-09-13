@@ -9,6 +9,7 @@ use std::time::Duration;
 use pustol_db::{BarId, Store, TelegramUserId};
 use pustol_telegram::updates::{CallbackQuery, Message, UPDATE_RETENTION};
 use pustol_telegram::{Bot, SendError, Update, messages};
+use uuid::Uuid;
 
 use crate::callbacks::{self, Callback};
 use crate::state::Clock;
@@ -27,18 +28,35 @@ const AFTER_REFUSAL: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Debug)]
 pub struct Inbox {
-    pub store: Store,
-    pub bot: Bot,
-    pub bar: BarId,
-    pub clock: Clock,
+    store: Store,
+    bot: Bot,
+    bar: BarId,
+    clock: Clock,
+    /// Who this inbox is when it claims an update.
+    ///
+    /// Drawn afresh for every inbox, so a process that starts again is somebody else and never takes
+    /// back a claim it may already have answered. Clones share it: they are the same process.
+    owner: Uuid,
 }
 
-/// Why an update could not be taken in hand.
+impl Inbox {
+    pub fn new(store: Store, bot: Bot, bar: BarId, clock: Clock) -> Self {
+        Self {
+            store,
+            bot,
+            bar,
+            clock,
+            owner: Uuid::new_v4(),
+        }
+    }
+}
+
+/// Why an update was not settled.
 #[derive(Debug, thiserror::Error)]
-pub enum ClaimError {
+pub enum HandleError {
     #[error("the bot token names no bot, so no update of it can be claimed")]
     NoBot,
-    #[error("could not claim an update: {0}")]
+    #[error("could not take an update in hand: {0}")]
     Store(#[from] pustol_db::Error),
 }
 
@@ -48,7 +66,7 @@ pub enum PollError {
     #[error(transparent)]
     Telegram(#[from] SendError),
     #[error(transparent)]
-    Claim(#[from] ClaimError),
+    Handle(#[from] HandleError),
 }
 
 impl Inbox {
@@ -56,8 +74,8 @@ impl Inbox {
     ///
     /// Only the wait for Telegram is cut short by a stop. Updates already in hand are settled in
     /// full, so a guest's tap is never left cancelled but unanswered, and before stopping Telegram is
-    /// told what was settled. An update that cannot be claimed stops the batch where it is: it is
-    /// fetched again once the wait after a failure is over.
+    /// told what was settled. An update that cannot be taken in hand stops the batch where it is: it
+    /// is fetched again once the wait after a failure is over.
     pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut offset = None;
         let mut confirmed = offset;
@@ -120,20 +138,24 @@ impl Inbox {
     ///
     /// An update is settled once it is claimed and answered, or found claimed by somebody else, and
     /// the offset moves past it either way: an update whose answer fails every time must not be
-    /// fetched again for ever. The first update that cannot be claimed stops the batch before it,
-    /// with the error.
+    /// fetched again for ever. The first update that cannot be taken in hand stops the batch before
+    /// it, with the error.
+    ///
+    /// Past the last one settled, not past the highest id ever seen: after a quiet week Telegram counts
+    /// ids afresh from a random number, and an offset held at an old, higher id confirms nothing it
+    /// now has, so the same update would come back on every poll.
     async fn settle(
         &self,
         updates: Vec<Update>,
         mut offset: Option<i64>,
-    ) -> (Option<i64>, Result<(), ClaimError>) {
+    ) -> (Option<i64>, Result<(), HandleError>) {
         let fetched = !updates.is_empty();
         for update in updates {
             let after = update.update_id + 1;
             if let Err(error) = self.handle(update).await {
                 return (offset, Err(error));
             }
-            offset = Some(offset.map_or(after, |current| current.max(after)));
+            offset = Some(after);
         }
         if fetched {
             self.forget_old_claims().await;
@@ -149,13 +171,16 @@ impl Inbox {
     /// gives up, and the guest taps again, which Telegram sends as a new update. Answering twice
     /// instead would cancel twice and say so twice, which nobody can take back.
     ///
-    /// Failures to answer are logged; there is nobody else to tell.
-    pub async fn handle(&self, update: Update) -> Result<bool, ClaimError> {
-        let bot = self.bot.id().ok_or(ClaimError::NoBot)?;
+    /// A failure to read what the answer needs, before anything has been said, is the error of the
+    /// whole update: the batch stops, the update is fetched again, and this inbox, which owns the
+    /// claim, takes it again and answers. So is a claim that was written while the reply saying so was
+    /// lost. Failures once something has been sent are logged; there is nobody else to tell.
+    pub async fn handle(&self, update: Update) -> Result<bool, HandleError> {
+        let bot = self.bot.id().ok_or(HandleError::NoBot)?;
         let now = self.clock.now();
         if !self
             .store
-            .claim_update(bot, update.update_id, now, now - UPDATE_RETENTION)
+            .claim_update(bot, update.update_id, self.owner, now, now - UPDATE_RETENTION)
             .await?
         {
             return Ok(false);
@@ -163,7 +188,7 @@ impl Inbox {
         if let Some(query) = update.callback_query {
             self.answer_tap(query).await;
         } else if let Some(message) = update.message {
-            self.answer_message(message).await;
+            self.answer_message(message).await?;
         }
         Ok(true)
     }
@@ -223,17 +248,11 @@ impl Inbox {
         }
     }
 
-    async fn answer_message(&self, message: Message) {
+    async fn answer_message(&self, message: Message) -> Result<(), pustol_db::Error> {
         if !message.chat.is_private() {
-            return;
+            return Ok(());
         }
-        let config = match self.store.config(self.bar).await {
-            Ok(config) => config,
-            Err(error) => {
-                tracing::error!(%error, "could not read the bar to answer a message");
-                return;
-            }
-        };
+        let config = self.store.config(self.bar).await?;
         let contact = config
             .contact
             .as_deref()
@@ -259,29 +278,18 @@ impl Inbox {
         if let Err(error) = self.bot.send_message(message.chat.id, &reply, &[]).await {
             tracing::warn!(%error, "could not answer a message");
         }
+        Ok(())
     }
 }
 
 /// The deep-link payload of a `/start` command, empty when there is none.
 ///
-/// A client that picks the command from a list addresses it to the bot by name, `/start@PodvalBot`,
-/// and a payload follows the name the same way it follows the bare command.
+/// A client that picks the command from a list addresses it to a bot by name, `/start@PodvalBot`.
+/// The name is not read: only private chats are answered, and in a private chat every message goes
+/// to this bot whatever name it carries. The payload follows after any whitespace, as clients send
+/// whatever the guest typed.
 fn start_payload(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("/start")?;
-    let rest = match rest.strip_prefix('@') {
-        Some(addressed) => {
-            let name = addressed
-                .find(char::is_whitespace)
-                .unwrap_or(addressed.len());
-            if name == 0 {
-                return None;
-            }
-            &addressed[name..]
-        }
-        None => rest,
-    };
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.strip_prefix(' ').map(str::trim)
+    let (command, payload) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    (command.is_empty() || command.starts_with('@')).then(|| payload.trim())
 }

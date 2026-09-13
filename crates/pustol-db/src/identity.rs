@@ -226,6 +226,11 @@ struct RecordedProfile {
 
 /// Stores the profile a payload signed at `signed_at` carries, unless one signed later is stored
 /// already, and returns the account as stored.
+///
+/// Telegram stamps whole seconds, so two payloads of one second can carry two profiles, and nothing
+/// says which is the newer. Neither rewrites the other: a payload stamped the second already stored
+/// counts as recorded only when its profile is the one stored, so a username given up in that second
+/// cannot claim a seat under it.
 async fn record_profile(
     connection: &mut PgConnection,
     account: &TelegramAccount,
@@ -237,7 +242,13 @@ async fn record_profile(
         "update telegram_user
          set username = $2, first_name = $3, last_name = $4, language_code = $5,
              profile_signed_at = $6
-         where id = $1 and (profile_signed_at is null or profile_signed_at <= $6)
+         where id = $1
+           and (profile_signed_at is null
+                or profile_signed_at < $6
+                or (profile_signed_at = $6
+                    and username is not distinct from $2 and first_name = $3
+                    and last_name is not distinct from $4
+                    and language_code is not distinct from $5))
          returning id, username, first_name, last_name, language_code",
     )
     .bind(account.id.0)

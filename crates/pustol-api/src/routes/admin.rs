@@ -3,38 +3,34 @@
 //! Every handler here takes [`Staff`], so a guest cannot reach any of them by guessing a URL: the
 //! check is in the signature rather than in a line of code somebody could omit.
 //!
-//! Every write that can change the room answers with the evening as it stands once the write has
-//! committed, built by [`evening`] — the same builder `GET /shift` uses. A screen that reloaded the
-//! shift itself would draw whatever a colleague did in between as if this write had done it.
+//! Every write that can change the room answers with the evening as that write left it: read by the
+//! store inside the write's own transaction, before it commits, and drawn by [`ShiftView::of`], the
+//! same drawing `GET /shift` uses. A screen that reloaded the shift itself would draw whatever a
+//! colleague did in between as if this write had done it, and a read after the commit could fail and
+//! report a write that went through as one that did not.
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
 use pustol_db::bookings::{Attendance, Channel, MoveTo, MoveWords, NewBooking};
-use pustol_db::records::{BookingRecord, blocks_of, bookings_of};
+use pustol_db::evening::Evening;
+use pustol_db::records::BookingRecord;
 use pustol_domain::config::ValidConfig;
 use pustol_domain::draft::Draft;
-use pustol_domain::schedule::next_table_number;
-use pustol_domain::{BookingId, Interval, ServiceDay, TableId, minutes_within};
+use pustol_domain::{BookingId, ServiceDay, TableId};
 use pustol_telegram::messages;
 use uuid::Uuid;
 
 use crate::auth::Staff;
+use crate::body::JsonBody;
 use crate::dto::{
     AttendanceRequest, Availability, AvailabilityQuery, BlockRequest, CancelRequest, Hours,
     LimitsView, MessageRequest, MoveRequest, NoteRequest, ReconcileRequest, ReconciliationView,
-    SavedSettingsView, SettingsTable, SettingsView, ShiftBooking, ShiftDay, ShiftQuery, ShiftStats,
-    ShiftTable, ShiftView, StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest,
+    SavedSettingsView, SettingsTable, SettingsView, ShiftBooking, ShiftQuery, ShiftView,
+    StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
-
-/// How far ahead the staff day sheet reaches.
-///
-/// The widest booking horizon the bar could ever set for guests, so staff can always see at least
-/// as far as the guests they are answering the phone for — and, as the docs promise, a month out.
-const STAFF_HORIZON_DAYS: i32 = pustol_domain::LIMITS.horizon_days.max;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -57,114 +53,16 @@ async fn shift(
     _staff: Staff,
     Query(query): Query<ShiftQuery>,
 ) -> ApiResult<Json<ShiftView>> {
-    let (_, view) = evening(&state, ServiceDay::new(query.service_date), state.now()).await?;
-    Ok(Json(view))
+    let evening = state
+        .store
+        .evening(state.bar, ServiceDay::new(query.service_date), state.now())
+        .await?;
+    Ok(Json(ShiftView::of(&evening)))
 }
 
-/// One evening as the shift screen draws it, read now, with the configuration it was drawn under.
-async fn evening(
-    state: &AppState,
-    day: ServiceDay,
-    now: DateTime<Utc>,
-) -> ApiResult<(ValidConfig, ShiftView)> {
-    let config = state.store.config(state.bar).await?;
-    let shift = state.store.shift(state.bar, day).await?;
-    let hours = config.week.for_service_day(day);
-
-    let tables: Vec<ShiftTable> = config
-        .active_tables()
-        .map(|table| ShiftTable {
-            id: table.id.0,
-            number: table.number,
-            seats: table.seats,
-            zone: table.zone.as_str().to_owned(),
-            blocked_because: shift
-                .blocks
-                .iter()
-                .find(|block| {
-                    block.block.table_id == table.id && block.block.service_day == day
-                })
-                .map(|block| block.reason.clone()),
-        })
-        .collect();
-
-    // "Free now", the now-line and "who fits" are only meaningful on the shift that is actually
-    // running. On any other day an invented number would be worse than a blank.
-    let today = config.current_service_day(now);
-    let is_running = today == day;
-    let walk_in_window = Interval::from_duration(now, config.turn_minutes).ok();
-    let free_now = is_running.then(|| {
-        tables
-            .iter()
-            .filter(|table| table.blocked_because.is_none())
-            .filter(|table| {
-                // The one occupancy rule, asked of the one function: a party that has left or
-                // never came does not hold a table staff can see standing empty.
-                !shift.bookings.iter().any(|record| {
-                    record
-                        .booking
-                        .occupancy()
-                        .is_some_and(|held| {
-                            record.booking.table_id == Some(TableId(table.id))
-                                && held.start() <= now
-                                && now < held.end()
-                        })
-                })
-            })
-            .count()
-    });
-    let now_minutes = is_running.then(|| minutes_within(day, now, config.timezone));
-    let largest_party_seatable_now = is_running
-        .then_some(walk_in_window)
-        .flatten()
-        .and_then(|window| {
-            pustol_domain::largest_party_seatable(
-                &config,
-                day,
-                window,
-                &bookings_of(&shift.bookings),
-                &blocks_of(&shift.blocks),
-            )
-        });
-
-    let reachable = pustol_domain::days_from(today, STAFF_HORIZON_DAYS);
-    let counts = state.store.bookings_per_day(state.bar, &reachable).await?;
-
-    let view = ShiftView {
-        service_date: day.date(),
-        today: today.date(),
-        hours: hours.into(),
-        tables,
-        bookings: shift
-            .bookings
-            .iter()
-            .map(|record| ShiftBooking::of(record, &config, now))
-            .collect(),
-        stats: ShiftStats {
-            bookings: shift.bookings.len(),
-            guests: shift
-                .bookings
-                .iter()
-                .map(|record| record.booking.party_size)
-                .sum(),
-            free_now,
-        },
-        now_minutes,
-        largest_party_seatable_now,
-        days: reachable
-            .iter()
-            .zip(counts)
-            .map(|(reachable_day, bookings)| ShiftDay {
-                service_date: reachable_day.date(),
-                closed: config.week.for_service_day(*reachable_day).closed,
-                bookings,
-            })
-            .collect(),
-        guest_horizon_days: config.horizon_days,
-        cancel_reasons: config.cancel_reasons.clone(),
-        message_templates: config.message_templates.clone(),
-    };
-    Ok((config, view))
+/// A booking as the evening a write left draws it, by that evening's configuration and clock.
+fn drawn_in(record: &BookingRecord, evening: &Evening) -> ShiftBooking {
+    ShiftBooking::of(record, &evening.config, evening.now)
 }
 
 async fn availability(
@@ -196,7 +94,7 @@ pub struct BookedView {
 async fn create_booking(
     State(state): State<AppState>,
     _staff: Staff,
-    Json(request): Json<StaffBookingRequest>,
+    JsonBody(request): JsonBody<StaffBookingRequest>,
 ) -> ApiResult<Json<BookedView>> {
     if request.guest_name.trim().is_empty() {
         return Err(ApiError::bad_request(
@@ -204,7 +102,6 @@ async fn create_booking(
             "a booking needs a name to call out",
         ));
     }
-    let now = state.now();
     let created = state
         .store
         .create_booking(
@@ -221,13 +118,12 @@ async fn create_booking(
                 // remind. The absence is structural, not a setting.
                 reminder: None,
             },
-            now,
+            state.now(),
         )
         .await?;
-    let (_, shift) = evening(&state, created.record.booking.service_day, now).await?;
     Ok(Json(BookedView {
-        booking: ShiftBooking::of(&created.record, &created.config, now),
-        shift,
+        booking: drawn_in(&created.record, &created.evening),
+        shift: ShiftView::of(&created.evening),
     }))
 }
 
@@ -241,18 +137,16 @@ async fn set_attendance(
     State(state): State<AppState>,
     _staff: Staff,
     Path(id): Path<Uuid>,
-    Json(request): Json<AttendanceRequest>,
+    JsonBody(request): JsonBody<AttendanceRequest>,
 ) -> ApiResult<Json<AttendanceView>> {
-    let now = state.now();
     let recorded = state
         .store
-        .set_attendance(state.bar, BookingId(id), request.attendance, now)
+        .set_attendance(state.bar, BookingId(id), request.attendance, state.now())
         .await?;
-    let (_, shift) = evening(&state, recorded.record.booking.service_day, now).await?;
     Ok(Json(AttendanceView {
-        booking: ShiftBooking::of(&recorded.record, &recorded.config, now),
+        booking: drawn_in(&recorded.record, &recorded.evening),
         previous: recorded.previous,
-        shift,
+        shift: ShiftView::of(&recorded.evening),
     }))
 }
 
@@ -274,20 +168,20 @@ async fn set_note(
     State(state): State<AppState>,
     _staff: Staff,
     Path(id): Path<Uuid>,
-    Json(request): Json<NoteRequest>,
+    JsonBody(request): JsonBody<NoteRequest>,
 ) -> ApiResult<Json<BookedView>> {
-    let now = state.now();
-    let record = state
+    let written = state
         .store
-        .set_note(state.bar, BookingId(id), request.note.as_deref())
+        .set_note(
+            state.bar,
+            BookingId(id),
+            request.note.as_deref(),
+            state.now(),
+        )
         .await?;
-    // Projected through the configuration read after the write, not before: a settings save landing
-    // in between would otherwise have this answer drawn in a timezone the booking is no longer
-    // kept in.
-    let (config, shift) = evening(&state, record.booking.service_day, now).await?;
     Ok(Json(BookedView {
-        booking: ShiftBooking::of(&record, &config, now),
-        shift,
+        booking: drawn_in(&written.record, &written.evening),
+        shift: ShiftView::of(&written.evening),
     }))
 }
 
@@ -296,7 +190,8 @@ pub struct MovedView {
     pub booking: ShiftBooking,
     /// Whatever the table they left let the room settle.
     pub reconciliation: ReconciliationView,
-    /// Whether the guest was told. Only a time change is theirs to hear about.
+    /// Whether the guest will hear about it. Only a time change is theirs to hear about, and only a
+    /// guest the bot can reach will.
     pub guest_notified: bool,
     pub shift: ShiftView,
 }
@@ -306,9 +201,8 @@ async fn move_booking(
     State(state): State<AppState>,
     _staff: Staff,
     Path(id): Path<Uuid>,
-    Json(request): Json<MoveRequest>,
+    JsonBody(request): JsonBody<MoveRequest>,
 ) -> ApiResult<Json<MovedView>> {
-    let now = state.now();
     let moved = state
         .store
         .move_booking(
@@ -323,15 +217,14 @@ async fn move_booking(
                 notice: word_move,
                 reminder: crate::routes::guest::word_reminder,
             }),
-            now,
+            state.now(),
         )
         .await?;
-    let (_, shift) = evening(&state, moved.record.booking.service_day, now).await?;
     Ok(Json(MovedView {
-        booking: ShiftBooking::of(&moved.record, &moved.config, now),
+        booking: drawn_in(&moved.record, &moved.evening),
         reconciliation: ReconciliationView::of(&moved.reconciliation),
         guest_notified: moved.guest_notified,
-        shift,
+        shift: ShiftView::of(&moved.evening),
     }))
 }
 
@@ -350,9 +243,8 @@ fn word_move(config: &ValidConfig, was: &BookingRecord, now: &BookingRecord) -> 
 async fn seat_walk_in(
     State(state): State<AppState>,
     _staff: Staff,
-    Json(request): Json<WalkInRequest>,
+    JsonBody(request): JsonBody<WalkInRequest>,
 ) -> ApiResult<Json<BookedView>> {
-    let now = state.now();
     let seated = state
         .store
         .seat_walk_in(
@@ -360,13 +252,12 @@ async fn seat_walk_in(
             ServiceDay::new(request.service_date),
             request.party_size,
             request.table_id.map(TableId),
-            now,
+            state.now(),
         )
         .await?;
-    let (_, shift) = evening(&state, seated.record.booking.service_day, now).await?;
     Ok(Json(BookedView {
-        booking: ShiftBooking::of(&seated.record, &seated.config, now),
-        shift,
+        booking: drawn_in(&seated.record, &seated.evening),
+        shift: ShiftView::of(&seated.evening),
     }))
 }
 
@@ -375,8 +266,8 @@ pub struct CancelledView {
     pub booking: ShiftBooking,
     /// Whatever the freed table let the room put right.
     pub reconciliation: ReconciliationView,
-    /// Whether the guest will be told. False for a booking with no account behind it, which is
-    /// exactly when staff have to pick up the telephone themselves.
+    /// Whether the guest will be told. False for a booking with no account behind it, and for a
+    /// guest the bot has found it cannot reach: exactly when staff have to pick up the telephone.
     pub guest_notified: bool,
     pub shift: ShiftView,
 }
@@ -389,9 +280,8 @@ async fn cancel_booking(
     State(state): State<AppState>,
     _staff: Staff,
     Path(id): Path<Uuid>,
-    Json(request): Json<CancelRequest>,
+    JsonBody(request): JsonBody<CancelRequest>,
 ) -> ApiResult<Json<CancelledView>> {
-    let now = state.now();
     let cancelled = state
         .store
         .cancel_booking(
@@ -399,15 +289,14 @@ async fn cancel_booking(
             BookingId(id),
             request.reason.as_deref(),
             Some(word_cancellation),
-            now,
+            state.now(),
         )
         .await?;
-    let (_, shift) = evening(&state, cancelled.record.booking.service_day, now).await?;
     Ok(Json(CancelledView {
-        booking: ShiftBooking::of(&cancelled.record, &cancelled.config, now),
+        booking: drawn_in(&cancelled.record, &cancelled.evening),
         reconciliation: ReconciliationView::of(&cancelled.reconciliation),
         guest_notified: cancelled.guest_notified,
-        shift,
+        shift: ShiftView::of(&cancelled.evening),
     }))
 }
 
@@ -431,7 +320,7 @@ async fn send_message(
     State(state): State<AppState>,
     _staff: Staff,
     Path(id): Path<Uuid>,
-    Json(request): Json<MessageRequest>,
+    JsonBody(request): JsonBody<MessageRequest>,
 ) -> ApiResult<Json<MessageSent>> {
     let records = state
         .store
@@ -462,7 +351,7 @@ pub struct ClosedView {
 async fn block(
     State(state): State<AppState>,
     staff: Staff,
-    Json(request): Json<BlockRequest>,
+    JsonBody(request): JsonBody<BlockRequest>,
 ) -> ApiResult<Json<ClosedView>> {
     if request.reason.trim().is_empty() {
         return Err(ApiError::bad_request(
@@ -470,25 +359,22 @@ async fn block(
             "closing a table needs a reason staff can read later",
         ));
     }
-    let now = state.now();
-    let day = ServiceDay::new(request.service_date);
     let tables: Vec<TableId> = request.table_ids.into_iter().map(TableId).collect();
     let closed = state
         .store
         .block_tables(
             state.bar,
-            day,
+            ServiceDay::new(request.service_date),
             &tables,
             request.reason.trim(),
             Some(staff.viewer.account.id),
-            now,
+            state.now(),
         )
         .await?;
-    let (_, shift) = evening(&state, day, now).await?;
     Ok(Json(ClosedView {
         reconciliation: ReconciliationView::of(&closed.reconciliation),
         closed: closed.closed.iter().map(|table| table.0).collect(),
-        shift,
+        shift: ShiftView::of(&closed.evening),
     }))
 }
 
@@ -510,16 +396,18 @@ pub struct ReopenedTableView {
 async fn unblock(
     State(state): State<AppState>,
     _staff: Staff,
-    Json(request): Json<UnblockRequest>,
+    JsonBody(request): JsonBody<UnblockRequest>,
 ) -> ApiResult<Json<ReopenedView>> {
-    let now = state.now();
-    let day = ServiceDay::new(request.service_date);
     let tables: Vec<TableId> = request.table_ids.into_iter().map(TableId).collect();
     let reopened = state
         .store
-        .unblock_tables(state.bar, day, &tables, now)
+        .unblock_tables(
+            state.bar,
+            ServiceDay::new(request.service_date),
+            &tables,
+            state.now(),
+        )
         .await?;
-    let (_, shift) = evening(&state, day, now).await?;
     Ok(Json(ReopenedView {
         reconciliation: ReconciliationView::of(&reopened.reconciliation),
         reopened: reopened
@@ -530,7 +418,7 @@ async fn unblock(
                 reason: table.reason,
             })
             .collect(),
-        shift,
+        shift: ShiftView::of(&reopened.evening),
     }))
 }
 
@@ -544,33 +432,33 @@ pub struct ReconciledView {
 async fn reconcile_shift(
     State(state): State<AppState>,
     _staff: Staff,
-    Json(request): Json<ReconcileRequest>,
+    JsonBody(request): JsonBody<ReconcileRequest>,
 ) -> ApiResult<Json<ReconciledView>> {
-    let now = state.now();
-    let day = ServiceDay::new(request.service_date);
-    let outcome = state.store.reconcile_shift(state.bar, day, now).await?;
-    let (_, shift) = evening(&state, day, now).await?;
+    let reconciled = state
+        .store
+        .reconcile_shift(state.bar, ServiceDay::new(request.service_date), state.now())
+        .await?;
     Ok(Json(ReconciledView {
-        reconciliation: ReconciliationView::of(&outcome),
-        shift,
+        reconciliation: ReconciliationView::of(&reconciled.reconciliation),
+        shift: ShiftView::of(&reconciled.evening),
     }))
 }
+
 async fn settings(
     State(state): State<AppState>,
     _staff: Staff,
     Query(query): Query<ShiftQuery>,
 ) -> ApiResult<Json<SettingsView>> {
-    let settings = state.store.settings(state.bar).await?;
-    let day = ServiceDay::new(query.service_date);
-    let shift = state.store.shift(state.bar, day).await?;
-    // Derived from the tables just loaded — including retired ones, which is what makes a number
-    // never reused — rather than re-read in a second transaction that could disagree with this one.
-    let next = next_table_number(&settings.config.tables);
+    let reading = state
+        .store
+        .settings_on(state.bar, ServiceDay::new(query.service_date))
+        .await?;
     Ok(Json(view_of(
-        &settings.config,
-        settings.version,
-        &shift.bookings,
-        next,
+        &reading.config,
+        reading.version,
+        reading.day,
+        &reading.bookings,
+        reading.next_table_number,
     )))
 }
 
@@ -578,19 +466,23 @@ async fn save_settings(
     State(state): State<AppState>,
     _staff: Staff,
     Query(query): Query<ShiftQuery>,
-    Json(draft): Json<Draft>,
+    JsonBody(draft): JsonBody<Draft>,
 ) -> ApiResult<Json<SavedSettingsView>> {
     let saved = state
         .store
-        .save_settings(state.bar, &draft, state.now())
+        .save_settings(
+            state.bar,
+            &draft,
+            ServiceDay::new(query.service_date),
+            state.now(),
+        )
         .await?;
-    let day = ServiceDay::new(query.service_date);
-    let shift = state.store.shift(state.bar, day).await?;
     Ok(Json(SavedSettingsView {
         settings: view_of(
             &saved.config,
             saved.version,
-            &shift.bookings,
+            saved.day,
+            &saved.bookings,
             saved.next_table_number,
         ),
         reconciliation: ReconciliationView::of(&saved.reconciliation),
@@ -598,10 +490,12 @@ async fn save_settings(
     }))
 }
 
+/// The settings screen, with each table's count of the bookings on `day`.
 fn view_of(
-    config: &pustol_domain::config::ValidConfig,
+    config: &ValidConfig,
     version: chrono::DateTime<chrono::Utc>,
-    shift: &[pustol_db::records::BookingRecord],
+    day: ServiceDay,
+    bookings: &[BookingRecord],
     next_table_number: i32,
 ) -> SettingsView {
     SettingsView {
@@ -623,7 +517,7 @@ fn view_of(
                 number: table.number,
                 seats: table.seats,
                 zone: table.zone.as_str().to_owned(),
-                bookings_today: shift
+                bookings_today: bookings
                     .iter()
                     .filter(|record| record.booking.table_id == Some(table.id))
                     .count(),
@@ -646,6 +540,7 @@ fn view_of(
             })
             .collect(),
         next_table_number,
+        service_date: day.date(),
         limits: LimitsView::current(),
     }
 }

@@ -3,7 +3,8 @@
  *
  * The rule itself lives in `reads.ts`; this is where it meets React. The question asked is always
  * the question on screen when the read starts, even when the call comes from a retry an older
- * render set up, and an answer is weighed against the question on screen when it lands.
+ * render set up. Every question keeps its own answer, so what is drawn is the answer to the
+ * question on screen now, never the last answer that happened to arrive.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -13,20 +14,37 @@ import type { ApiFailure } from "./errors";
 import {
   EMPTY_LEDGER,
   answered,
+  answeredUpTo,
   begun,
   failed,
-  failedNow,
   failureOn,
+  marked,
   pendingOn,
-  shouldTell,
+  valueOn,
   written,
   type Ledger,
+  type Newer,
 } from "./reads";
 
 /** A read the screen is asking: what it is about, and how to ask it. */
 export interface Question<T> {
   key: string;
   ask: () => Promise<T>;
+}
+
+/** Where an applied answer belongs. */
+export interface Landing {
+  key: string;
+  /** Its question is the one on screen. */
+  onScreen: boolean;
+}
+
+/** A failed read, as whoever asked should hear of it. */
+export interface Failed {
+  /** Worth a word: somebody asked, and nothing newer about the question is on record. */
+  tell: boolean;
+  /** When the read was asked, to compare with `mark`. */
+  number: number;
 }
 
 /** A failure as the API described it, or as close as the app can get. */
@@ -36,22 +54,31 @@ export function failureOf(error: unknown): ApiFailure {
 
 export function useRead<T>(
   question: Question<T> | null,
-  onAnswer: (answer: T, key: string) => void,
-  onFailure: (failure: ApiFailure, tell: boolean) => void,
+  onAnswer: (answer: T, landing: Landing) => void,
+  onFailure: (failure: ApiFailure, failed: Failed) => void,
+  /** How the server orders answers to this question, when it does. */
+  newer?: Newer<T>,
 ) {
-  const [ledger, setLedger] = useState<Ledger>(EMPTY_LEDGER);
-  const ledgerNow = useRef<Ledger>(EMPTY_LEDGER);
-  const latest = useRef({ question, onAnswer, onFailure });
+  const [ledger, setLedger] = useState<Ledger<T>>(EMPTY_LEDGER);
+  const ledgerNow = useRef<Ledger<T>>(EMPTY_LEDGER);
+  // The answer last applied while its question was on screen, drawn while a new question loads.
+  const [lastOnScreen, setLastOnScreen] = useState<T | null>(null);
+  const latest = useRef({ question, onAnswer, onFailure, newer });
   useEffect(() => {
-    latest.current = { question, onAnswer, onFailure };
+    latest.current = { question, onAnswer, onFailure, newer };
   });
 
   const actions = useMemo(() => {
     const keyNow = () => latest.current.question?.key ?? null;
-    const commit = (next: Ledger) => {
+    const commit = (next: Ledger<T>) => {
       if (next === ledgerNow.current) return;
       ledgerNow.current = next;
       setLedger(next);
+    };
+    const land = (key: string, data: T) => {
+      const onScreen = key === keyNow();
+      if (onScreen) setLastOnScreen(data);
+      latest.current.onAnswer(data, { key, onScreen });
     };
     return {
       /** Asks the question on screen now. `quiet` is a refresh nobody asked for. */
@@ -65,28 +92,35 @@ export function useRead<T>(
           answer = await asking.ask();
         } catch (error) {
           const failure = failureOf(error);
-          const tell = shouldTell(ledgerNow.current, number, asking.key, keyNow(), quiet);
-          commit(failed(ledgerNow.current, number, asking.key, failure));
-          latest.current.onFailure(failure, tell);
+          const outcome = failed(ledgerNow.current, number, asking.key, failure);
+          commit(outcome.ledger);
+          const tell = !quiet && outcome.recorded && asking.key === keyNow();
+          latest.current.onFailure(failure, { tell, number });
           return;
         }
-        const outcome = answered(ledgerNow.current, number, asking.key, keyNow());
+        const outcome = answered(
+          ledgerNow.current,
+          number,
+          asking.key,
+          answer,
+          latest.current.newer,
+        );
         commit(outcome.ledger);
-        if (outcome.apply) latest.current.onAnswer(answer, asking.key);
+        if (outcome.apply) land(asking.key, answer);
       },
       /**
-       * Puts a write's own answer about `key` on screen, if the screen still asks about `key`: `show`
-       * runs only then. Every read asked before it is older from here on.
+       * Puts a write's own answer about `key` on record, made on the value there now. Returns whether
+       * it was applied: a question the server orders keeps a newer answer it already has.
        */
-      put: (key: string, show: () => void): boolean => {
-        const outcome = written(ledgerNow.current, key, keyNow());
+      put: (key: string, change: (current: T | undefined) => T | undefined): boolean => {
+        const outcome = written(ledgerNow.current, key, change, latest.current.newer);
         commit(outcome.ledger);
-        if (outcome.apply) show();
+        if (outcome.apply && outcome.data !== undefined) land(key, outcome.data);
         return outcome.apply;
       },
-      /** Records that `key` is broken as of now, whatever read is on its way; returns when. */
-      failNow: (key: string, failure: ApiFailure): number => {
-        const [next, number] = failedNow(ledgerNow.current, key, failure);
+      /** A moment every read asked from now on comes after. */
+      mark: (): number => {
+        const [next, number] = marked(ledgerNow.current);
         commit(next);
         return number;
       },
@@ -94,13 +128,18 @@ export function useRead<T>(
   }, []);
 
   const key = question?.key ?? null;
+  const value = valueOn(ledger, key);
   return {
     ...actions,
+    /** The answer on record for the question on screen, or null. */
+    value,
+    /** That answer, or while there is none yet, the one shown for the question before. */
+    shown: value ?? lastOnScreen,
     /** The failure to show for the question on screen, or null. */
     failure: failureOn(ledger, key),
     /** A read of the question on screen is on its way. */
     pending: pendingOn(ledger, key),
-    /** The number of the answer on screen, for comparing with a failure recorded by `failNow`. */
-    applied: ledger.applied,
+    /** The number of the newest read of the question on screen that answered, to compare with `mark`. */
+    answeredUpTo: answeredUpTo(ledger, key),
   };
 }

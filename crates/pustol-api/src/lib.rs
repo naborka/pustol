@@ -7,6 +7,7 @@
 
 pub mod assets;
 pub mod auth;
+pub mod body;
 pub mod boot;
 pub mod callbacks;
 pub mod dto;
