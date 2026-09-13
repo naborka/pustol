@@ -1784,8 +1784,8 @@ mod test_databases {
     use std::time::Duration;
 
     use crate::common::database::{
-        ABANDONED_AFTER, connect_to, create_database, database_name, maintenance, sweep_abandoned,
-        unix_seconds,
+        ABANDONED_AFTER, PREFIX, SWEPT_PREFIXES, connect_to, create_database, database_name,
+        made_at, maintenance, sweep_abandoned, sweep_every, unix_seconds,
     };
 
     /// A prefix of `test`'s own. The suites' sweep never matches it, and neither does another of
@@ -1904,6 +1904,48 @@ mod test_databases {
             drop_database(&admin, stranger).await;
         }
         assert!(!exists(&admin, &ours).await, "{ours}");
+    }
+
+    #[test]
+    fn the_suites_sweep_every_form_a_test_database_was_ever_named_in() {
+        // Round four named them `pustol_t` and the numbers, and left thousands behind.
+        assert_eq!(SWEPT_PREFIXES, [PREFIX, "pustol_t"]);
+        let old = 1_757_000_000;
+        assert_eq!(made_at("pustol_t", "pustol_t1757000000_4242_7"), Some(old));
+        for stranger in [
+            database_name(PREFIX, old, 4242, 7),
+            format!("{}{old}_4242_7", private("form")),
+            format!("pustol_t{old}_4242"),
+            format!("pustol_t{old}_4242_7_8"),
+        ] {
+            assert_eq!(made_at("pustol_t", &stranger), None, "{stranger}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_old_idle_database_under_any_swept_prefix_is_dropped_and_a_young_one_is_kept() {
+        let admin = maintenance().await;
+        let (current, legacy) = (private("every_cur"), private("every_leg"));
+        let now = unix_seconds();
+        let long_ago = now - ABANDONED_AFTER.as_secs() - 60;
+        let old_current = create_database(&admin, || unused_name(&current, long_ago)).await;
+        let old_legacy = create_database(&admin, || unused_name(&legacy, long_ago)).await;
+        let young_legacy = create_database(&admin, || unused_name(&legacy, now)).await;
+
+        sweep_every(&admin, &[&current, &legacy], now).await;
+
+        assert!(!exists(&admin, &old_current).await, "{old_current}");
+        assert!(!exists(&admin, &old_legacy).await, "{old_legacy}");
+        assert!(exists(&admin, &young_legacy).await, "{young_legacy}");
+        drop_database(&admin, &young_legacy).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "longer than PostgreSQL keeps a name")]
+    async fn a_name_longer_than_the_cluster_keeps_is_never_made() {
+        // The cluster cuts such a name short, and every later look for the name given back misses.
+        let admin = maintenance().await;
+        create_database(&admin, || format!("{}{}", private("long"), "9".repeat(64))).await;
     }
 
     #[tokio::test]

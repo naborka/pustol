@@ -1394,6 +1394,73 @@ async fn a_seated_guest_sees_both_bookings_and_friday_sets_their_own_plan_aside(
 }
 
 #[tokio::test]
+async fn a_no_show_on_an_evening_the_manager_took_off_the_horizon_is_offered_nothing_and_holds_nothing() {
+    // Booked for Sunday under a four-day horizon. The manager lowers it to two, and staff mark the
+    // party as not coming before it is due: only a Sunday booking replaces it, and Sunday is refused.
+    let app = harness().await;
+    let guest = Caller::new("Стас");
+    let manager = Caller::manager();
+    let id = app
+        .post("/api/booking", &guest, book_on("2026-08-02", 1200))
+        .await
+        .expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let settings_path = "/api/admin/settings?service_date=2026-07-30";
+    let settings = app.get(settings_path, &manager).await.expect_ok().clone();
+    let mut draft = common::draft_from(&settings);
+    draft["horizon_days"] = serde_json::json!(2);
+    app.send("PUT", settings_path, &manager, draft).await.expect_ok();
+    staff_mark(&app, &manager, &id, "no_show").await;
+
+    let session = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![id.clone()], "{session}");
+    assert_eq!(session["bookings"][0]["rebooking_replaces"], serde_json::Value::Null, "{session}");
+    assert_eq!(session["bookings"][0]["holds_evening"], false, "{session}");
+    let refused = app
+        .post("/api/booking", &guest, book_replacing("2026-08-02", 1200, &[&id]))
+        .await;
+    assert_eq!(refused.error_code(), Some("shift_not_bookable"), "{}", refused.body);
+}
+
+#[tokio::test]
+async fn a_no_show_on_an_evening_with_no_arrival_time_left_holds_nothing_and_a_booking_there_replaces_it() {
+    // Ninety-minute sittings on an hourly grid closing at 02:00: the last arrival is midnight. The
+    // midnight party is marked as not coming, and at ten past the table is still held for them.
+    let mut config = config_with(common::default_tables());
+    config.turn_minutes = 90;
+    config.slot_step_minutes = 60;
+    let app = harness_at(morning(), config).await;
+    let guest = Caller::new("Стас");
+    let id = app
+        .post("/api/booking", &guest, book_at(1440))
+        .await
+        .expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    staff_mark(&app.at(utc(2026, 7, 30, 21, 0)), &Caller::manager(), &id, "no_show").await;
+    let ten_past = app.at(utc(2026, 7, 30, 22, 10));
+
+    let session = ten_past.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![id.clone()], "{session}");
+    assert_eq!(session["bookings"][0]["rebooking_replaces"], serde_json::Value::Null, "{session}");
+    assert_eq!(session["bookings"][0]["holds_evening"], false, "{session}");
+    let rail = ten_past.get("/api/days?party_size=2", &guest).await.expect_ok().clone();
+    assert_eq!(rail["days"][0]["service_date"], "2026-07-30", "{rail}");
+    assert_eq!(rail["days"][0]["booked"], false, "{rail}");
+
+    // Naming it as replaced gets past every rule about what the guest holds, to the time itself.
+    let naming_it = ten_past
+        .post("/api/booking", &guest, book_replacing("2026-07-30", 1440, &[&id]))
+        .await;
+    assert_eq!(naming_it.error_code(), Some("in_the_past"), "{}", naming_it.body);
+    let not_naming_it = ten_past.post("/api/booking", &guest, book_at(1440)).await;
+    assert_eq!(not_naming_it.error_code(), Some("booking_changed"), "{}", not_naming_it.body);
+}
+
+#[tokio::test]
 async fn on_the_night_the_clocks_go_forward_tonight_is_saturday_until_its_last_sitting_is_over() {
     // Saturday 28 March 2026 closes at 03:00, and at 02:00 the clocks jump to 03:00. The last
     // sitting, arriving at 01:00, holds its table two real hours: to 04:00 on the wall. Until then

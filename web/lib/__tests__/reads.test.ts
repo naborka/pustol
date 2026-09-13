@@ -296,6 +296,54 @@ describe("a failure", () => {
     ledger = answered(ledger, fine, "k", "fine").ledger;
     expect(failureOn(ledger, "k")).toBeNull();
   });
+
+  it("is cleared by a read asked after it that answered an older room than the one on record", () => {
+    // The answer is not news, but it proves the question can be read.
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
+    let first: number;
+    let sent: number;
+    let broken: number;
+    let later: number;
+    [ledger, first] = ask(ledger, "11");
+    ledger = answered(ledger, first, "11", { version: 1, name: "first" }, byVersion).ledger;
+    [ledger, sent] = marked(ledger);
+    [ledger, broken] = ask(ledger, "11");
+    ledger = failed(ledger, broken, "11", boom).ledger;
+    ledger = write(ledger, "11", sent, () => ({ version: 3, name: "mine" }), byVersion).ledger;
+    expect(failureOn(ledger, "11")).toEqual(boom);
+
+    [ledger, later] = ask(ledger, "11");
+    const late = answered(ledger, later, "11", { version: 2, name: "lagging" }, byVersion);
+    expect(late.apply).toBe(false);
+    expect(valueOn(late.ledger, "11")?.name).toBe("mine");
+    expect(failureOn(late.ledger, "11")).toBeNull();
+  });
+
+  it("is cleared by a write sent after it, even when the write's room is older than the one on record", () => {
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
+    let first: number;
+    let broken: number;
+    let sent: number;
+    [ledger, first] = ask(ledger, "11");
+    ledger = answered(ledger, first, "11", { version: 5, name: "colleague" }, byVersion).ledger;
+    [ledger, broken] = ask(ledger, "11");
+    ledger = failed(ledger, broken, "11", boom).ledger;
+    [ledger, sent] = marked(ledger);
+    const outcome = write(ledger, "11", sent, () => ({ version: 4, name: "mine" }), byVersion);
+    expect(outcome.apply).toBe(false);
+    expect(failureOn(outcome.ledger, "11")).toBeNull();
+  });
+
+  it("stays when the write that answered was sent before it was asked", () => {
+    let ledger: Ledger<string> = EMPTY_LEDGER;
+    let sent: number;
+    let broken: number;
+    [ledger, sent] = marked(ledger);
+    [ledger, broken] = ask(ledger, "11");
+    ledger = failed(ledger, broken, "11", boom).ledger;
+    ledger = write(ledger, "11", sent, () => "written").ledger;
+    expect(failureOn(ledger, "11")).toEqual(boom);
+  });
 });
 
 describe("a moment marked from outside every read", () => {

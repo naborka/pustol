@@ -394,16 +394,16 @@ describe("the shift's own receipt", () => {
 });
 
 describe("the action bar", () => {
-  it("offers to seat somebody now only on tonight's shift", async () => {
+  it("offers to seat somebody now only while the server takes a party at the door", async () => {
     const onWalkIn = vi.fn();
     const onManual = vi.fn();
     const { rerender } = render(
-      <ShiftActions isToday onWalkIn={onWalkIn} onManual={onManual} />,
+      <ShiftActions seatsNow onWalkIn={onWalkIn} onManual={onManual} />,
     );
     expect(screen.getByText("Посадить сейчас")).toBeDefined();
     expect(screen.getByText("Записать")).toBeDefined();
 
-    rerender(<ShiftActions isToday={false} onWalkIn={onWalkIn} onManual={onManual} />);
+    rerender(<ShiftActions seatsNow={false} onWalkIn={onWalkIn} onManual={onManual} />);
     expect(screen.queryByText("Посадить сейчас")).toBeNull();
     await userEvent.click(screen.getByText("Записать гостя"));
     expect(onManual).toHaveBeenCalledOnce();

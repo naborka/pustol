@@ -41,6 +41,7 @@ export const booking: GuestBooking = {
   status: "confirmed",
   started: false,
   rebooking_replaces: "any_evening",
+  holds_evening: false,
 };
 
 /** The same guest already at the table tonight: never replaced, and tonight is theirs. */
@@ -52,6 +53,7 @@ export const seated: GuestBooking = {
   status: "arrived",
   started: true,
   rebooking_replaces: null,
+  holds_evening: true,
 };
 
 export function session(overrides: Partial<Session> = {}): Session {
@@ -145,6 +147,7 @@ export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
     bookings: [shiftBooking()],
     stats: { bookings: 1, guests: 2, free_now: 2 },
     now_minutes: 1_280,
+    walk_in_until_minutes: 1_400,
     largest_party_seatable_now: 8,
     days: [
       { service_date: "2026-09-11", closed: false, bookings: 1 },
@@ -169,6 +172,7 @@ export const LIMITS: Limits = {
   seats: { min: 1, max: 12 },
   slot_step_minutes: [15, 30, 60],
   text: { name: 100, address: 200, message: 1_000, reason: 200 },
+  lists: { zones: 12, tables: 60, message_templates: 20, cancel_reasons: 20, staff: 30 },
 };
 
 export function settingsView(overrides: Partial<SettingsView> = {}): SettingsView {

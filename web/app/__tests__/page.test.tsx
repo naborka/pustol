@@ -388,6 +388,36 @@ describe("the first paint", () => {
     expect(screen.getByText(EXPIRED)).toBeDefined();
   });
 
+  it("asks nothing by itself once the session has ended, and keeps saying so", async () => {
+    // A quiet refresh started after the end spun over the screen that says to reopen the app.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const telegram = fakeTelegram();
+    const server = fakeServer({
+      "GET /api/session": () => ({ body: session({ bookings: [booking] }) }),
+      "DELETE /api/bookings/b1": () => expired,
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<Page />);
+
+    await user.click(await screen.findByText("Отменить"));
+    await user.click(within(await screen.findByRole("dialog")).getByText("Отменить бронь"));
+    expect(await screen.findByText(EXPIRED)).toBeDefined();
+    const asked = server.count("GET", "/api/session");
+
+    act(() => telegram.emit("activated"));
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    await settle();
+    expect(server.count("GET", "/api/session")).toBe(asked);
+    expect(screen.getByText(EXPIRED)).toBeDefined();
+    expect(screen.getByText("Закрыть")).toBeDefined();
+    expect(screen.queryByText("Открываем")).toBeNull();
+  });
+
   it("catches up when the app comes back while an older read is still on its way", async () => {
     const telegram = fakeTelegram();
     const late = gate();
@@ -465,11 +495,13 @@ describe("a shift left open on the bar", () => {
       "GET /api/session": staffSession,
       "GET /api/admin/shift": ({ url }) => {
         const date = url.searchParams.get("service_date") ?? "";
+        const running = date === "2026-09-12";
         return {
           body: shift({
             service_date: date,
             today: "2026-09-12",
-            now_minutes: date === "2026-09-12" ? 1_280 : null,
+            now_minutes: running ? 1_280 : null,
+            walk_in_until_minutes: running ? 1_400 : null,
           }),
         };
       },
@@ -484,6 +516,21 @@ describe("a shift left open on the bar", () => {
 
     await user.click(screen.getByRole("button", { name: "Следующий день" }));
     expect(await screen.findByText("Посадить сейчас")).toBeDefined();
+  });
+
+  it("offers no seat-now on tonight's evening while the server takes no party at the door", async () => {
+    // Before the doors open, or between the close and the next shift.
+    fakeTelegram();
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => ({ body: shift({ walk_in_until_minutes: null }) }),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Смена"));
+    expect(await screen.findByText("Записать гостя")).toBeDefined();
+    expect(screen.queryByText("Посадить сейчас")).toBeNull();
   });
 
   it("closes the open sheet when Telegram's back button is pressed", async () => {
@@ -1211,6 +1258,67 @@ describe("a shift left open on the bar", () => {
     expect(screen.queryByText(BROKEN)).toBeNull();
   });
 
+  it("says nothing once a read asked after a failed one answers, even with a room older than a write's own", async () => {
+    const telegram = fakeTelegram();
+    const seating = gate();
+    let reads = 0;
+    const server = fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => {
+        reads += 1;
+        if (reads === 2) return failed;
+        return {
+          body: reads === 1 ? shift() : shift({ version: 2, bookings: [shiftBooking({ status: "arrived" })] }),
+        };
+      },
+      "PATCH /api/admin/bookings/b1/attendance": async () => {
+        await seating.opened;
+        const now = shiftBooking({ status: "arrived" });
+        return { body: { booking: now, previous: "confirmed", shift: shift({ version: 3, bookings: [now] }) } };
+      },
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Смена"));
+    await user.click(await screen.findByText("Посадить"));
+    act(() => telegram.emit("activated"));
+    expect(await screen.findByText(STALE)).toBeDefined();
+    await seating.open();
+    await screen.findByText("Саша за столом 7.");
+
+    act(() => telegram.emit("activated"));
+    await waitFor(() => expect(server.count("GET", "/api/admin/shift")).toBe(3));
+    await settle();
+    expect(screen.queryByText(STALE)).toBeNull();
+  });
+
+  it("says in its own words that somebody taken off the staff list cannot read the shift, and offers no retry", async () => {
+    const telegram = fakeTelegram();
+    const forbidden: Answer = { status: 403, body: { error: { code: "forbidden", message: "not staff" } } };
+    let reads = 0;
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => (reads++ === 0 ? { body: shift() } : forbidden),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Смена"));
+    await screen.findByText("Саша");
+    act(() => telegram.emit("activated"));
+    expect(await screen.findByText("Этот раздел только для сотрудников бара.")).toBeDefined();
+    expect(screen.getByText("Саша")).toBeDefined();
+    expect(screen.queryByText(STALE)).toBeNull();
+    expect(screen.queryByText("Повторить")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Следующий день" }));
+    await waitFor(() => expect(screen.queryByText("Саша")).toBeNull());
+    expect(await screen.findByText("Этот раздел только для сотрудников бара.")).toBeDefined();
+    expect(screen.queryByText("Не удалось прочитать смену.")).toBeNull();
+    expect(screen.queryByText("Попробовать снова")).toBeNull();
+  });
+
   it("offers to read the evening on screen again when a refresh of it failed, and shows what that brings", async () => {
     const telegram = fakeTelegram();
     let reads = 0;
@@ -1483,7 +1591,7 @@ describe("a shift left open on the bar", () => {
           body:
             date === "2026-09-11"
               ? shift()
-              : shift({ service_date: date, now_minutes: null, bookings: [] }),
+              : shift({ service_date: date, now_minutes: null, walk_in_until_minutes: null, bookings: [] }),
         };
       },
       "GET /api/admin/availability": async ({ url }) => {
@@ -1939,6 +2047,37 @@ describe("a guest changing their mind", () => {
     expect(await screen.findByText("Бронь перенесена")).toBeDefined();
     expect(asked).toEqual(["2026-09-11"]);
     expect(server.bodies("POST", "/api/booking")[0]).toMatchObject({ replacing: ["b9"] });
+  });
+
+  it("never says tonight is already the guest's for a booking the server says does not hold it, before the rail is read", async () => {
+    fakeTelegram();
+    const railRead = gate();
+    const noShow: GuestBooking = {
+      ...booking,
+      id: "b9",
+      start_minutes: 1_260,
+      end_minutes: 1_380,
+      status: "no_show",
+      started: true,
+      rebooking_replaces: null,
+      holds_evening: false,
+    };
+    fakeServer({
+      "GET /api/session": () => ({ body: session({ bookings: [noShow], bookable_days: ["2026-09-11"] }) }),
+      "GET /api/days": async () => {
+        await railRead.opened;
+        return { body: { party_size: 2, days: rail(1) } };
+      },
+      "GET /api/availability": () => ({ body: availability() }),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Забронировать стол"));
+    await user.click(await screen.findByRole("button", { name: "21:30" }));
+    expect(await screen.findByText("Забронировать · 2 гостя · сегодня в 21:30")).toBeDefined();
+    expect(screen.queryByText("На этот вечер у вас уже есть бронь")).toBeNull();
+    await railRead.open();
   });
 
   it("never lets a guest at the table book tonight again", async () => {
@@ -2866,6 +3005,116 @@ describe("settings", () => {
 
     await user.type(screen.getByPlaceholderText("Название"), "!");
     expect(screen.queryByText("Не сохранено.")).toBeNull();
+  });
+
+  it("stop saying they could not be read again once a save of them has answered", async () => {
+    fakeTelegram();
+    const bar = settingsServer();
+    let reads = 0;
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => ({ body: shift() }),
+      "GET /api/admin/settings": ({ url }) => {
+        reads += 1;
+        return reads === 2 ? failed : { body: bar.read(url.searchParams.get("service_date")) };
+      },
+      "PUT /api/admin/settings": ({ body, url }) =>
+        bar.save(body as SettingsDraft, url.searchParams.get("service_date")),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Настройки"));
+    await screen.findByText("Правила бронирования");
+    await user.click(screen.getByText("Смена"));
+    await user.click(screen.getByText("Настройки"));
+    expect(await screen.findByText(STALE)).toBeDefined();
+
+    await user.click(screen.getByText("Бар"));
+    const name = await screen.findByPlaceholderText("Название");
+    await user.clear(name);
+    await user.type(name, "Мансарда");
+    await user.click(screen.getByText("Сохранить"));
+    await screen.findByText("Настройки сохранены.");
+    await settle();
+    expect(screen.queryByText(STALE)).toBeNull();
+    expect(reads).toBe(2);
+  });
+
+  for (const [who, remaining] of [
+    ["@pavel", ["@aaron_bar", "@marina", "@nastya"]],
+    ["@aaron_bar", ["@marina", "@nastya", "@pavel"]],
+  ] as const) {
+    it(`remove ${who}, tapped while a save that added @aaron_bar is on its way, and nobody the answer lists in that place`, async () => {
+      // The save answers with the staff sorted, where the tap was made on the list as it was sent.
+      fakeTelegram();
+      const saving = gate();
+      const bar = settingsServer();
+      fakeServer({
+        "GET /api/session": staffSession,
+        "GET /api/admin/shift": () => ({ body: shift() }),
+        "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
+        "PUT /api/admin/settings": async ({ body, url }) => {
+          const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+          await saving.opened;
+          return answer;
+        },
+      });
+      const user = userEvent.setup();
+      render(<Page />);
+
+      await user.click(await screen.findByText("Настройки"));
+      await user.click(await screen.findByText("Персонал"));
+      await user.type(await screen.findByPlaceholderText("@username"), "@aaron_bar");
+      await user.click(screen.getByText("Добавить"));
+      await user.click(await screen.findByText("Сохранить"));
+      await user.click(screen.getByRole("button", { name: `Убрать ${who}` }));
+
+      await saving.open();
+      await screen.findByText("Настройки сохранены.");
+      await settle();
+      expect(screen.queryByText(who)).toBeNull();
+      for (const member of remaining) expect(screen.getByText(member)).toBeDefined();
+
+      await user.click(screen.getByText("Сохранить"));
+      await waitFor(() =>
+        expect(bar.current.staff.map((member) => `@${member.username}`)).toEqual(remaining),
+      );
+    });
+  }
+
+  it("change the tables a tap named while a save that added a table is on its way", async () => {
+    fakeTelegram();
+    const saving = gate();
+    const bar = settingsServer();
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => ({ body: shift() }),
+      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
+      "PUT /api/admin/settings": async ({ body, url }) => {
+        const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+        await saving.opened;
+        return answer;
+      },
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Настройки"));
+    await user.click(await screen.findByText("Зал"));
+    await user.click(await screen.findByText("+ Добавить стол"));
+    await user.click(await screen.findByText("Сохранить"));
+    await user.click(screen.getByRole("button", { name: "Убрать стол 7" }));
+    await user.click(screen.getByRole("button", { name: "Стол 8: больше мест" }));
+
+    await saving.open();
+    await screen.findByText("Настройки сохранены.");
+    await user.click(await screen.findByText("Сохранить"));
+    await waitFor(() => expect(bar.current.tables).toHaveLength(2));
+    expect(bar.current.tables.map((table) => [table.number, table.seats])).toEqual([
+      [8, 7],
+      [9, 4],
+    ]);
   });
 
   it("confirm a save even when the session cannot be read again afterwards", async () => {

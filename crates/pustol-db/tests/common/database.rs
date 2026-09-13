@@ -19,16 +19,24 @@ use pustol_db::Store;
 
 /// What every test database these suites make is named with, before the second, the pid and the
 /// counter.
-///
-/// Names were once `pustol_t` followed by the numbers. No name in that form matches this prefix, so
-/// the sweep never reads a second out of a name it did not make; `scripts/pg.sh start` clears both.
 pub const PREFIX: &str = "pustol_test_";
+
+/// Every prefix a test database of these suites has ever been named under: [`PREFIX`], and the
+/// `pustol_t` that round four wrote the numbers straight after.
+///
+/// A name is read only when it is exactly one prefix and the three numbers, so neither form is ever
+/// read as the other, and nothing else under `pustol_t` is read at all.
+pub const SWEPT_PREFIXES: [&str; 2] = [PREFIX, "pustol_t"];
 
 /// How old a test database with nobody connected has to be before it counts as abandoned.
 ///
 /// Far longer than a whole suite takes, so a database made a moment ago by a run that has not
 /// connected to it yet is never taken for one left behind.
 pub const ABANDONED_AFTER: Duration = Duration::from_mins(30);
+
+/// The longest name `PostgreSQL` keeps, in bytes. A longer one is cut short when the database is made,
+/// and the name a test goes on using then names no database at all.
+const LONGEST_NAME: usize = 63;
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
 static SWEPT: AtomicBool = AtomicBool::new(false);
@@ -81,7 +89,7 @@ pub fn database_name(prefix: &str, made_at: u64, pid: u32, counter: u64) -> Stri
 pub async fn fresh_store() -> Store {
     let admin = maintenance().await;
     if !SWEPT.swap(true, Ordering::SeqCst) {
-        sweep_abandoned(&admin, PREFIX, unix_seconds()).await;
+        sweep_every(&admin, &SWEPT_PREFIXES, unix_seconds()).await;
     }
     let name = create_database(&admin, || {
         database_name(
@@ -110,6 +118,10 @@ pub async fn create_database(admin: &sqlx::PgPool, mut next: impl FnMut() -> Str
     loop {
         let name = next();
         assert!(is_plain(&name), "{name:?} is not a name this suite makes");
+        assert!(
+            name.len() <= LONGEST_NAME,
+            "{name:?} is longer than PostgreSQL keeps a name"
+        );
         // `create database` takes no bind parameters, so the name has to be interpolated. It is made
         // of letters, digits and underscores, as just asserted.
         match sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
@@ -130,6 +142,13 @@ fn is_taken(error: &sqlx::Error) -> bool {
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::code)
         .is_some_and(|code| code == "42P04" || code == "23505")
+}
+
+/// [`sweep_abandoned`] under each of `prefixes`.
+pub async fn sweep_every(admin: &sqlx::PgPool, prefixes: &[&str], now: u64) {
+    for prefix in prefixes {
+        sweep_abandoned(admin, prefix, now).await;
+    }
 }
 
 /// Drops every database named under `prefix` that is older than [`ABANDONED_AFTER`] at `now` and
@@ -167,7 +186,7 @@ pub async fn sweep_abandoned(admin: &sqlx::PgPool, prefix: &str, now: u64) {
 
 /// The second a database was made, when `name` is exactly `prefix` and the three numbers
 /// [`database_name`] writes; `None` for any other name.
-fn made_at(prefix: &str, name: &str) -> Option<u64> {
+pub fn made_at(prefix: &str, name: &str) -> Option<u64> {
     let mut numbers = name.strip_prefix(prefix)?.split('_');
     let (made_at, pid, counter) = (numbers.next()?, numbers.next()?, numbers.next()?);
     let is_number = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());

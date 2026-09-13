@@ -62,6 +62,7 @@ const STAFF: Record<string, string> = {
   guest_has_another_plan:
     "У гостя уже есть бронь на другой вечер — сначала перенесите или отмените её.",
   table_taken: "Стол уже заняли — пересадите бронь через «Перенести».",
+  not_the_running_shift: "Смена сейчас не идёт — посадить без брони можно только пока бар открыт.",
 };
 
 const FALLBACK = "Не получилось. Попробуйте ещё раз.";
@@ -82,6 +83,22 @@ export function needsRelaunch(failure: ApiFailure | null): boolean {
     failure?.code === "not_telegram" ||
     failure?.code === "no_credentials"
   );
+}
+
+/**
+ * Whether asking again can bring a different answer. The same request with the same proof meets the
+ * same refusal, so a way to retry it would be a button that never works.
+ */
+export function canRetry(failure: ApiFailure): boolean {
+  return !needsRelaunch(failure) && failure.code !== "forbidden";
+}
+
+/**
+ * What to say where a read's answer would have been: `generic` while asking again may help, and
+ * the failure's own words once it cannot, which is when the reason is the only thing worth saying.
+ */
+export function readFailureText(failure: ApiFailure, audience: Audience, generic: string): string {
+  return canRetry(failure) ? generic : messageFor(failure, audience);
 }
 
 /** One booking a refused settings save would have stranded. */

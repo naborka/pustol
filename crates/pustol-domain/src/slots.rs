@@ -159,16 +159,33 @@ enum Timing {
 }
 
 fn timing(config: &ValidConfig, day: ServiceDay, start_minutes: i32, now: DateTime<Utc>) -> Timing {
+    match window_of(config, day, start_minutes) {
+        None => Timing::Nonexistent,
+        Some(window) if window.start() <= now => Timing::Past(window),
+        Some(window) => Timing::Ahead(window),
+    }
+}
+
+/// The window a party arriving `start_minutes` into `day` holds, or `None` when the clocks jump over
+/// that time.
+fn window_of(config: &ValidConfig, day: ServiceDay, start_minutes: i32) -> Option<Interval> {
     // Against a validated config the only way this can fail is a wall-clock time the spring
     // clock change jumps over: the minute offset is bounded by closing time and the turn is
     // positive, so neither of the other failures is reachable.
-    match resolve(day, start_minutes, config.timezone)
+    resolve(day, start_minutes, config.timezone)
         .and_then(|start| Interval::from_duration(start, config.turn_minutes))
-    {
-        Err(_) => Timing::Nonexistent,
-        Ok(window) if window.start() <= now => Timing::Past(window),
-        Ok(window) => Timing::Ahead(window),
-    }
+        .ok()
+}
+
+/// The window of the last sitting `day`'s grid has: its last arrival time that happens. `None` on a
+/// day off, or when the clocks jump over every arrival.
+///
+/// Asked of the grid itself, like [`has_arrival_after`]: closing less a turn is not always an arrival
+/// the grid has, nor one that happens.
+pub(crate) fn last_sitting(config: &ValidConfig, day: ServiceDay) -> Option<Interval> {
+    arrival_minutes(config, day)
+        .filter_map(|minutes| window_of(config, day, minutes))
+        .last()
 }
 
 fn evaluate(query: &Query<'_>, start_minutes: i32) -> Slot {
@@ -225,6 +242,16 @@ pub fn bookable_days(config: &ValidConfig, today: ServiceDay) -> Vec<ServiceDay>
         .into_iter()
         .filter(|day| !config.week.for_service_day(*day).closed)
         .collect()
+}
+
+/// Whether a guest may book `day` at `now`: whether it is one of the [`bookable_days`] counted from
+/// the shift running then.
+///
+/// The question the booking endpoint refuses by and every offer made to a guest is held to, so the
+/// screen never offers a move to an evening the endpoint then refuses.
+#[must_use]
+pub fn guest_may_book(config: &ValidConfig, day: ServiceDay, now: DateTime<Utc>) -> bool {
+    bookable_days(config, config.current_service_day(now)).contains(&day)
 }
 
 /// The earliest arrival time still free for this party, or `None` when the day holds none.

@@ -19,9 +19,11 @@ import { useState, type ReactNode } from "react";
 import type { Limits, SettingsDraft, SettingsView } from "@/lib/api";
 import * as fmt from "@/lib/format";
 import { uuid } from "@/lib/ids";
+import { moveTableTo, removeStaff, removeTable, resizeTable } from "@/lib/settingsEdits";
 import {
   largestTable,
   lastArrivalMinutes,
+  roomFor,
   shortestShiftMinutes,
   wouldBeLegal,
   type Edit,
@@ -276,6 +278,7 @@ function sectionBody(section: Section, ctx: Context): ReactNode {
             title="Сообщения гостю"
             addLabel="+ Сообщение"
             items={ctx.draft.message_templates}
+            canAdd={roomFor(ctx.draft, ctx.limits, "message_templates", 1)}
             placeholder="Новое сообщение"
             onChange={(items) =>
               ctx.edit((next) => {
@@ -287,6 +290,7 @@ function sectionBody(section: Section, ctx: Context): ReactNode {
             title="Причины отмены"
             addLabel="+ Причина"
             items={ctx.draft.cancel_reasons}
+            canAdd={roomFor(ctx.draft, ctx.limits, "cancel_reasons", 1)}
             placeholder="Новая причина"
             onChange={(items) =>
               ctx.edit((next) => {
@@ -452,7 +456,7 @@ function RoomSection({ ctx }: { ctx: Context }) {
         {fmt.tables(draft.tables.length)} · {fmt.seats(totalSeats)} · самый большой на {largest}
       </Note>
 
-      {draft.tables.map((table, index) => {
+      {draft.tables.map((table) => {
         const existing = settings.tables.find((stored) => stored.id === table.id);
         const number = existing?.number ?? provisional++;
         const bookingsToday = countsShown ? (existing?.bookings_today ?? 0) : 0;
@@ -460,15 +464,8 @@ function RoomSection({ ctx }: { ctx: Context }) {
         const nextZone =
           draft.zones[(zoneIndex + 1) % Math.max(1, draft.zones.length)] ?? table.zone;
 
-        const resize =
-          (delta: number): Edit =>
-          (next) => {
-            const target = next.tables[index];
-            if (target) target.seats += delta;
-          };
-        const remove: Edit = (next) => {
-          next.tables.splice(index, 1);
-        };
+        const resize = (delta: number) => resizeTable(table.id, delta);
+        const remove = removeTable(table.id);
         const canRemove = allowed(remove);
 
         return (
@@ -485,12 +482,7 @@ function RoomSection({ ctx }: { ctx: Context }) {
           >
             <Pressable
               ariaLabel={`Стол ${number}: сменить зону`}
-              onClick={() =>
-                edit((next) => {
-                  const target = next.tables[index];
-                  if (target) target.zone = nextZone;
-                })
-              }
+              onClick={() => edit(moveTableTo(table.id, nextZone))}
               style={{
                 flex: 1,
                 minWidth: 0,
@@ -567,6 +559,7 @@ function RoomSection({ ctx }: { ctx: Context }) {
 
       <CardAction
         label="+ Добавить стол"
+        disabled={!roomFor(draft, limits, "tables", 1)}
         onClick={() => {
           // Named outside the edit: an edit made while a save is on its way is made again on top of
           // what the save stored, and must add the same table.
@@ -680,12 +673,15 @@ function ListSection({
   title,
   addLabel,
   items,
+  canAdd,
   placeholder,
   onChange,
 }: {
   title: string;
   addLabel: string;
   items: string[];
+  /** The list has room for one more. */
+  canAdd: boolean;
   placeholder: string;
   onChange: (items: string[]) => void;
 }) {
@@ -722,7 +718,7 @@ function ListSection({
           </Pressable>
         </div>
       ))}
-      <CardAction label={addLabel} onClick={() => onChange([...items, ""])} />
+      <CardAction label={addLabel} disabled={!canAdd} onClick={() => onChange([...items, ""])} />
     </section>
   );
 }
@@ -731,7 +727,7 @@ function StaffSection({ ctx }: { ctx: Context }) {
   const { draft, edit } = ctx;
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
-      {draft.staff.map((member, index) => (
+      {draft.staff.map((member) => (
         <div
           key={member.username}
           style={{
@@ -749,11 +745,7 @@ function StaffSection({ ctx }: { ctx: Context }) {
           <Pressable
             ariaLabel={`Убрать @${member.username}`}
             disabled={draft.staff.length <= 1}
-            onClick={() =>
-              edit((next) => {
-                next.staff.splice(index, 1);
-              })
-            }
+            onClick={() => edit(removeStaff(member.username))}
             style={{
               width: TAP,
               minHeight: 48,
@@ -768,6 +760,7 @@ function StaffSection({ ctx }: { ctx: Context }) {
         </div>
       ))}
       <AddStaff
+        canAdd={roomFor(draft, ctx.limits, "staff", 1)}
         onAdd={(username) =>
           edit((next) => {
             next.staff.push({ username });
@@ -782,11 +775,19 @@ function StaffSection({ ctx }: { ctx: Context }) {
   );
 }
 
-function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
+function AddStaff({
+  canAdd,
+  onAdd,
+}: {
+  /** The roster has room for one more. */
+  canAdd: boolean;
+  onAdd: (username: string) => void;
+}) {
   // Half-typed text is kept here rather than in the proposal: a username being spelled out is not
   // yet a change to the roster, and the Save button must not light up because somebody pressed a key.
   const [pending, setPending] = useState("");
   const cleaned = pending.trim().replace(/^@/, "");
+  const ready = canAdd && cleaned.length > 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: SPACE[1] + 2 }}>
       <TextField
@@ -796,7 +797,7 @@ function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
         style={{ flex: 1, minWidth: 0 }}
       />
       <Pressable
-        disabled={cleaned.length === 0}
+        disabled={!ready}
         onClick={() => {
           onAdd(cleaned);
           setPending("");
@@ -805,8 +806,8 @@ function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
           padding: `0 ${SPACE[4] + 2}px`,
           minHeight: TAP,
           borderRadius: RADIUS.md,
-          background: cleaned.length > 0 ? "var(--btn)" : "var(--chip)",
-          color: cleaned.length > 0 ? "var(--btn-text)" : "var(--hint)",
+          background: ready ? "var(--btn)" : "var(--chip)",
+          color: ready ? "var(--btn-text)" : "var(--hint)",
           fontSize: TEXT.base,
           fontWeight: 600,
           justifyContent: "center",

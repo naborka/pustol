@@ -153,24 +153,45 @@ impl FromRequestParts<AppState> for Authenticated {
 }
 
 impl Authenticated {
-    /// A caller whose proof holds, unless their profile carries text storage cannot keep.
+    /// A caller whose proof holds, unless their profile is one storage cannot keep.
     ///
-    /// Every request records the account it names, and `PostgreSQL` text cannot hold U+0000: a name
-    /// carrying one came back as a server fault. Asked of every string of the profile, as a body's
-    /// are, and of a session as of a payload, since a session carries the profile it was issued with.
+    /// The only way to build the value every handler reaches storage through, for a payload and a
+    /// session alike, since a session carries the profile it was issued with. So no signed profile
+    /// reaches a database check: one that broke the account row's rules came back as a server fault.
     fn accepted(
         user: TelegramUser,
         proof: Proof,
         expires_at: DateTime<Utc>,
     ) -> Result<Self, ApiError> {
-        let profile = serde_json::to_value(&user).expect("a profile is plain data");
-        refuse_nul(&profile, "the Telegram profile")?;
+        refuse_unstorable(&user)?;
         Ok(Self {
             user,
             proof,
             expires_at,
         })
     }
+}
+
+/// Refuses a profile the account row cannot hold, as `text_invalid`: an id that is not positive, a
+/// first name that is blank, or U+0000 in any of its strings, which `PostgreSQL` text cannot hold.
+///
+/// Blank is judged by every Unicode space, more than the row's own check trims, so the row's check
+/// is never the one that refuses.
+fn refuse_unstorable(user: &TelegramUser) -> Result<(), ApiError> {
+    if user.id <= 0 {
+        return Err(ApiError::bad_request(
+            "text_invalid",
+            "the Telegram profile's id is not a positive number",
+        ));
+    }
+    if user.first_name.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "text_invalid",
+            "the Telegram profile's first name is blank",
+        ));
+    }
+    let profile = serde_json::to_value(user).expect("a profile is plain data");
+    refuse_nul(&profile, "the Telegram profile")
 }
 
 /// A caller who is on the bar's admin roster.

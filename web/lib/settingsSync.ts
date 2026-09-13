@@ -10,7 +10,7 @@
  */
 
 import { draftOf, type SettingsDraft, type SettingsView } from "./api";
-import { copyDraft, differs, edited, trimmed, type Edit } from "./settingsRules";
+import { copyDraft, differs, edited, trimmed, usernameKey, type Edit } from "./settingsRules";
 
 export interface SettingsPair {
   settings: SettingsView;
@@ -83,10 +83,6 @@ function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function usernameKey(member: { username: string }): string {
-  return member.username.toLowerCase();
-}
-
 /**
  * A proposal as the server stores it and reads it back: `Draft::resolve` in `pustol-domain`, then
  * the order storage lists it in. Advisory, like `settingsRules`: it only decides whether two
@@ -115,7 +111,7 @@ export function asStored(draft: SettingsDraft, settings: SettingsView): Settings
     staff: draft.staff
       .map((member) => ({ ...member }))
       .sort((left, right) => {
-        const [a, b] = [usernameKey(left), usernameKey(right)];
+        const [a, b] = [usernameKey(left.username), usernameKey(right.username)];
         return a < b ? -1 : a > b ? 1 : 0;
       }),
   };

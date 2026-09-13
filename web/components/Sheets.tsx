@@ -23,8 +23,9 @@ import type {
   ShiftTable,
   ShiftView,
 } from "@/lib/api";
+import type { ApiFailure } from "@/lib/errors";
 import * as fmt from "@/lib/format";
-import { tableOffers, walkInOffers, walkInUntil } from "@/lib/occupancy";
+import { tableOffers, walkInOffers } from "@/lib/occupancy";
 import type { Refusal } from "@/lib/outcomes";
 import type { TableOffer } from "@/lib/occupancy";
 import { trimmed } from "@/lib/settingsRules";
@@ -38,6 +39,7 @@ import {
   Note,
   PartySizeGrid,
   Pressable,
+  ReadFailed,
   SectionLabel,
   Separator,
   Sheet,
@@ -642,7 +644,6 @@ export function WalkInSheet({
   open,
   shift,
   maxParty,
-  turnMinutes,
   partySize,
   chosenTableId,
   onClose,
@@ -653,7 +654,6 @@ export function WalkInSheet({
   open: boolean;
   shift: ShiftView | null;
   maxParty: number;
-  turnMinutes: number;
   partySize: number;
   chosenTableId: string | null;
   onClose: () => void;
@@ -661,9 +661,9 @@ export function WalkInSheet({
   onChooseTable: (tableId: string) => void;
   onSeat: (tableId: string) => void;
 }) {
-  const until = shift ? walkInUntil(shift, turnMinutes) : null;
+  const until = shift?.walk_in_until_minutes ?? null;
   if (!shift || until === null) return null;
-  const offers = walkInOffers(shift, partySize, turnMinutes);
+  const offers = walkInOffers(shift, partySize);
   const chosen = chosenTable(offers, chosenTableId);
 
   return (
@@ -760,7 +760,7 @@ function TableChoiceList({
 function SlotSection({
   availability,
   chosen,
-  failedToLoad,
+  loadFailure,
   stale,
   onPick,
   onTaken,
@@ -768,7 +768,7 @@ function SlotSection({
 }: {
   availability: Availability | null;
   chosen: number | null;
-  failedToLoad: boolean;
+  loadFailure: ApiFailure | null;
   stale: boolean;
   onPick: (minutes: number) => void;
   onTaken: () => void;
@@ -779,10 +779,14 @@ function SlotSection({
     <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
       <SectionLabel>Время</SectionLabel>
       {availability === null ? (
-        failedToLoad ? (
+        loadFailure ? (
           <>
-            <Note tone="warn">Не удалось прочитать свободные окна.</Note>
-            <CardAction label="Попробовать снова" onClick={onRetry} />
+            <ReadFailed
+              failure={loadFailure}
+              audience="staff"
+              generic="Не удалось прочитать свободные окна."
+              onRetry={onRetry}
+            />
           </>
         ) : (
           <Spinner label="Считаем свободные окна" />
@@ -860,7 +864,7 @@ export function ManualBookingSheet({
   chosenMinutes,
   chosenTableId,
   guestName,
-  failedToLoad,
+  loadFailure,
   timesPending = false,
   onClose,
   onPartySize,
@@ -880,7 +884,7 @@ export function ManualBookingSheet({
   chosenMinutes: number | null;
   chosenTableId: string | null;
   guestName: string;
-  failedToLoad: boolean;
+  loadFailure: ApiFailure | null;
   /** The times on screen answer the party size before the last change. */
   timesPending?: boolean;
   onClose: () => void;
@@ -936,7 +940,7 @@ export function ManualBookingSheet({
         <SlotSection
           availability={availability}
           chosen={chosenMinutes}
-          failedToLoad={failedToLoad}
+          loadFailure={loadFailure}
           stale={timesPending}
           onPick={onPick}
           onTaken={onTakenSlot}
@@ -970,7 +974,7 @@ export function MoveBookingSheet({
   availability,
   chosenMinutes,
   chosenTableId,
-  failedToLoad,
+  loadFailure,
   timesPending = false,
   onClose,
   onPartySize,
@@ -990,7 +994,7 @@ export function MoveBookingSheet({
   availability: Availability | null;
   chosenMinutes: number | null;
   chosenTableId: string | null;
-  failedToLoad: boolean;
+  loadFailure: ApiFailure | null;
   /** The times on screen answer a question the sheet has since changed. */
   timesPending?: boolean;
   onClose: () => void;
@@ -1057,7 +1061,7 @@ export function MoveBookingSheet({
           <SlotSection
             availability={availability}
             chosen={minutes}
-            failedToLoad={failedToLoad}
+            loadFailure={loadFailure}
             stale={timesPending}
             onPick={onPick}
             onTaken={onTakenSlot}

@@ -33,7 +33,7 @@ pub use allocator::{
     largest_party_seatable, seating_is_sound,
 };
 pub use config::{
-    BarConfig, Bounds, ConfigError, DayHours, LIMITS, Limits, ScheduleConflict, Setting,
+    BarConfig, BarList, Bounds, ConfigError, DayHours, LIMITS, Limits, ScheduleConflict, Setting,
     StaffMember, ValidConfig, WeekSchedule, is_telegram_username, parties_above_cap,
     schedule_conflicts,
 };

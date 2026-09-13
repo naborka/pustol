@@ -8,7 +8,7 @@ use pustol_domain::config::{
     parties_above_cap, schedule_conflicts,
 };
 use pustol_domain::service_day::ServiceDay;
-use pustol_domain::{DayHours, ScheduleConflict};
+use pustol_domain::{Booking, BookingStatus, DayHours, Interval, ScheduleConflict};
 
 use common::{
     BELGRADE, DEFAULT_HOURS, booking, default_config, force, numbered, table, thursday, utc, zone,
@@ -768,7 +768,13 @@ fn a_day_off_yesterday_cannot_be_the_running_shift() {
 
 /// The bar open 10:00 to `close_minutes` every day, with two-hour sittings.
 fn closing_at(close_minutes: i32) -> pustol_domain::config::ValidConfig {
+    closing_with(close_minutes, 120)
+}
+
+/// The bar open 10:00 to `close_minutes` every day, with sittings of `turn_minutes`.
+fn closing_with(close_minutes: i32, turn_minutes: i32) -> pustol_domain::config::ValidConfig {
     let mut config = default_config();
+    config.turn_minutes = turn_minutes;
     config.week = WeekSchedule::uniform(DayHours {
         open_minutes: 600,
         close_minutes,
@@ -777,25 +783,35 @@ fn closing_at(close_minutes: i32) -> pustol_domain::config::ValidConfig {
     force(config)
 }
 
+/// A party seated for `window` on `day`, as a walk-in is.
+fn seated(day: ServiceDay, window: Interval) -> Booking {
+    Booking {
+        window,
+        status: BookingStatus::Arrived,
+        ..booking(1, day, 600, 2, None, 60)
+    }
+}
+
 fn date(year: i32, month: u32, day: u32) -> ServiceDay {
     ServiceDay::new(chrono::NaiveDate::from_ymd_opt(year, month, day).expect("valid date"))
 }
 
 #[test]
-fn on_the_night_the_clocks_go_back_the_running_shift_never_goes_back() {
+fn on_the_night_the_clocks_go_back_the_shift_runs_until_the_wall_last_reads_closing() {
     // Saturday 24 October 2026 closes at 02:30. At 03:00 on Sunday the clocks go back to 02:00, so
-    // 02:30 happens twice: at 00:30Z and again at 01:30Z. The shift ends the first time.
+    // 02:30 happens twice: at 00:30Z and again at 01:30Z. The bar is open until the wall reads it for
+    // the last time, and once Sunday is running it never goes back to Saturday.
     let config = closing_at(1590);
     let saturday = date(2026, 10, 24);
     let sunday = date(2026, 10, 25);
     let read = [
         (utc(2026, 10, 25, 0, 15), saturday),
-        (utc(2026, 10, 25, 0, 29), saturday),
-        (utc(2026, 10, 25, 0, 31), sunday),
-        (utc(2026, 10, 25, 0, 45), sunday),
-        (utc(2026, 10, 25, 1, 15), sunday),
-        (utc(2026, 10, 25, 1, 29), sunday),
+        (utc(2026, 10, 25, 0, 31), saturday),
+        (utc(2026, 10, 25, 1, 15), saturday),
+        (utc(2026, 10, 25, 1, 29), saturday),
+        (utc(2026, 10, 25, 1, 30), sunday),
         (utc(2026, 10, 25, 1, 31), sunday),
+        (utc(2026, 10, 25, 2, 30), sunday),
     ];
     for (now, expected) in read {
         assert_eq!(config.current_service_day(now), expected, "at {now}");
@@ -820,13 +836,15 @@ fn on_the_night_the_clocks_go_forward_the_shift_runs_until_its_last_sitting_ends
 }
 
 #[test]
-fn the_shift_stops_running_at_the_very_moment_its_last_sitting_is_over() {
-    // "Today" and "finished" answer one question about a close after midnight: a shift whose last
-    // sitting still holds its table is running, and one whose last sitting is over is not.
-    for (close_minutes, day) in [
-        (1560, thursday()),
-        (1590, date(2026, 10, 24)),
-        (1620, date(2026, 3, 28)),
+fn the_shift_runs_while_its_last_sitting_holds_its_table_and_until_the_wall_last_reads_closing() {
+    // "Today" and "finished" agree about a close after midnight: a shift whose last sitting still
+    // holds its table is running. It stops at the later of that sitting's end and the last moment the
+    // wall reads closing, which is later only when the clocks go back.
+    let minute = chrono::TimeDelta::minutes(1);
+    for (close_minutes, day, stops) in [
+        (1560, thursday(), utc(2026, 7, 31, 0, 0)),
+        (1590, date(2026, 10, 24), utc(2026, 10, 25, 1, 30)),
+        (1620, date(2026, 3, 28), utc(2026, 3, 29, 2, 0)),
     ] {
         let config = closing_at(close_minutes);
         let last = booking(
@@ -837,46 +855,31 @@ fn the_shift_stops_running_at_the_very_moment_its_last_sitting_is_over() {
             None,
             config.turn_minutes,
         );
-        let end = last.window.end();
-        let before = end - chrono::TimeDelta::minutes(1);
+        let what = format!("{close_minutes} on {day:?}");
         let next = day.checked_add_days(1).expect("in range");
 
-        assert!(!last.has_finished(before), "{close_minutes} on {day:?}");
-        assert_eq!(
-            config.current_service_day(before),
-            day,
-            "{close_minutes} on {day:?}"
-        );
-        assert!(last.has_finished(end), "{close_minutes} on {day:?}");
-        assert_eq!(
-            config.current_service_day(end),
-            next,
-            "{close_minutes} on {day:?}"
-        );
+        assert!(last.window.end() <= stops, "{what}");
+        assert!(!last.has_finished(last.window.end() - minute), "{what}");
+        assert_eq!(config.current_service_day(last.window.end() - minute), day, "{what}");
+        assert_eq!(config.current_service_day(stops - minute), day, "{what}");
+        assert_eq!(config.current_service_day(stops), next, "{what}");
     }
 }
 
 #[test]
-fn on_the_night_the_clocks_skip_the_last_arrival_the_shift_outlasts_its_last_sitting() {
+fn on_the_night_the_clocks_skip_the_last_arrival_the_shift_ends_with_the_last_sitting_there_is() {
     // Saturday 28 March 2026 closes at 03:00, with one-hour sittings every half hour. The latest
-    // arrival closing allows, 02:00, never happens: at 01:00Z the clocks jump from 02:00 to 03:00.
-    // The grid's last sitting arrives at 01:30 and is over at 01:30Z; the shift runs a turn past the
-    // moment the clocks jumped, to 02:00Z, and no sitting the grid offers runs past that.
-    let mut draft = default_config();
-    draft.turn_minutes = 60;
-    draft.week = WeekSchedule::uniform(DayHours {
-        open_minutes: 600,
-        close_minutes: 1620,
-        closed: false,
-    });
-    let config = force(draft);
+    // arrival closing allows, 02:00, never happens: at 01:00Z the clocks jump from 02:00 to 03:00, and
+    // the wall reads closing at once. The grid's last sitting arrives at 01:30 and is over at 01:30Z,
+    // and the shift runs exactly that long: no sitting runs later, and the wall has read closing.
+    let config = closing_with(1620, 60);
     let saturday = date(2026, 3, 28);
     let last = booking(1, saturday, 1530, 2, None, 60);
 
     assert_eq!(last.window.end(), utc(2026, 3, 29, 1, 30));
-    assert_eq!(config.current_service_day(utc(2026, 3, 29, 1, 45)), saturday);
+    assert_eq!(config.current_service_day(utc(2026, 3, 29, 1, 29)), saturday);
     assert_eq!(
-        config.current_service_day(utc(2026, 3, 29, 2, 0)),
+        config.current_service_day(utc(2026, 3, 29, 1, 30)),
         date(2026, 3, 29)
     );
 }
@@ -905,10 +908,89 @@ fn a_party_seated_now_holds_its_table_no_later_than_its_shift_runs() {
     assert_eq!(config.current_service_day(after), friday);
     assert_eq!(config.walk_in_window(thursday(), after), None, "Thursday is over");
     assert_eq!(
+        config.walk_in_window(friday, after),
+        None,
+        "Friday is the running shift, and has not opened"
+    );
+    let opening = utc(2026, 7, 31, 8, 0);
+    assert_eq!(
+        config.walk_in_window(friday, opening - chrono::TimeDelta::minutes(1)),
+        None
+    );
+    assert_eq!(
+        config.walk_in_window(friday, opening).map(Interval::end),
+        Some(utc(2026, 7, 31, 10, 0))
+    );
+}
+
+#[test]
+fn on_the_night_the_clocks_go_forward_a_party_seated_now_holds_its_table_until_the_wall_reads_closing()
+ {
+    // Saturday 28 March 2026 closes at 03:30, with one-hour sittings. At 01:00Z the clocks jump from
+    // 02:00 to 03:00, and the wall reads 03:30 half an hour later. A party seated at the jump holds its
+    // table that half hour, and the hours that seated it do not call it outside them.
+    let config = closing_with(1650, 60);
+    let saturday = date(2026, 3, 28);
+    let jump = utc(2026, 3, 29, 1, 0);
+
+    let window = config.walk_in_window(saturday, jump).expect("still open");
+    assert_eq!(
+        (window.start(), window.end()),
+        (jump, utc(2026, 3, 29, 1, 30))
+    );
+    assert_eq!(config.walk_in_window(saturday, utc(2026, 3, 29, 1, 30)), None);
+    assert_eq!(
+        schedule_conflicts(&config, &[seated(saturday, window)], jump),
+        Vec::new()
+    );
+}
+
+#[test]
+fn nobody_is_seated_now_once_the_wall_has_read_closing_though_the_last_sitting_runs_on() {
+    // Saturday 28 March 2026 closes at 03:00 with two-hour sittings. The wall reads 03:00 at 01:00Z,
+    // when the clocks jump; the last sitting, arriving at 01:00, holds its table until 02:00Z. At
+    // 01:30Z Saturday is still the running shift, and nobody new is seated on it or on Sunday.
+    let config = closing_at(1620);
+    let (saturday, sunday) = (date(2026, 3, 28), date(2026, 3, 29));
+    let now = utc(2026, 3, 29, 1, 30);
+
+    assert_eq!(config.current_service_day(now), saturday);
+    assert_eq!(config.walk_in_window(saturday, now), None);
+    assert_eq!(config.walk_in_window(sunday, now), None);
+    assert_eq!(
         config
-            .walk_in_window(friday, after)
-            .map(pustol_domain::Interval::end),
-        Some(utc(2026, 7, 31, 2, 30))
+            .walk_in_window(saturday, utc(2026, 3, 29, 0, 59))
+            .map(Interval::end),
+        Some(utc(2026, 3, 29, 1, 0))
+    );
+}
+
+#[test]
+fn on_the_night_the_clocks_go_back_a_party_is_seated_until_the_wall_last_reads_closing() {
+    // Saturday 24 October 2026 closes at 03:00. At 01:00Z the wall goes back from 03:00 to 02:00, so
+    // it reads 03:00 only at 02:00Z. At 01:30Z it reads 02:30 for the second time: Saturday seats a
+    // party until 02:00Z, and Sunday has not begun.
+    let config = closing_at(1620);
+    let (saturday, sunday) = (date(2026, 10, 24), date(2026, 10, 25));
+    let second_pass = utc(2026, 10, 25, 1, 30);
+
+    assert_eq!(config.current_service_day(second_pass), saturday);
+    assert_eq!(
+        config.walk_in_window(saturday, second_pass).map(Interval::end),
+        Some(utc(2026, 10, 25, 2, 0))
+    );
+    assert_eq!(config.walk_in_window(sunday, second_pass), None);
+
+    // Seated on the first pass through the repeated hour, a party holds its table longer than the
+    // wall says, and the hours that seated it still do not call it outside them.
+    let first_pass = utc(2026, 10, 25, 0, 30);
+    let early = config
+        .walk_in_window(saturday, first_pass)
+        .expect("still open");
+    assert_eq!(early.end(), utc(2026, 10, 25, 2, 0));
+    assert_eq!(
+        schedule_conflicts(&config, &[seated(saturday, early)], first_pass),
+        Vec::new()
     );
 }
 
@@ -966,6 +1048,76 @@ fn texts_the_bar_writes_stay_short_enough_to_send_and_to_show() {
     at_the_limit.name = "🍺".repeat(LIMITS.text.name);
     at_the_limit.message_templates = vec!["а".repeat(LIMITS.text.message)];
     assert_eq!(at_the_limit.validate(), Vec::new(), "counted in characters, not bytes");
+}
+
+#[test]
+fn every_list_the_bar_keeps_is_bounded_and_retired_tables_do_not_count() {
+    use pustol_domain::config::BarList;
+    use pustol_domain::schedule::BarTable;
+
+    let lists = LIMITS.lists;
+    let number = |n: usize| i32::try_from(n).expect("a small table number");
+    let mut over = default_config();
+    over.message_templates = vec!["Ждём вас".to_owned(); lists.message_templates + 1];
+    over.cancel_reasons = vec!["Дождь".to_owned(); lists.cancel_reasons + 1];
+    over.zones
+        .extend((over.zones.len()..=lists.zones).map(|n| zone(&format!("Зона {n}"))));
+    over.staff = (0..=lists.staff)
+        .map(|n| StaffMember {
+            username: format!("staff_{n:03}"),
+            telegram_user_id: None,
+        })
+        .collect();
+    over.tables = (1..=lists.tables + 1)
+        .map(|n| table(number(n), 6, "Зал"))
+        .collect();
+
+    let errors = over.validate();
+    for (list, limit) in [
+        (BarList::MessageTemplates, lists.message_templates),
+        (BarList::CancelReasons, lists.cancel_reasons),
+        (BarList::Zones, lists.zones),
+        (BarList::Staff, lists.staff),
+        (BarList::Tables, lists.tables),
+    ] {
+        assert!(
+            errors.contains(&ConfigError::ListTooLong { list, limit }),
+            "{list:?}: {errors:?}"
+        );
+    }
+    assert_eq!(errors.len(), 5, "{errors:?}");
+
+    let mut at_the_bounds = over;
+    at_the_bounds.message_templates.pop();
+    at_the_bounds.cancel_reasons.pop();
+    at_the_bounds.zones.pop();
+    at_the_bounds.staff.pop();
+    at_the_bounds.tables.pop();
+    at_the_bounds
+        .tables
+        .extend((lists.tables + 2..lists.tables + 7).map(|n| BarTable {
+            retired: true,
+            ..table(number(n), 6, "Зал")
+        }));
+    assert_eq!(
+        at_the_bounds.validate(),
+        Vec::new(),
+        "retired tables are the room's history, not its size"
+    );
+}
+
+#[test]
+fn a_zone_name_stays_short_enough_to_show() {
+    let mut config = default_config();
+    config.zones.push(zone(&"🍺".repeat(LIMITS.text.zone + 1)));
+    assert!(
+        config
+            .validate()
+            .contains(&ConfigError::ZoneNameTooLong { limit: LIMITS.text.zone })
+    );
+    config.zones.pop();
+    config.zones.push(zone(&"🍺".repeat(LIMITS.text.zone)));
+    assert_eq!(config.validate(), Vec::new(), "counted in characters, not bytes");
 }
 
 #[test]

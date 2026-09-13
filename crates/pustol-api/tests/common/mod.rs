@@ -357,6 +357,21 @@ impl Harness {
         self.send("POST", path, caller, body).await
     }
 
+    /// A JSON call whose request says how long its body is, as a browser's does.
+    pub async fn send_sized(&self, method: &str, path: &str, caller: &Caller, body: String) -> Answer {
+        self.call(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::AUTHORIZATION, caller.credentials(self.now))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_LENGTH, body.len())
+                .body(Body::from(body))
+                .expect("a request"),
+        )
+        .await
+    }
+
     /// A call with the body sent as written, under the content type given, for a body that is not
     /// JSON or not said to be.
     pub async fn send_text(

@@ -1032,17 +1032,18 @@ export function ShiftScreen({
 
 /** The action bar under the shift: what staff can start from here. */
 export function ShiftActions({
-  isToday,
+  seatsNow,
   onWalkIn,
   onManual,
 }: {
-  isToday: boolean;
+  /** The server takes a party at the door on this evening now. */
+  seatsNow: boolean;
   onWalkIn: () => void;
   onManual: () => void;
 }) {
-  if (!isToday) {
-    // Seating somebody "now" on a future evening is not a state this app may offer, so the button
-    // is not there to be pressed rather than there and refused.
+  if (!seatsNow) {
+    // Seating somebody "now" on another evening, or before the doors open, is not a state this app
+    // may offer, so the button is not there to be pressed rather than there and refused.
     return <CardAction tone="primary" label="Записать гостя" onClick={onManual} />;
   }
   return (

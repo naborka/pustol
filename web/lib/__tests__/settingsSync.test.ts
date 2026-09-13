@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import { draftOf, type SettingsDraft, type SettingsView } from "../api";
+import { removeStaff, removeTable, resizeTable } from "../settingsEdits";
 import { edited } from "../settingsRules";
 import {
   asStored,
@@ -270,6 +271,32 @@ describe("a save that answers", () => {
     const pair = savedInto(meanwhile, stored, [typing]);
     expect(pair.draft).toMatchObject({ name: "Чердак", address: "Невский, 1", version: v2.version });
     expect(pair.settings).toBe(stored);
+  });
+
+  it("makes an edit typed while it was on its way on the item that edit named, whatever order it lists them in", () => {
+    // The server lists staff by username and tables by number: a position taken before the save
+    // named somebody else after it.
+    const sent: SettingsDraft = {
+      ...draftOf(v1),
+      staff: [{ username: "marina" }, { username: "nastya" }, { username: "pavel" }, { username: "aaron_bar" }],
+      tables: [...draftOf(v1).tables].reverse(),
+    };
+    const stored = settingsView({
+      version: v2.version,
+      staff: [
+        { username: "aaron_bar", bound: false },
+        { username: "marina", bound: false },
+        { username: "nastya", bound: true },
+        { username: "pavel", bound: false },
+      ],
+    });
+    const pair = savedInto({ settings: v1, draft: sent }, stored, [
+      removeStaff("pavel"),
+      resizeTable("t2", -1),
+      removeTable("t1"),
+    ]);
+    expect(pair.draft.staff).toEqual([{ username: "aaron_bar" }, { username: "marina" }, { username: "nastya" }]);
+    expect(pair.draft.tables).toEqual([{ id: "t2", seats: 5, zone: "Зал" }]);
   });
 
   it("is applied whatever evening its counts are for", () => {

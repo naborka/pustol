@@ -260,6 +260,53 @@ async fn a_telegram_profile_holding_a_nul_character_is_refused_as_text_the_bar_c
 }
 
 #[tokio::test]
+async fn a_telegram_profile_storage_cannot_keep_is_refused_before_anything_is_stored() {
+    // An account needs a positive id and a first name that is not blank. A signed profile without
+    // either reached the account row, where the database's own check refused it as a server fault.
+    use pustol_telegram::init_data::{BotToken, TelegramUser, sign_for_tests};
+
+    let app = harness().await;
+    let token = BotToken::new(common::TOKEN);
+    for (id, first_name) in [(5_560_001, ""), (5_560_002, "   "), (0, "Анна"), (-1, "Анна")] {
+        let user = format!(r#"{{"id":{id},"first_name":"{first_name}","language_code":"ru"}}"#);
+        let payload = sign_for_tests(
+            &[("auth_date", &morning().timestamp().to_string()), ("user", &user)],
+            &token,
+        );
+        let session = pustol_telegram::session::issue(
+            &TelegramUser {
+                id,
+                first_name: first_name.to_owned(),
+                last_name: None,
+                username: None,
+                language_code: None,
+                is_premium: None,
+                photo_url: None,
+            },
+            morning() + TimeDelta::hours(1),
+            &token,
+        );
+        for credentials in [format!("tma {payload}"), format!("session {session}")] {
+            for (method, path) in [
+                ("GET", "/api/session"),
+                ("GET", SHIFT),
+                ("POST", "/api/reminders/opt-in"),
+            ] {
+                let answer = app.send_raw(method, path, Some(&credentials), None).await;
+                let what = format!("{id} {first_name:?} {method} {path}");
+                assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{what}: {}", answer.body);
+                assert_eq!(answer.error_code(), Some("text_invalid"), "{what}");
+            }
+        }
+    }
+    let stored: i64 = sqlx::query_scalar("select count(*) from telegram_user")
+        .fetch_one(app.store.pool())
+        .await
+        .expect("counted");
+    assert_eq!(stored, 0);
+}
+
+#[tokio::test]
 async fn a_session_proves_who_is_asking_and_not_what_they_may_do() {
     let app = harness().await;
     let guest = Caller::new("Гость");

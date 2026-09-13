@@ -80,12 +80,12 @@ pub enum Error {
     #[error("a note is at most {limit} characters")]
     NoteTooLong { limit: usize },
 
-    /// Seating somebody "now" on a shift that is not the one running, that has already ended, or
-    /// that is a day off.
+    /// Seating somebody "now" on a shift that is not the one running, that is a day off, that has not
+    /// opened, or whose closing time the wall has last read.
     ///
-    /// There is no now on next Tuesday, nor after the last sitting of tonight. Refused here rather
-    /// than in a handler, because the only thing that knows which shift is running is the
-    /// configuration this layer reads.
+    /// There is no now on next Tuesday, nor after tonight's closing. Refused here rather than in a
+    /// handler, because the only thing that knows which shift is running is the configuration this
+    /// layer reads.
     #[error("{service_day} is not the shift that is running")]
     NotTheRunningShift { service_day: chrono::NaiveDate },
 

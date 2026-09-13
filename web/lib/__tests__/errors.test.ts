@@ -1,12 +1,24 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canRetry,
   invalidReasons,
   messageFor,
   needsRelaunch,
   strandedBookings,
   type ApiFailure,
 } from "../errors";
+
+describe("whether trying again can help", () => {
+  it("says no for a failure the same request will always meet, and yes otherwise", () => {
+    for (const code of ["forbidden", "session_expired", "not_telegram", "no_credentials"]) {
+      expect(canRetry({ code, message: code }), code).toBe(false);
+    }
+    for (const code of ["internal", "network", "a_code_from_the_future"]) {
+      expect(canRetry({ code, message: code }), code).toBe(true);
+    }
+  });
+});
 
 const failure = (code: string, detail?: Record<string, unknown>): ApiFailure =>
   detail === undefined ? { code, message: code } : { code, message: code, detail };
@@ -69,6 +81,7 @@ describe("what a failure says", () => {
       "guest_has_another_plan",
       "table_taken",
       "text_invalid",
+      "not_the_running_shift",
     ]) {
       expect(messageFor(failure(code), "staff"), code).not.toBe(
         messageFor(failure("something_unmapped"), "staff"),

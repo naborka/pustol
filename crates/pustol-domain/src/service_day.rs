@@ -145,6 +145,34 @@ pub enum TimeError {
 /// an error rather than a silent shift — a bar cannot seat anyone at a time the day does not
 /// contain, and quietly moving the guest an hour is worse than refusing the slot.
 pub fn resolve(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
+    resolve_on(Pass::First, day, minutes, tz)
+}
+
+/// Resolves a wall-clock minute that marks a boundary rather than an arrival.
+///
+/// Exactly [`resolve`], except for a minute the spring clock change skips: nobody can arrive at a
+/// time that never happens, but a boundary set there still passes, at the moment the clocks jump
+/// over it.
+pub fn resolve_boundary(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
+    passed_on(Pass::First, day, minutes, tz)
+}
+
+/// Resolves a wall-clock minute at which something stops.
+///
+/// Exactly [`resolve_boundary`], except for a minute the autumn clock change repeats: whatever is
+/// open until then stays open until the wall reads it for the last time.
+pub fn resolve_end(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
+    passed_on(Pass::Last, day, minutes, tz)
+}
+
+/// Which instant a wall-clock minute the autumn clock change repeats resolves to.
+#[derive(Clone, Copy)]
+enum Pass {
+    First,
+    Last,
+}
+
+fn resolve_on(pass: Pass, day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
     if !(0..=MAX_SERVICE_MINUTE).contains(&minutes) {
         return Err(TimeError::MinutesOutOfRange(minutes));
     }
@@ -156,7 +184,11 @@ pub fn resolve(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, T
         .ok_or(TimeError::MinutesOutOfRange(minutes))?;
     match tz.from_local_datetime(&naive) {
         LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
-        LocalResult::Ambiguous(earlier, _later) => Ok(earlier.with_timezone(&Utc)),
+        LocalResult::Ambiguous(first, last) => Ok(match pass {
+            Pass::First => first,
+            Pass::Last => last,
+        }
+        .with_timezone(&Utc)),
         LocalResult::None => Err(TimeError::LocalTimeSkipped {
             day: day.date(),
             minutes,
@@ -165,15 +197,11 @@ pub fn resolve(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, T
     }
 }
 
-/// Resolves a wall-clock minute that marks a boundary rather than an arrival.
-///
-/// Exactly [`resolve`], except for a minute the spring clock change skips: nobody can arrive at a
-/// time that never happens, but a boundary set there still passes, at the moment the clocks jump
-/// over it.
-pub fn resolve_boundary(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
-    match resolve(day, minutes, tz) {
+/// [`resolve_on`], with a minute the spring clock change skips passing when the clocks jump over it.
+fn passed_on(pass: Pass, day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
+    match resolve_on(pass, day, minutes, tz) {
         Err(skipped @ TimeError::LocalTimeSkipped { .. }) => (1..=24 * 60)
-            .find_map(|later| resolve(day, minutes + later, tz).ok())
+            .find_map(|later| resolve_on(pass, day, minutes + later, tz).ok())
             .ok_or(skipped),
         resolved => resolved,
     }
@@ -274,6 +302,25 @@ mod tests {
         assert_eq!(
             resolve_boundary(day(2026, 10, 25), 2 * 60 + 30, BELGRADE),
             resolve(day(2026, 10, 25), 2 * 60 + 30, BELGRADE),
+            "anything else resolves as an arrival does"
+        );
+    }
+
+    #[test]
+    fn an_end_the_autumn_clock_change_repeats_passes_the_last_time_the_wall_reads_it() {
+        // Belgrade repeats 02:00..03:00 on 2026-10-25: 02:30 is read at 00:30Z and last at 01:30Z.
+        assert_eq!(
+            resolve_end(day(2026, 10, 25), 2 * 60 + 30, BELGRADE),
+            Ok(utc(2026, 10, 25, 1, 30))
+        );
+        assert_eq!(
+            resolve_end(day(2026, 3, 29), 2 * 60 + 30, BELGRADE),
+            Ok(utc(2026, 3, 29, 1, 0)),
+            "an end the spring change skips passes when the clocks jump"
+        );
+        assert_eq!(
+            resolve_end(day(2026, 7, 30), 20 * 60, BELGRADE),
+            resolve(day(2026, 7, 30), 20 * 60, BELGRADE),
             "anything else resolves as an arrival does"
         );
     }

@@ -110,25 +110,15 @@ export function tableOffers(
   return [...offers.filter((offer) => offer.fits), ...offers.filter((offer) => !offer.fits)];
 }
 
-/** The tables a party at the door can be put at: free for a whole turn from now. */
-export function walkInOffers(
-  shift: ShiftView,
-  partySize: number,
-  turnMinutes: number,
-): TableOffer[] {
+/**
+ * The tables a party at the door can be put at: free from now until the end the server gave. Never
+ * worked out here: on the night the clocks change, wall minutes give the wrong end.
+ */
+export function walkInOffers(shift: ShiftView, partySize: number): TableOffer[] {
   const now = shift.now_minutes;
-  const until = walkInUntil(shift, turnMinutes);
+  const until = shift.walk_in_until_minutes;
   if (now === null || until === null) return [];
   return tableOffers(shift, partySize, now, until);
-}
-
-/**
- * When a party seated now gives its table back: one turn from now, or the shift's close when that
- * comes first, as the server holds it. Null when the shift is not running.
- */
-export function walkInUntil(shift: ShiftView, turnMinutes: number): number | null {
-  const now = shift.now_minutes;
-  return now === null ? null : Math.min(now + turnMinutes, shift.hours.close_minutes);
 }
 
 /** Tables with nobody at them and nothing closing them, at this minute. */

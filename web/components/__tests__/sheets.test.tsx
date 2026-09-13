@@ -327,7 +327,6 @@ describe("a party at the door", () => {
         open
         shift={view}
         maxParty={6}
-        turnMinutes={120}
         partySize={partySize}
         chosenTableId={chosenTableId}
         onClose={noop}
@@ -355,12 +354,27 @@ describe("a party at the door", () => {
   });
 
   it("says the table is held until closing when a turn would run past it, as the server holds it", () => {
-    walkInSheet(shift({ now_minutes: 1_500, bookings: [] }), 2);
+    walkInSheet(shift({ now_minutes: 1_500, walk_in_until_minutes: 1_560, bookings: [] }), 2);
     expect(
       within(screen.getByRole("dialog")).getByText(
         "Сверху — самый маленький подходящий: большие столы остаются для больших компаний. Стол будет занят до 02:00.",
       ),
     ).toBeDefined();
+  });
+
+  it("says the table is held until the end the server gave, not one worked out on the wall clock", () => {
+    // The night the clocks go back: a turn from 00:30 ends at the second 01:30, before closing at 02:00.
+    walkInSheet(shift({ now_minutes: 1_470, walk_in_until_minutes: 1_530, bookings: [] }), 2);
+    expect(
+      within(screen.getByRole("dialog")).getByText(
+        "Сверху — самый маленький подходящий: большие столы остаются для больших компаний. Стол будет занят до 01:30.",
+      ),
+    ).toBeDefined();
+  });
+
+  it("does not exist while the server takes no party at the door, even on tonight's shift", () => {
+    const { container } = walkInSheet(shift({ walk_in_until_minutes: null }), 2);
+    expect(container.firstChild).toBeNull();
   });
 
   it("seats them at the table staff chose rather than at the one it suggested", async () => {
@@ -442,7 +456,7 @@ describe("a party at the door", () => {
   });
 
   it("does not exist at all on an evening that is not tonight", () => {
-    const { container } = walkInSheet(shift({ now_minutes: null }), 2);
+    const { container } = walkInSheet(shift({ now_minutes: null, walk_in_until_minutes: null }), 2);
     expect(container.firstChild).toBeNull();
   });
 
@@ -504,7 +518,7 @@ describe("moving a booking", () => {
         availability={availability()}
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
-        failedToLoad={false}
+        loadFailure={null}
         onClose={noop}
         onPartySize={noop}
         onPick={noop}
@@ -515,6 +529,33 @@ describe("moving a booking", () => {
       />,
     );
   }
+
+  it("says in its own words why the times cannot be read, and offers no retry when retrying cannot help", () => {
+    render(
+      <MoveBookingSheet
+        open
+        booking={later}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={later.party_size}
+        availability={null}
+        chosenMinutes={null}
+        chosenTableId={null}
+        loadFailure={{ code: "forbidden", message: "not staff" }}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={noop}
+      />,
+    );
+    expect(screen.getByText("Этот раздел только для сотрудников бара.")).toBeDefined();
+    expect(screen.queryByText("Не удалось прочитать свободные окна.")).toBeNull();
+    expect(screen.queryByText("Попробовать снова")).toBeNull();
+  });
 
   it("starts on where the booking already is, with nothing to do", () => {
     moveSheet();
@@ -578,7 +619,7 @@ describe("writing a booking down", () => {
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
         guestName={chosen.name ?? "Глеб"}
-        failedToLoad={false}
+        loadFailure={null}
         onClose={noop}
         onPartySize={noop}
         onPick={noop}
@@ -679,7 +720,7 @@ describe("changing how many are coming", () => {
         availability={availability()}
         chosenMinutes={null}
         chosenTableId={null}
-        failedToLoad={false}
+        loadFailure={null}
         onClose={noop}
         onPartySize={onPartySize}
         onPick={noop}
@@ -703,7 +744,7 @@ describe("changing how many are coming", () => {
         availability={availability()}
         chosenMinutes={null}
         chosenTableId={null}
-        failedToLoad={false}
+        loadFailure={null}
         onClose={noop}
         onPartySize={onPartySize}
         onPick={noop}

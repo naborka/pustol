@@ -17,7 +17,7 @@
  * anything; it only decides what to grey out.
  */
 
-import type { Bounds, Limits, SettingsDraft } from "./api";
+import type { Bounds, Limits, ListLimits, SettingsDraft } from "./api";
 
 /** A reason a proposal cannot be saved, named so the screen can put it next to the control. */
 export type Reason =
@@ -34,6 +34,7 @@ export type Reason =
   | { kind: "shift_shorter_than_turn"; weekday: number }
   | { kind: "setting_out_of_range"; setting: NumericSetting }
   | { kind: "slot_step_not_offered" }
+  | { kind: "list_too_long"; list: keyof ListLimits; max: number }
   | { kind: "no_zones" }
   | { kind: "duplicate_zone"; zone: string }
   | { kind: "no_tables" }
@@ -85,6 +86,11 @@ export function isTelegramUsername(candidate: string): boolean {
   return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(candidate);
 }
 
+/** Who a username names: Telegram ignores its case. */
+export function usernameKey(username: string): string {
+  return username.toLowerCase();
+}
+
 const PHONE_MAX_CHARS = 32;
 
 /** A phone number or a Telegram username: `Contact::parse` in `pustol-domain`, advisory here. */
@@ -106,6 +112,21 @@ function isBlank(text: string): boolean {
 
 function longerThan(text: string, limit: number): boolean {
   return characters(trimmed(text)) > limit;
+}
+
+const LISTS = ["zones", "tables", "message_templates", "cancel_reasons", "staff"] as const satisfies readonly (keyof ListLimits)[];
+
+/**
+ * Whether `list` stays within its bound with `adding` more items. Asked on its own rather than
+ * through `wouldBeLegal`: an add button must not grey out because something else is wrong.
+ */
+export function roomFor(
+  draft: SettingsDraft,
+  limits: Limits,
+  list: keyof ListLimits,
+  adding: number,
+): boolean {
+  return draft[list].length + adding <= limits.lists[list];
 }
 
 export function largestTable(draft: SettingsDraft): number {
@@ -150,6 +171,11 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   if (!limits.slot_step_minutes.includes(draft.slot_step_minutes)) {
     reasons.push({ kind: "slot_step_not_offered" });
   }
+  for (const list of LISTS) {
+    if (!roomFor(draft, limits, list, 0)) {
+      reasons.push({ kind: "list_too_long", list, max: limits.lists[list] });
+    }
+  }
 
   if (draft.zones.length === 0) reasons.push({ kind: "no_zones" });
   draft.zones.forEach((zone, index) => {
@@ -190,7 +216,7 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
     if (
       draft.staff
         .slice(0, index)
-        .some((other) => other.username.toLowerCase() === member.username.toLowerCase())
+        .some((other) => usernameKey(other.username) === usernameKey(member.username))
     ) {
       reasons.push({ kind: "duplicate_staff_username", username: member.username });
     }
@@ -289,6 +315,14 @@ const SETTING_NAME: Record<NumericSetting, string> = {
   grace_minutes: "Ожидание опоздавших",
 };
 
+const LIST_NAME: Record<keyof ListLimits, string> = {
+  zones: "Зон",
+  tables: "Столов",
+  message_templates: "Сообщений гостю",
+  cancel_reasons: "Причин отмены",
+  staff: "Сотрудников",
+};
+
 function hoursWord(minutes: number): string {
   const value = minutes / 60;
   return Number.isInteger(value) ? `${value} ч` : `${value.toFixed(1)} ч`;
@@ -332,6 +366,8 @@ export function reasonSentence(reason: Reason, draft: SettingsDraft): string {
       return `${SETTING_NAME[reason.setting]} вне допустимых значений.`;
     case "slot_step_not_offered":
       return "Такого шага времени бар не предлагает.";
+    case "list_too_long":
+      return `${LIST_NAME[reason.list]} больше ${reason.max} быть не может.`;
     case "no_zones":
       return "Нужна хотя бы одна зона.";
     case "duplicate_zone":

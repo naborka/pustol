@@ -26,9 +26,11 @@ export type SlotState = "free" | "taken" | "past";
  *
  * `any_evening`: a plan not yet begun, replaced by a booking on any evening. `same_evening`: a
  * no-show whose table is still held, replaced only by a booking on its own evening while that evening
- * still has an arrival time by the server's own clock and slot grid. `null`: never replaced — a
- * party at the table, or a held no-show with no arrival time left — and a booking on its evening is
- * refused. «Перенести» is offered exactly when it is not `null`.
+ * still has an arrival time by the server's own clock and slot grid. `null`: no booking the guest can
+ * make now replaces it — a party at the table, a held no-show with no arrival time left, or a booking
+ * on an evening guests can no longer book. «Перенести» is offered exactly when it is not `null`.
+ *
+ * It never says whether the evening is taken: that is `holds_evening`.
  */
 export type Rebooking = "any_evening" | "same_evening" | null;
 
@@ -42,6 +44,8 @@ export interface GuestBooking {
   /** Its window has begun, by the server's clock. */
   started: boolean;
   rebooking_replaces: Rebooking;
+  /** A new booking on its evening would be refused because of it. */
+  holds_evening: boolean;
 }
 
 export interface BarView {
@@ -167,6 +171,12 @@ export interface ShiftView {
   bookings: ShiftBooking[];
   stats: { bookings: number; guests: number; free_now: number | null };
   now_minutes: number | null;
+  /**
+   * When a party seated now gives its table back, in wall-clock minutes of the shift like
+   * `now_minutes`: a turn from now or the closing, whichever comes first, as the server counts it
+   * across a clock change. Null when the server takes no party at the door on this evening now.
+   */
+  walk_in_until_minutes: number | null;
   /** The largest party the room could seat this minute; null when none fits or this is not today. */
   largest_party_seatable_now: number | null;
   /** Every evening staff can reach, with what is on. Longer than the guest's horizon. */
@@ -246,6 +256,16 @@ export interface Limits {
   slot_step_minutes: number[];
   /** The longest each text may be, in characters. */
   text: { name: number; address: number; message: number; reason: number };
+  /** The most items each list may hold. */
+  lists: ListLimits;
+}
+
+export interface ListLimits {
+  zones: number;
+  tables: number;
+  message_templates: number;
+  cancel_reasons: number;
+  staff: number;
 }
 
 export interface SettingsTable {

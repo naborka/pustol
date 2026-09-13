@@ -12,6 +12,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
+import { canRetry, readFailureText, type ApiFailure, type Audience } from "@/lib/errors";
 import { guests as guestsLabel, time as clockLabel } from "@/lib/format";
 import { haptics } from "@/lib/telegram";
 import { LAYER, RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
@@ -1008,12 +1009,43 @@ export function Empty({ title, detail }: { title: string; detail?: string }) {
  * What is on screen could not be read again. Said where it is shown, never as a toast: a read nobody
  * is looking at any more has nobody to tell.
  */
-export function StaleNotice({ onRetry }: { onRetry: () => void }) {
+export function StaleNotice({
+  failure,
+  audience,
+  onRetry,
+}: {
+  failure: ApiFailure;
+  audience: Audience;
+  onRetry: () => void;
+}) {
   return (
     <Card gap={SPACE[2]}>
-      <Note tone="warn">Не удалось обновить — показано прежнее.</Note>
-      <CardAction label="Повторить" onClick={onRetry} />
+      <Note tone="warn">
+        {readFailureText(failure, audience, "Не удалось обновить — показано прежнее.")}
+      </Note>
+      {canRetry(failure) ? <CardAction label="Повторить" onClick={onRetry} /> : null}
     </Card>
+  );
+}
+
+/** A read with nothing on screen failed: why, and a way to ask again where asking again can help. */
+export function ReadFailed({
+  failure,
+  audience,
+  generic,
+  onRetry,
+}: {
+  failure: ApiFailure;
+  audience: Audience;
+  /** What to say while asking again may help. */
+  generic: string;
+  onRetry: () => void;
+}) {
+  return (
+    <>
+      <Note tone="warn">{readFailureText(failure, audience, generic)}</Note>
+      {canRetry(failure) ? <CardAction label="Попробовать снова" onClick={onRetry} /> : null}
+    </>
   );
 }
 

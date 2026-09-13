@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use crate::allocator::{Booking, BookingId, BookingStatus};
 use crate::config::ValidConfig;
 use crate::service_day::ServiceDay;
-use crate::slots::has_arrival_after;
+use crate::slots::{guest_may_book, has_arrival_after};
 
 /// Which new booking of the same guest replaces a booking they hold.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,15 +50,32 @@ impl Booking {
     /// What the guest's screen offers booking again to do to this booking at `now`, or `None` when
     /// it offers nothing.
     ///
-    /// [`Self::rebooking`], except for a no-show whose evening has no arrival time left: only a
-    /// booking on that evening takes its place, and none can be made. Offering «Перенести» there
-    /// would promise a move the grid has no time for.
+    /// [`Self::rebooking`], except for a no-show on an evening no booking can now be made on: only a
+    /// booking on that evening takes its place, so it is offered only while guests may book that
+    /// evening and its grid has an arrival time left. Offering «Перенести» otherwise would promise a
+    /// move the endpoint refuses.
+    ///
+    /// A plan is offered whatever its own evening, a lowered horizon included: a booking on any
+    /// evening replaces it, and the app names what a booking replaces from this answer.
     #[must_use]
     pub fn rebooking_on_offer(&self, config: &ValidConfig, now: DateTime<Utc>) -> Option<Rebooking> {
         self.rebooking(now).filter(|rebooking| match rebooking {
             Rebooking::AnyEvening => true,
-            Rebooking::SameEvening => has_arrival_after(config, self.service_day, now),
+            Rebooking::SameEvening => {
+                guest_may_book(config, self.service_day, now)
+                    && has_arrival_after(config, self.service_day, now)
+            }
         })
+    }
+
+    /// Whether this booking holds its evening at `now`: its table is still held for the guest and
+    /// no new booking of theirs replaces it, so a booking on that evening is refused.
+    ///
+    /// **The one rule for "this evening is already yours".** [`refused_on`] is this question asked of
+    /// every booking a guest holds, so the guest's card and the endpoint cannot disagree about it.
+    #[must_use]
+    pub fn holds_evening(&self, now: DateTime<Utc>) -> bool {
+        !self.has_finished(now) && self.rebooking(now).is_none()
     }
 
     /// Whether this booking is a plan at `now`: confirmed, and its time not yet come.
@@ -122,15 +139,13 @@ pub fn holding_conflict(
         .then_some(HoldingConflict::AnotherPlan)
 }
 
-/// Whether a new booking of this guest on `day` is refused, because they already hold that evening
-/// with a booking booking again cannot replace.
+/// Whether a new booking of this guest on `day` is refused, because one of their bookings on that
+/// evening [holds it](Booking::holds_evening).
 #[must_use]
 pub fn refused_on(guest: &[Booking], day: ServiceDay, now: DateTime<Utc>) -> bool {
-    guest.iter().any(|booking| {
-        booking.service_day == day
-            && !booking.has_finished(now)
-            && !booking.replaced_by_booking_on(day, now)
-    })
+    guest
+        .iter()
+        .any(|booking| booking.service_day == day && booking.holds_evening(now))
 }
 
 #[cfg(test)]

@@ -15,7 +15,8 @@ use chrono_tz::Tz;
 
 use crate::allocator::{Booking, BookingId};
 use crate::schedule::{BarTable, Zone};
-use crate::service_day::{Interval, ServiceDay, minutes_within, resolve_boundary};
+use crate::service_day::{Interval, ServiceDay, minutes_within, resolve_boundary, resolve_end};
+use crate::slots::last_sitting;
 
 /// An inclusive integer range a setting must fall in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,18 +50,35 @@ pub struct Limits {
     pub slot_step_minutes: &'static [i32],
     pub staff_username_length: Bounds,
     pub text: TextLimits,
+    pub lists: ListLimits,
 }
 
 /// The longest each text the bar writes may be, in characters.
 ///
-/// A guest message longer than Telegram carries is refused on every send; a name or reason that
-/// long breaks every screen and message it is drawn into.
+/// A guest message longer than Telegram carries is refused on every send; a name, reason or zone
+/// that long breaks every screen and message it is drawn into.
 #[derive(Clone, Copy, Debug)]
 pub struct TextLimits {
     pub name: usize,
     pub address: usize,
     pub message: usize,
     pub reason: usize,
+    pub zone: usize,
+}
+
+/// The most entries each list the bar keeps may hold.
+///
+/// Every list travels whole in one settings save. Unbounded, a legal configuration could outgrow any
+/// request the API reads, and could then never be saved again.
+#[derive(Clone, Copy, Debug)]
+pub struct ListLimits {
+    pub message_templates: usize,
+    pub cancel_reasons: usize,
+    pub zones: usize,
+    pub staff: usize,
+    /// Tables in the live room. Retired tables are the room's history, kept for ever, and never
+    /// count: a bar that replaced its furniture often enough would otherwise be locked out.
+    pub tables: usize,
 }
 
 /// The limits this deployment runs under.
@@ -83,6 +101,14 @@ pub const LIMITS: Limits = Limits {
         address: 200,
         message: 1000,
         reason: 200,
+        zone: 40,
+    },
+    lists: ListLimits {
+        message_templates: 20,
+        cancel_reasons: 20,
+        zones: 20,
+        staff: 50,
+        tables: 100,
     },
 };
 
@@ -222,6 +248,7 @@ impl BarConfig {
         self.check_room(&mut errors);
         self.check_lists(&mut errors);
         self.check_staff(&mut errors);
+        self.check_list_lengths(&mut errors);
         errors
     }
 
@@ -323,6 +350,15 @@ impl BarConfig {
                 errors.push(ConfigError::DuplicateZone { zone: zone.clone() });
             }
         }
+        if self
+            .zones
+            .iter()
+            .any(|zone| zone.as_str().chars().count() > LIMITS.text.zone)
+        {
+            errors.push(ConfigError::ZoneNameTooLong {
+                limit: LIMITS.text.zone,
+            });
+        }
 
         if self.active_tables().next().is_none() {
             errors.push(ConfigError::NoTables);
@@ -395,6 +431,29 @@ impl BarConfig {
             errors.push(ConfigError::CancelReasonTooLong {
                 limit: LIMITS.text.reason,
             });
+        }
+    }
+
+    fn check_list_lengths(&self, errors: &mut Vec<ConfigError>) {
+        let lists = LIMITS.lists;
+        for (list, length, limit) in [
+            (
+                BarList::MessageTemplates,
+                self.message_templates.len(),
+                lists.message_templates,
+            ),
+            (
+                BarList::CancelReasons,
+                self.cancel_reasons.len(),
+                lists.cancel_reasons,
+            ),
+            (BarList::Zones, self.zones.len(), lists.zones),
+            (BarList::Staff, self.staff.len(), lists.staff),
+            (BarList::Tables, self.active_tables().count(), lists.tables),
+        ] {
+            if length > limit {
+                errors.push(ConfigError::ListTooLong { list, limit });
+            }
         }
     }
 
@@ -475,8 +534,8 @@ impl ValidConfig {
     /// and show staff an empty room while the room is full.
     ///
     /// Decided on instants, never on the wall clock: yesterday runs until [`Self::shift_end`]. The
-    /// wall clock repeats an hour in autumn, and reading it made a shift that had closed at the first
-    /// 02:30 start running again at the second 02:00, an hour after every table was free.
+    /// wall clock repeats an hour in autumn, and reading it made a shift that had stopped start
+    /// running again, an hour after every table was free.
     #[must_use]
     pub fn current_service_day(&self, now: DateTime<Utc>) -> ServiceDay {
         let today = ServiceDay::new(now.with_timezone(&self.timezone).date_naive());
@@ -486,39 +545,72 @@ impl ValidConfig {
         }
     }
 
-    /// The window a party sitting down at `now` holds on `day`, or `None` when `day` has no now: a
-    /// day off, or a shift that has already ended.
+    /// The window a party sitting down at `now` holds on `day`, or `None` when `day` seats nobody
+    /// now: a day off, a shift that has not opened, or one whose closing time the wall has last read.
     ///
-    /// One turn, cut short where the shift ends, as every booking the grid offers already is. Held
-    /// past that end, the party would still sit at its table once the next shift is running, and
-    /// that shift's screen, which reads only its own bookings, would call the table free while the
-    /// room refused it to the next party at the door.
+    /// One turn, cut short at closing. Held past closing, the party sat on after the hours that
+    /// seated it: on the night the clocks go forward that was an hour past closing on the wall, and
+    /// every settings save after it was refused for stranding the party. Closing is never later than
+    /// [`Self::shift_end`], so the party is gone before the next shift runs; its screen reads only its
+    /// own bookings and would call the table free.
+    ///
+    /// Opening and closing are instants: closing is the last time the wall reads it, so on the night
+    /// the clocks go back the bar seats parties through the repeated hour.
     #[must_use]
     pub fn walk_in_window(&self, day: ServiceDay, now: DateTime<Utc>) -> Option<Interval> {
+        let (opens, closes) = (self.opening(day)?, self.closing(day)?);
+        if now < opens || now >= closes {
+            return None;
+        }
         let turn = Interval::from_duration(now, self.turn_minutes).ok()?;
-        let end = self.shift_end(day)?;
-        Interval::new(now, turn.end().min(end)).ok()
+        Interval::new(now, turn.end().min(closes)).ok()
     }
 
     /// The moment `day` stops running, or `None` on a day off.
     ///
-    /// One turn of real time after the latest arrival closing time allows, that arrival resolved as
-    /// a boundary. No booking the grid offers finishes later: on the night the clocks go forward this
-    /// is an hour after closing on the wall, which is the hour the last sitting really has.
-    ///
-    /// It is not always the moment the grid's last sitting finishes. A time step that does not divide
-    /// the shift ends the grid before closing less a turn, and a latest arrival the clocks skip counts
-    /// from the moment they jump past it, so the evening can run on after its last sitting is over.
+    /// The later of the last time the wall reads closing and the end of the last sitting the grid
+    /// has. Every sitting ends by closing on the wall, but not always in real time: on the night the
+    /// clocks go forward the last one holds its table an hour past closing, and the shift runs until
+    /// it is over. On the night they go back the wall reads closing twice, and the shift runs until the
+    /// second.
     fn shift_end(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
+        let closes = self.closing(day)?;
+        Some(last_sitting(self, day).map_or(closes, |sitting| sitting.end().max(closes)))
+    }
+
+    /// The moment `day` opens, or `None` on a day off.
+    fn opening(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
         let hours = self.week.for_service_day(day);
         if hours.closed {
             return None;
         }
-        let last_arrival =
-            resolve_boundary(day, hours.close_minutes - self.turn_minutes, self.timezone).ok()?;
-        Interval::from_duration(last_arrival, self.turn_minutes)
-            .ok()
-            .map(Interval::end)
+        resolve_boundary(day, hours.open_minutes, self.timezone).ok()
+    }
+
+    /// The last moment the wall reads `day`'s closing time, or `None` on a day off.
+    fn closing(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
+        let hours = self.week.for_service_day(day);
+        if hours.closed {
+            return None;
+        }
+        resolve_end(day, hours.close_minutes, self.timezone).ok()
+    }
+
+    /// The latest a booking lasting `minutes` may end on `day` and still sit within its hours, or
+    /// `None` on a day off.
+    ///
+    /// The later of two moments. One is closing, the last time the wall reads it: a party seated on
+    /// the first pass through the hour the clocks repeat holds its table longer than the wall says,
+    /// and sits within the hours all the same. The other is the end of a sitting as long, arriving at
+    /// the latest minute closing allows it: on the night the clocks go forward the grid's last arrival
+    /// holds its table an hour past closing, under the very hours that sold it.
+    fn latest_end(&self, day: ServiceDay, minutes: i32) -> Option<DateTime<Utc>> {
+        let hours = self.week.for_service_day(day);
+        let closes = self.closing(day)?;
+        let sitting = resolve_boundary(day, hours.close_minutes.saturating_sub(minutes), self.timezone)
+            .and_then(|arrives| Interval::from_duration(arrives, minutes))
+            .ok();
+        Some(sitting.map_or(closes, |sitting| sitting.end().max(closes)))
     }
 }
 
@@ -548,6 +640,28 @@ pub enum Setting {
     GraceMinutes,
 }
 
+/// A list the bar keeps, named so an error about its length can say which one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BarList {
+    MessageTemplates,
+    CancelReasons,
+    Zones,
+    Staff,
+    Tables,
+}
+
+impl std::fmt::Display for BarList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MessageTemplates => "guest messages",
+            Self::CancelReasons => "cancellation reasons",
+            Self::Zones => "zones",
+            Self::Staff => "admins",
+            Self::Tables => "tables",
+        })
+    }
+}
+
 /// A reason a configuration is illegal, specific enough to render next to the control at fault.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -563,6 +677,10 @@ pub enum ConfigError {
     MessageTemplateTooLong { limit: usize },
     #[error("a cancellation reason is longer than {limit} characters")]
     CancelReasonTooLong { limit: usize },
+    #[error("a zone name is longer than {limit} characters")]
+    ZoneNameTooLong { limit: usize },
+    #[error("the bar keeps at most {limit} {list}")]
+    ListTooLong { list: BarList, limit: usize },
     #[error("the contact is neither a phone number nor a Telegram username")]
     MalformedContact,
     #[error("{weekday:?} opens at minute {minutes}, outside the allowed opening times")]
@@ -691,22 +809,27 @@ pub fn schedule_conflicts(
         .collect()
 }
 
+/// Judged on instants, against the opening and the latest end [`ValidConfig::latest_end`] allows: on
+/// the wall the two clock changes each put a booking the hours themselves seated outside them.
 fn conflict_for(config: &ValidConfig, booking: &Booking) -> Option<ScheduleConflict> {
-    let hours = config.week.for_service_day(booking.service_day);
+    let day = booking.service_day;
+    let hours = config.week.for_service_day(day);
     if hours.closed {
         return Some(ScheduleConflict::DayBecameClosed {
             booking: booking.id,
-            service_day: booking.service_day,
+            service_day: day,
         });
     }
-    let start_minutes = minutes_within(booking.service_day, booking.window.start(), config.timezone);
-    // Counted from the arrival on the wall, as the grid that offered the arrival counts. Reading
-    // the end off the wall instead puts the last arrival of the spring clock change an hour past
-    // closing, under the very hours that sold it.
-    let end_minutes = start_minutes.saturating_add(
-        i32::try_from(booking.window.minutes()).unwrap_or(i32::MAX),
-    );
-    if start_minutes < hours.open_minutes || end_minutes > hours.close_minutes {
+    let minutes = i32::try_from(booking.window.minutes()).unwrap_or(i32::MAX);
+    let within = config
+        .opening(day)
+        .is_some_and(|opens| opens <= booking.window.start())
+        && config
+            .latest_end(day, minutes)
+            .is_some_and(|latest| booking.window.end() <= latest);
+    let start_minutes = minutes_within(day, booking.window.start(), config.timezone);
+    let end_minutes = start_minutes.saturating_add(minutes);
+    if !within {
         return Some(ScheduleConflict::OutsideOpeningHours {
             booking: booking.id,
             service_day: booking.service_day,

@@ -186,6 +186,47 @@ describe("the index", () => {
   });
 });
 
+describe("a list at its bound", () => {
+  const disabled = (label: string) =>
+    (screen.getByText(label).closest("button") as HTMLButtonElement).disabled;
+
+  async function visit(section: string, check: () => Promise<void> | void) {
+    await userEvent.click(screen.getByText(section));
+    await check();
+    await userEvent.click(screen.getByRole("button", { name: "Назад" }));
+  }
+
+  it("will not add one more, and adds freely below it", async () => {
+    // The fixture holds two tables, four messages, four reasons and three staff.
+    const full = { ...LIMITS, lists: { zones: 3, tables: 2, message_templates: 4, cancel_reasons: 4, staff: 3 } };
+    for (const [limits, blocked] of [
+      [full, true],
+      [LIMITS, false],
+    ] as const) {
+      const view = settingsView({ limits });
+      const { unmount } = open({ settings: view, draft: draftOf(view) });
+      await visit("Зал", () => expect(disabled("+ Добавить стол")).toBe(blocked));
+      await visit("Сообщения и причины отмены", () => {
+        expect(disabled("+ Сообщение")).toBe(blocked);
+        expect(disabled("+ Причина")).toBe(blocked);
+      });
+      await visit("Персонал", async () => {
+        await userEvent.type(screen.getByPlaceholderText("@username"), "@aaron_bar");
+        expect(disabled("Добавить")).toBe(blocked);
+      });
+      unmount();
+    }
+  });
+});
+
+describe("the reason a list cannot be saved", () => {
+  it("names the list and its bound", () => {
+    const draft = draftOf(settingsView());
+    draft.cancel_reasons = Array.from({ length: LIMITS.lists.cancel_reasons + 1 }, (_, index) => `Причина ${index}`);
+    expect(firstReason(draft, LIMITS)).toBe("Причин отмены больше 20 быть не может.");
+  });
+});
+
 describe("the save bar", () => {
   it("names the first reason and keeps the button inert until it is fixed", async () => {
     const onSave = vi.fn();

@@ -63,10 +63,15 @@ pub struct GuestBooking {
     pub status: Status,
     /// Whether the window has begun, by the bar's clock rather than the phone's.
     pub started: bool,
-    /// Which new booking would replace this one, absent when none would, or when only one tonight
-    /// would and tonight's grid has no arrival time left. The app offers «Перенести» exactly when this
-    /// is present, from the rule the booking endpoint then applies.
+    /// Which new booking would replace this one, absent when none would, or when only one on its own
+    /// evening would and no booking can be made there: guests may not book that evening, or its grid
+    /// has no arrival time left. The app offers «Перенести» exactly when this is present, from the
+    /// rule the booking endpoint then applies.
     pub rebooking_replaces: Option<RebookingView>,
+    /// Whether this booking holds its evening: a new booking on that evening is refused because of
+    /// it. What the app knows "this evening is already yours" from; an absent `rebooking_replaces`
+    /// does not say it.
+    pub holds_evening: bool,
 }
 
 impl GuestBooking {
@@ -81,6 +86,7 @@ impl GuestBooking {
             status: record.booking.status.into(),
             started: record.booking.has_started(now),
             rebooking_replaces: record.booking.rebooking_on_offer(config, now).map(Into::into),
+            holds_evening: record.booking.holds_evening(now),
         }
     }
 }
@@ -480,8 +486,8 @@ pub struct ShiftView {
     pub stats: ShiftStats,
     /// Where to draw the "now" line, absent for a shift that is not running.
     pub now_minutes: Option<i32>,
-    /// The largest party the room could seat this minute, absent when none fits — and absent on
-    /// any shift but the one running, where "now" means nothing, and once that shift has ended.
+    /// The largest party the room could seat this minute, absent when none fits — and absent whenever
+    /// [`Self::walk_in_until_minutes`] is.
     ///
     /// Asked over the window a party seated now would hold, the one the walk-in endpoint takes, so
     /// the line never promises a table the door then refuses.
@@ -490,6 +496,14 @@ pub struct ShiftView {
     /// free two-tops do not seat the four people at the door, and a bartender who is sent to
     /// another view to find that out has been failed by the one he was on.
     pub largest_party_seatable_now: Option<i32>,
+    /// Until when a party seated this minute holds its table, in wall-clock minutes into the shift:
+    /// the end of the window the walk-in endpoint gives them. Absent on any shift but the one running,
+    /// where "now" means nothing, and while that shift seats nobody new: before it opens, and once the
+    /// wall has last read its closing time.
+    ///
+    /// Sent rather than worked out on the phone, which counts in wall minutes and would get the two
+    /// nights the clocks change wrong.
+    pub walk_in_until_minutes: Option<i32>,
     /// Every day staff can reach from here, with what is on. Longer than the guest's horizon on
     /// purpose: a telephone booking for next month is not a thing to argue about.
     pub days: Vec<ShiftDay>,
@@ -550,10 +564,12 @@ impl ShiftView {
                 .count()
         });
         let now_minutes = is_running.then(|| minutes_within(day, now, config.timezone));
-        let largest_party_seatable_now = is_running
+        let walk_in = is_running
             .then(|| config.walk_in_window(day, now))
-            .flatten()
-            .and_then(|window| {
+            .flatten();
+        let walk_in_until_minutes =
+            walk_in.map(|window| minutes_within(day, window.end(), config.timezone));
+        let largest_party_seatable_now = walk_in.and_then(|window| {
                 pustol_domain::largest_party_seatable(
                     config,
                     day,
@@ -580,6 +596,7 @@ impl ShiftView {
             },
             now_minutes,
             largest_party_seatable_now,
+            walk_in_until_minutes,
             days: days
                 .iter()
                 .map(|count| ShiftDay {
@@ -833,6 +850,8 @@ pub struct LimitsView {
     pub seats: BoundsView,
     pub slot_step_minutes: Vec<i32>,
     pub text: TextLimitsView,
+    /// The most entries each list may hold, so the screen stops offering «Добавить» at the bound.
+    pub lists: ListLimitsView,
 }
 
 #[derive(Debug, Serialize)]
@@ -841,6 +860,17 @@ pub struct TextLimitsView {
     pub address: usize,
     pub message: usize,
     pub reason: usize,
+    pub zone: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListLimitsView {
+    pub message_templates: usize,
+    pub cancel_reasons: usize,
+    pub zones: usize,
+    pub staff: usize,
+    /// Tables in the live room; retired ones never count.
+    pub tables: usize,
 }
 
 impl LimitsView {
@@ -864,6 +894,14 @@ impl LimitsView {
                 address: LIMITS.text.address,
                 message: LIMITS.text.message,
                 reason: LIMITS.text.reason,
+                zone: LIMITS.text.zone,
+            },
+            lists: ListLimitsView {
+                message_templates: LIMITS.lists.message_templates,
+                cancel_reasons: LIMITS.lists.cancel_reasons,
+                zones: LIMITS.lists.zones,
+                staff: LIMITS.lists.staff,
+                tables: LIMITS.lists.tables,
             },
         }
     }

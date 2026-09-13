@@ -38,6 +38,8 @@ export interface Landing {
   key: string;
   /** Its question is the one on screen. */
   onScreen: boolean;
+  /** It is a write's own answer, which whoever sent the write has already acted on. */
+  written: boolean;
 }
 
 /** A failure as the API described it, or as close as the app can get. */
@@ -69,10 +71,10 @@ export function useRead<T>(
       ledgerNow.current = next;
       setLedger(next);
     };
-    const land = (key: string, data: T) => {
+    const land = (key: string, data: T, written: boolean) => {
       const onScreen = key === keyNow();
       if (onScreen) setLastOnScreen(data);
-      latest.current.onAnswer(data, { key, onScreen });
+      latest.current.onAnswer(data, { key, onScreen, written });
     };
     const mark = (): number => {
       const [next, number] = marked(ledgerNow.current);
@@ -103,7 +105,7 @@ export function useRead<T>(
           latest.current.order,
         );
         commit(outcome.ledger);
-        if (outcome.apply) land(asking.key, answer);
+        if (outcome.apply) land(asking.key, answer, false);
       },
       /**
        * Puts a write's own answer about `key` on record, made on the value there now and numbered
@@ -117,11 +119,16 @@ export function useRead<T>(
       ): boolean => {
         const outcome = written(ledgerNow.current, key, sent, change, latest.current.order);
         commit(outcome.ledger);
-        if (outcome.apply && outcome.data !== undefined) land(key, outcome.data);
+        if (outcome.apply && outcome.data !== undefined) land(key, outcome.data, true);
         return outcome.apply;
       },
       /** A moment every read asked from now on comes after. */
       mark,
+      /**
+       * The number of the newest read of `key` that answered, as it stands this instant rather than
+       * at the last render: for a callback deciding whether to ask at all.
+       */
+      answeredNow: (key: string): number => answeredUpTo(ledgerNow.current, key),
     };
   }, []);
 

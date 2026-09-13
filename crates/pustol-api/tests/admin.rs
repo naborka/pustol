@@ -2277,8 +2277,11 @@ async fn a_party_seated_late_holds_its_table_only_until_its_shift_stops_running(
         .clone();
     assert_eq!(shift["today"], "2026-07-31", "{shift}");
     assert_eq!(shift["stats"]["free_now"], 1, "{shift}");
-    assert_eq!(shift["largest_party_seatable_now"], 2, "{shift}");
-    friday
+    assert!(
+        shift["largest_party_seatable_now"].is_null(),
+        "Friday has not opened: {shift}"
+    );
+    app.at(common::utc(2026, 7, 31, 8, 0))
         .post(
             "/api/admin/walkins",
             &staff,
@@ -2286,6 +2289,86 @@ async fn a_party_seated_late_holds_its_table_only_until_its_shift_stops_running(
         )
         .await
         .expect_ok();
+}
+
+/// One two-top, open 10:00 to `close_minutes` every day, with sittings of `turn_minutes`.
+fn open_until(close_minutes: i32, turn_minutes: i32) -> pustol_domain::BarConfig {
+    let mut config = config_with(vec![table(1, 2, "Бар")]);
+    config.turn_minutes = turn_minutes;
+    config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
+        open_minutes: 600,
+        close_minutes,
+        closed: false,
+    });
+    config
+}
+
+#[tokio::test]
+async fn a_walk_in_ends_where_the_shift_says_walk_ins_end_and_is_refused_where_it_says_there_are_none()
+{
+    // Closing, turn, the moment, the running shift, and where the shift says a party seated then
+    // holds its table until: absent when nobody may be seated.
+    let cases = [
+        // A summer evening: a whole turn.
+        (1560, 120, common::utc(2026, 7, 30, 18, 7), "2026-07-30", Some(1327)),
+        // Closing at 03:30 on the night the clocks jump from 02:00 to 03:00, at 01:00Z: seated at the
+        // jump, a party has the half hour until the wall reads closing, not the hour of a sitting.
+        (1650, 60, common::utc(2026, 3, 29, 1, 0), "2026-03-28", Some(1650)),
+        // Closing at 02:00, a time that night skips: seated at 01:00, until the jump, read as 03:00.
+        (1560, 60, common::utc(2026, 3, 29, 0, 0), "2026-03-28", Some(1620)),
+        // Closing at 03:00 with two-hour sittings, half an hour after the wall read 03:00: the last
+        // sitting still holds its table, so Saturday is running, and nobody new is seated.
+        (1620, 120, common::utc(2026, 3, 29, 1, 30), "2026-03-28", None),
+        // Closing at 03:00 on the night the clocks go back from 03:00 to 02:00, at the second 02:30.
+        (1620, 120, common::utc(2026, 10, 25, 1, 30), "2026-10-24", Some(1620)),
+        // Half past two on a summer night: Friday is running and has not opened.
+        (1560, 120, common::utc(2026, 7, 31, 0, 30), "2026-07-31", None),
+    ];
+    for (close_minutes, turn_minutes, now, running, until) in cases {
+        let what = format!("closing {close_minutes}, turn {turn_minutes}, at {now}");
+        let set_up = now - chrono::TimeDelta::hours(12);
+        let app = harness_at(set_up, open_until(close_minutes, turn_minutes)).await;
+        let staff = manager(&app).await;
+        let at = app.at(now);
+
+        let shift = at
+            .get(&format!("/api/admin/shift?service_date={running}"), &staff)
+            .await
+            .expect_ok()
+            .clone();
+        assert_eq!(shift["today"], running, "{what}: {shift}");
+        assert_eq!(shift["walk_in_until_minutes"], serde_json::json!(until), "{what}: {shift}");
+
+        let next = chrono::NaiveDate::parse_from_str(running, "%Y-%m-%d").expect("a date")
+            + chrono::TimeDelta::days(1);
+        let tomorrow = at
+            .post(
+                "/api/admin/walkins",
+                &staff,
+                serde_json::json!({ "service_date": next, "party_size": 2 }),
+            )
+            .await;
+        assert_eq!(tomorrow.error_code(), Some("not_the_running_shift"), "{what}: {}", tomorrow.body);
+
+        let walk_in = at
+            .post(
+                "/api/admin/walkins",
+                &staff,
+                serde_json::json!({ "service_date": running, "party_size": 2 }),
+            )
+            .await;
+        let Some(minutes) = until else {
+            assert_eq!(walk_in.error_code(), Some("not_the_running_shift"), "{what}: {}", walk_in.body);
+            assert!(shift["largest_party_seatable_now"].is_null(), "{what}: {shift}");
+            continue;
+        };
+        assert_eq!(walk_in.expect_ok()["booking"]["end_minutes"], minutes, "{what}");
+        // And the hours that seated the party never call it outside them.
+        let settings_path = format!("/api/admin/settings?service_date={running}");
+        let settings = at.get(&settings_path, &staff).await.expect_ok().clone();
+        let saved = at.send("PUT", &settings_path, &staff, draft_from(&settings)).await;
+        assert!(saved.status.is_success(), "{what}: {}", saved.body);
+    }
 }
 
 #[tokio::test]
@@ -2392,6 +2475,141 @@ async fn a_settings_save_in_the_shapes_the_previous_app_sent_is_still_understood
     assert_eq!(tables.len(), 16, "{saved}");
     assert_eq!(tables[15]["number"], 16);
     assert_eq!(tables[15]["seats"], 4);
+}
+
+#[tokio::test]
+async fn a_settings_save_keeping_more_guest_messages_than_a_bar_may_is_refused_by_name() {
+    // Forty messages of 991 characters: the body was larger than the API read, and the refusal came
+    // back as a line of plain text the app could not read a code out of.
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    let mut draft = draft_from(&settings);
+    draft["message_templates"] = serde_json::json!(vec!["а".repeat(991); 40]);
+
+    let refused = app.send_sized("PUT", SETTINGS, &staff, draft.to_string()).await;
+    assert_eq!(
+        refused.status,
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refused.error_code(), Some("settings_invalid"));
+    let bound = &settings["limits"]["lists"]["message_templates"];
+    let reason = format!("the bar keeps at most {bound} guest messages");
+    assert!(
+        refused.body["error"]["detail"]["reasons"]
+            .as_array()
+            .expect("reasons")
+            .contains(&serde_json::json!(reason)),
+        "{reason}: {}",
+        refused.body
+    );
+}
+
+/// The largest save the limits the settings screen is given allow: every list as long as it may be,
+/// and every text as long as it may be, in characters as wide in JSON as `unit`. The texts of one
+/// list are told apart by which of `unit` and `other`, of the same width, each of their first places
+/// holds.
+fn largest_draft(settings: &serde_json::Value, unit: char, other: char) -> serde_json::Value {
+    let limits = &settings["limits"];
+    let bound = |group: &str, name: &str| {
+        let value = limits[group][name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("no bound on {group}.{name}: {limits}"));
+        usize::try_from(value).expect("a bound fits")
+    };
+    let text = |index: usize, length: usize| -> String {
+        (0..length)
+            .map(|place| {
+                if place < 16 && (index >> place) & 1 == 1 {
+                    other
+                } else {
+                    unit
+                }
+            })
+            .collect()
+    };
+    let texts = |list: &str, length: &str| -> Vec<String> {
+        (0..bound("lists", list))
+            .map(|index| text(index, bound("text", length)))
+            .collect()
+    };
+    let zones = texts("zones", "zone");
+    let mut draft = draft_from(settings);
+    draft["name"] = serde_json::json!(text(0, bound("text", "name")));
+    draft["address"] = serde_json::json!(text(0, bound("text", "address")));
+    // The longest contact is a Telegram username, which that rule keeps to thirty-two letters.
+    draft["contact"] = serde_json::json!(format!("@a{}", "b".repeat(31)));
+    draft["message_templates"] = serde_json::json!(texts("message_templates", "message"));
+    draft["cancel_reasons"] = serde_json::json!(texts("cancel_reasons", "reason"));
+    draft["tables"] = serde_json::json!(
+        (0..bound("lists", "tables"))
+            .map(|index| serde_json::json!({
+                "id": uuid::Uuid::new_v4(),
+                "seats": limits["seats"]["max"],
+                "zone": zones[index % zones.len()],
+            }))
+            .collect::<Vec<_>>()
+    );
+    draft["zones"] = serde_json::json!(zones);
+    draft["staff"] = serde_json::json!(
+        std::iter::once("anna_mgr".to_owned())
+            .chain((1..bound("lists", "staff")).map(|index| format!("s{index:031}")))
+            .map(|username| serde_json::json!({ "username": username }))
+            .collect::<Vec<_>>()
+    );
+    draft
+}
+
+#[tokio::test]
+async fn the_largest_settings_save_the_limits_allow_is_read_and_saved() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    // Four bytes a character, as JSON writes most of the widest ones; six, as it writes a control
+    // character, the widest form any character a text may hold takes.
+    for (unit, other) in [('🍺', '🍷'), ('\u{1}', '\u{2}')] {
+        let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
+        let draft = largest_draft(&settings, unit, other);
+        let body = draft.to_string();
+
+        let saved = app.send_sized("PUT", SETTINGS, &staff, body.clone()).await;
+        assert!(
+            saved.status.is_success(),
+            "{unit:?}, {} bytes: {} {:?}",
+            body.len(),
+            saved.status,
+            saved.error_code()
+        );
+        for list in ["message_templates", "cancel_reasons", "zones", "tables", "staff"] {
+            assert_eq!(
+                saved.body["settings"][list].as_array().map(Vec::len),
+                draft[list].as_array().map(Vec::len),
+                "{unit:?}: {list}"
+            );
+        }
+        assert_eq!(saved.body["settings"]["message_templates"][1], draft["message_templates"][1]);
+    }
+}
+
+#[tokio::test]
+async fn a_body_larger_than_the_api_reads_is_refused_as_json_whether_or_not_it_says_its_length() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let body = serde_json::json!({ "padding": "a".repeat(4 * 1024 * 1024) }).to_string();
+    let with_length = app.send_sized("PUT", SETTINGS, &staff, body.clone()).await;
+    let without_length = app
+        .send_text("PUT", SETTINGS, &staff, "application/json", &body)
+        .await;
+    for (how, answer) in [("with a length", with_length), ("without one", without_length)] {
+        assert_eq!(
+            answer.status,
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "{how}: {}",
+            answer.body
+        );
+        assert_eq!(answer.error_code(), Some("body_invalid"), "{how}: {}", answer.body);
+    }
 }
 
 #[tokio::test]

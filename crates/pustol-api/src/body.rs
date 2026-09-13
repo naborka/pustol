@@ -14,9 +14,10 @@ use crate::error::ApiError;
 /// handler took it and came back as a server fault. Refused here, for every string and every key of
 /// every body, no handler has a text field to remember it for.
 ///
-/// A body not said to be JSON, one that is not JSON, and one of the wrong shape are refused with the
-/// status `axum::Json` gives each, as `body_invalid` in the shape of every other refusal: the app reads
-/// a code out of a JSON body, and a line of plain text reached it as a failure to parse.
+/// A body not said to be JSON, one that is not JSON, one of the wrong shape, and one larger than the
+/// API reads are refused with the status `axum::Json` gives each, as `body_invalid` in the shape of
+/// every other refusal: the app reads a code out of a JSON body, and a line of plain text reached it as
+/// a failure to parse.
 #[derive(Debug)]
 pub struct JsonBody<T>(pub T);
 

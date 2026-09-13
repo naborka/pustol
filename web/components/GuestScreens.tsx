@@ -16,6 +16,7 @@
  */
 
 import type { BarView, DayOffer, GuestBooking, Session } from "@/lib/api";
+import type { ApiFailure } from "@/lib/errors";
 import * as fmt from "@/lib/format";
 import type { Availability } from "@/lib/api";
 import { RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
@@ -28,6 +29,7 @@ import {
   PartySizeGrid,
   Pressable,
   Rail,
+  ReadFailed,
   SectionLabel,
   Separator,
   SlotGrid,
@@ -62,11 +64,12 @@ export function heldAfter(
   );
 }
 
-/** Whether the guest already holds `serviceDate` with a booking a new one there would not replace. */
+/**
+ * Whether the server would refuse a booking on `serviceDate` because of one the guest holds. Never
+ * read off `rebooking_replaces`: a booking nothing can replace does not always hold its evening.
+ */
 export function heldOn(bookings: GuestBooking[], serviceDate: fmt.IsoDate): boolean {
-  return bookings.some(
-    (held) => held.service_date === serviceDate && !replacedBy(held, serviceDate),
-  );
+  return bookings.some((held) => held.service_date === serviceDate && held.holds_evening);
 }
 
 // ---- home --------------------------------------------------------------------------------------
@@ -417,8 +420,8 @@ export function BookScreen({
   partySize,
   serviceDate,
   chosenMinutes,
-  daysFailed,
-  timesFailed,
+  daysFailure,
+  timesFailure,
   timesPending = false,
   onPartySize,
   onServiceDate,
@@ -435,10 +438,10 @@ export function BookScreen({
   chosenMinutes: number | null;
   /**
    * The newest read of the evenings failed: a card when there are none to show, a notice under the
-   * ones shown. Kept apart from `timesFailed`: one succeeding must not hide that the other failed.
+   * ones shown. Kept apart from `timesFailure`: one succeeding must not hide that the other failed.
    */
-  daysFailed: boolean;
-  timesFailed: boolean;
+  daysFailure: ApiFailure | null;
+  timesFailure: ApiFailure | null;
   /** The times on screen answer a question the guest has since changed. */
   timesPending?: boolean;
   onPartySize: (size: number) => void;
@@ -484,10 +487,14 @@ export function BookScreen({
       <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
         <SectionLabel>Какой вечер</SectionLabel>
         {days === null ? (
-          daysFailed ? (
+          daysFailure ? (
             <Card gap={SPACE[2]}>
-              <Note tone="warn">Не удалось прочитать свободные вечера.</Note>
-              <CardAction label="Попробовать снова" onClick={onRetry} />
+              <ReadFailed
+                failure={daysFailure}
+                audience="guest"
+                generic="Не удалось прочитать свободные вечера."
+                onRetry={onRetry}
+              />
             </Card>
           ) : (
             <Spinner label="Смотрим вечера" />
@@ -504,7 +511,9 @@ export function BookScreen({
                 onServiceDate={onServiceDate}
               />
             )}
-            {daysFailed ? <StaleNotice onRetry={onRetry} /> : null}
+            {daysFailure ? (
+              <StaleNotice failure={daysFailure} audience="guest" onRetry={onRetry} />
+            ) : null}
           </>
         )}
       </div>
@@ -520,10 +529,14 @@ export function BookScreen({
         </div>
 
         {availability === null ? (
-          timesFailed ? (
+          timesFailure ? (
             <Card gap={SPACE[2]}>
-              <Note tone="warn">Не удалось прочитать свободные окна.</Note>
-              <CardAction label="Попробовать снова" onClick={onRetry} />
+              <ReadFailed
+                failure={timesFailure}
+                audience="guest"
+                generic="Не удалось прочитать свободные окна."
+                onRetry={onRetry}
+              />
             </Card>
           ) : (
             <Spinner label="Считаем свободные окна" />
@@ -547,7 +560,9 @@ export function BookScreen({
                 </Note>
               </>
             )}
-            {timesFailed ? <StaleNotice onRetry={onRetry} /> : null}
+            {timesFailure ? (
+              <StaleNotice failure={timesFailure} audience="guest" onRetry={onRetry} />
+            ) : null}
           </>
         )}
       </div>

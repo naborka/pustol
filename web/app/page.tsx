@@ -34,7 +34,7 @@ import {
   type ShiftBooking,
   type ShiftView,
 } from "@/lib/api";
-import { messageFor, needsRelaunch, type ApiFailure } from "@/lib/errors";
+import { canRetry, messageFor, needsRelaunch, readFailureText, type ApiFailure } from "@/lib/errors";
 import * as fmt from "@/lib/format";
 import {
   attendanceOutcome,
@@ -137,6 +137,16 @@ const roomOrder: Order<ShiftView> = (next, shown) => next.version - shown.versio
 /** A read whose answers are only drawn, never folded into anything. */
 const nothing = () => {};
 
+/** A staff read with nothing to show failed: why, and a retry only where one can help. */
+function unreadScreen(failure: ApiFailure, generic: string, retry: () => void) {
+  return (
+    <Failure
+      message={readFailureText(failure, "staff", generic)}
+      {...(canRetry(failure) ? { actionLabel: "Попробовать снова", onAction: retry } : {})}
+    />
+  );
+}
+
 const EMPTY_MANUAL = {
   name: "",
   partySize: DEFAULT_PARTY,
@@ -208,7 +218,9 @@ export default function Page() {
 
   // When the session was found ended, and the newest word on it since. Only a session read asked
   // after that, and answered, brings the app back: a guest write answering meanwhile proves nothing.
-  const [ended, setEnded] = useState<{ at: number; failure: ApiFailure } | null>(null);
+  const [ended, changeEnded, endedNow] = useSynced<{ at: number; failure: ApiFailure } | null>(
+    null,
+  );
 
   const [pair, changePair, pairNow] = useSynced<SettingsPair | null>(null);
   // The edits made while a save is on its way, to be made again on top of what it stored.
@@ -299,19 +311,41 @@ export default function Page() {
     },
     (failure, number) => {
       if (endsSession(failure)) return;
-      setEnded((current) => (current && number > current.at ? { ...current, failure } : current));
+      changeEnded((current) =>
+        current && number > current.at ? { ...current, failure } : current,
+      );
     },
   );
-  const { load: loadSession, put: putSession, mark: markSession } = sessionRead;
+  const {
+    load: loadSession,
+    put: putSession,
+    mark: markSession,
+    answeredNow: sessionAnsweredNow,
+  } = sessionRead;
   const session = sessionRead.value;
 
   useEffect(() => {
     endsSessionRef.current = (failure) => {
       if (!needsRelaunch(failure)) return false;
-      setEnded({ at: markSession(), failure });
+      const at = markSession();
+      changeEnded(() => ({ at, failure }));
       return true;
     };
-  }, [markSession]);
+  }, [markSession, changeEnded]);
+
+  /**
+   * Asks by itself — a refresh, a reread after a write — unless the session has ended and no read of
+   * it asked since has answered. Then only a retry somebody taps may ask: anything else only spun
+   * over the screen that says to reopen the app, and met the same refusal.
+   */
+  const unprompted = useCallback(
+    (ask: () => unknown) => {
+      const end = endedNow.current;
+      if (end !== null && sessionAnsweredNow(SESSION) < end.at) return;
+      void ask();
+    },
+    [endedNow, sessionAnsweredNow],
+  );
 
   /** Puts what a guest write answered on screen at once; a reread afterwards only freshens it. */
   const amendSession = (change: (current: Session) => Session) =>
@@ -373,15 +407,15 @@ export default function Page() {
 
   useWhileVisible(
     useMemo(
-      () => (tab === "shift" && shiftDate !== null ? () => void loadShift() : null),
-      [tab, shiftDate, loadShift],
+      () => (tab === "shift" && shiftDate !== null ? () => unprompted(loadShift) : null),
+      [tab, shiftDate, loadShift, unprompted],
     ),
     SHIFT_REFRESH_MS,
   );
   useWhileVisible(
     useMemo(
-      () => (tab === "client" && screen === "home" ? () => void loadSession() : null),
-      [tab, screen, loadSession],
+      () => (tab === "client" && screen === "home" ? () => unprompted(loadSession) : null),
+      [tab, screen, loadSession, unprompted],
     ),
     HOME_REFRESH_MS,
   );
@@ -392,7 +426,9 @@ export default function Page() {
   // it may land while the shift is on screen, where a toast would be gone before anybody came back.
   const settingsRead = useRead<SettingsView>(
     api && shiftDate !== null ? { key: SETTINGS, ask: () => api.settings(shiftDate) } : null,
-    (next) => {
+    (next, { written }) => {
+      // A save's own answer is folded by the save, which knows the edits made while it was away.
+      if (written) return;
       if (savingNow.current) {
         settingsWanted.current = true;
         return;
@@ -403,7 +439,7 @@ export default function Page() {
     },
     readFailed,
   );
-  const readSettings = settingsRead.load;
+  const { load: readSettings, put: putSettings, mark: markSettings } = settingsRead;
 
   /** Reads the settings now, or once the save on its way has answered. */
   const loadSettings = useCallback(() => {
@@ -572,7 +608,6 @@ export default function Page() {
   const shiftOnScreen = shiftRead.value;
   // The server's day, not the one this phone read when it opened: a shift left open overnight.
   const today = shiftOnScreen?.today ?? bar.today;
-  const isToday = shiftDate === today;
   // ISO dates compare as strings. An evening that is over is read, not written into.
   const isPast = shiftDate < today;
   // An answer to another question must not stand in for one that failed; this question's own
@@ -608,22 +643,22 @@ export default function Page() {
         bookings: heldAfter(current.bookings, answer.replaced, answer.booking),
       }));
       setScreen("done");
-      void loadSession();
+      unprompted(loadSession);
     } catch (error) {
       const failure = failureOf(error);
       report(failure, "guest");
       if (failure.code === "booking_changed") {
         // What the guest holds changed since the button was drawn. The picker stays as it is; the
         // button redraws from what they hold now, for them to look at and press again.
-        void loadSession();
-        void loadDays();
+        unprompted(loadSession);
+        unprompted(loadDays);
         return;
       }
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
       // showing a time that no longer exists.
       setChosenMinutes(null);
-      void loadTimes();
-      void loadDays();
+      unprompted(loadTimes);
+      unprompted(loadDays);
     }
   });
 
@@ -639,7 +674,7 @@ export default function Page() {
         bookings: heldAfter(current.bookings, [was.id], null),
       }));
       tell("Бронь отменена. Стол снова свободен.");
-      void loadSession();
+      unprompted(loadSession);
     } catch (error) {
       report(failureOf(error), "guest");
     }
@@ -649,7 +684,7 @@ export default function Page() {
     try {
       const reminders = await api.optInToReminders();
       amendSession((current) => ({ ...current, reminders }));
-      void loadSession();
+      unprompted(loadSession);
       openBotChat(process.env.NEXT_PUBLIC_BOT_USERNAME ?? "");
       tell(`Напомним за ${fmt.hoursWord(bar.remind_hours)} до брони.`);
     } catch (error) {
@@ -661,7 +696,7 @@ export default function Page() {
     try {
       const reminders = await api.dismissReminderPrompt();
       amendSession((current) => ({ ...current, reminders }));
-      void loadSession();
+      unprompted(loadSession);
     } catch (error) {
       report(failureOf(error), "guest");
     }
@@ -772,7 +807,7 @@ export default function Page() {
       const failure = failureOf(error);
       report(failure, "staff");
       // The room on screen said the bot could reach the guest. Read again, it says it cannot.
-      if (failure.code === "no_bot_chat") void loadShift();
+      if (failure.code === "no_bot_chat") unprompted(loadShift);
     }
   });
 
@@ -867,7 +902,7 @@ export default function Page() {
     } catch (error) {
       report(failureOf(error), "staff");
       // A refusal carries no room, and it usually means the room on screen is behind.
-      void loadShift();
+      unprompted(loadShift);
     }
   });
 
@@ -890,7 +925,7 @@ export default function Page() {
       );
     } catch (error) {
       report(failureOf(error), "staff");
-      void loadStaffTimes();
+      unprompted(loadStaffTimes);
     }
   });
 
@@ -923,7 +958,7 @@ export default function Page() {
         });
       } catch (error) {
         report(failureOf(error), "staff");
-        void loadShift();
+        unprompted(loadShift);
       }
     },
   );
@@ -936,16 +971,19 @@ export default function Page() {
     setFolded(null);
     changeSaving(() => true);
     editsDuringSave.current = [];
+    const asked = markSettings();
     try {
       const saved = await api.saveSettings(shiftDate, sent);
       const meanwhile = editsDuringSave.current ?? [];
       changePair((current) => savedInto(current, saved.settings, meanwhile));
+      // On record as an answer too: a reread that failed before this save is no longer news.
+      putSettings(SETTINGS, () => saved.settings, asked);
       const parts = ["Настройки сохранены.", reconciliationReport(saved.reconciliation)];
       if (saved.above_cap > 0) {
         parts.push(`${fmt.bookings(saved.above_cap)} больше нового лимита — они остаются в силе.`);
       }
       tell(parts.filter(Boolean).join(" "));
-      void loadSession();
+      unprompted(loadSession);
     } catch (error) {
       const failure = failureOf(error);
       report(failure, "staff");
@@ -956,14 +994,14 @@ export default function Page() {
         setRefusal(refused);
         if (openings.current === openedBefore) openSheet({ kind: "conflict", refusal: refused });
       } else if (failure.code === "settings_changed") {
-        loadSettings();
+        unprompted(loadSettings);
       }
     } finally {
       editsDuringSave.current = null;
       changeSaving(() => false);
       const wanted = settingsWanted.current;
       settingsWanted.current = false;
-      if (wanted) void readSettings();
+      if (wanted) unprompted(readSettings);
     }
   });
 
@@ -972,7 +1010,7 @@ export default function Page() {
   const staffFooter =
     tab === "shift" && shiftOnScreen !== null && !shiftOnScreen.hours.closed && !isPast ? (
       <ShiftActions
-        isToday={isToday}
+        seatsNow={shiftOnScreen.walk_in_until_minutes !== null}
         onWalkIn={() => {
           setWalkInParty(DEFAULT_PARTY);
           setWalkInTable(null);
@@ -1083,7 +1121,6 @@ export default function Page() {
             open={sheet.kind === "walkIn"}
             shift={shiftOnScreen}
             maxParty={bar.max_party}
-            turnMinutes={bar.turn_minutes}
             partySize={walkInParty}
             chosenTableId={walkInTable}
             onClose={closeSheet}
@@ -1102,7 +1139,7 @@ export default function Page() {
             chosenMinutes={manual.minutes}
             chosenTableId={manual.table}
             guestName={manual.name}
-            failedToLoad={staffTimesRead.failure !== null}
+            loadFailure={staffTimesRead.failure}
             timesPending={staffTimesRead.pending}
             onClose={closeSheet}
             onPartySize={(size) =>
@@ -1126,7 +1163,7 @@ export default function Page() {
             availability={shownStaffTimes}
             chosenMinutes={move.minutes}
             chosenTableId={move.table}
-            failedToLoad={staffTimesRead.failure !== null}
+            loadFailure={staffTimesRead.failure}
             timesPending={staffTimesRead.pending}
             onClose={closeSheet}
             // A table chosen for the old party may not seat the new one, so the choice goes back to
@@ -1178,8 +1215,8 @@ export default function Page() {
           partySize={partySize}
           serviceDate={serviceDate}
           chosenMinutes={chosenMinutes}
-          daysFailed={daysRead.failure !== null}
-          timesFailed={timesRead.failure !== null}
+          daysFailure={daysRead.failure}
+          timesFailure={timesRead.failure}
           timesPending={timesRead.pending}
           onPartySize={(size) => {
             setPartySize(size);
@@ -1208,7 +1245,11 @@ export default function Page() {
           <>
             {shiftRead.failure ? (
               <div style={{ padding: `${SPACE[3]}px ${SPACE[3]}px 0` }}>
-                <StaleNotice onRetry={() => void loadShift()} />
+                <StaleNotice
+                  failure={shiftRead.failure}
+                  audience="staff"
+                  onRetry={() => void loadShift()}
+                />
               </div>
             ) : null}
             <ShiftScreen
@@ -1229,11 +1270,7 @@ export default function Page() {
             />
           </>
         ) : shiftRead.failure ? (
-          <Failure
-            message="Не удалось прочитать смену."
-            actionLabel="Попробовать снова"
-            onAction={() => void loadShift()}
-          />
+          unreadScreen(shiftRead.failure, "Не удалось прочитать смену.", () => void loadShift())
         ) : (
           <Spinner label="Читаем смену" />
         )
@@ -1251,7 +1288,11 @@ export default function Page() {
             ) : null}
             {settingsRead.failure ? (
               <div style={{ padding: `${SPACE[3]}px ${SPACE[4]}px 0` }}>
-                <StaleNotice onRetry={() => loadSettings()} />
+                <StaleNotice
+                  failure={settingsRead.failure}
+                  audience="staff"
+                  onRetry={() => loadSettings()}
+                />
               </div>
             ) : null}
             <SettingsScreen
@@ -1266,11 +1307,7 @@ export default function Page() {
             />
           </>
         ) : settingsRead.failure ? (
-          <Failure
-            message="Не удалось прочитать настройки."
-            actionLabel="Попробовать снова"
-            onAction={() => loadSettings()}
-          />
+          unreadScreen(settingsRead.failure, "Не удалось прочитать настройки.", () => loadSettings())
         ) : (
           <Spinner label="Читаем настройки" />
         )

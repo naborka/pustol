@@ -25,6 +25,7 @@ const LIMITS: Limits = {
   seats: { min: 1, max: 12 },
   slot_step_minutes: [15, 30, 60],
   text: { name: 100, address: 200, message: 1_000, reason: 200 },
+  lists: { zones: 12, tables: 60, message_templates: 20, cancel_reasons: 20, staff: 30 },
 };
 
 function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
@@ -128,6 +129,31 @@ describe("what makes a proposal legal", () => {
     // Otherwise the guest is offered a size for which every slot is grey, with nothing on screen
     // to explain why.
     expect(kinds(draft({ max_party: 8 }))).toContain("max_party_exceeds_largest_table");
+  });
+
+  it("bounds how many items every list may hold, and accepts a list exactly at its bound", () => {
+    const many = <T,>(count: number, make: (index: number) => T): T[] =>
+      Array.from({ length: count }, (_, index) => make(index));
+    const { lists } = LIMITS;
+    const over: [keyof typeof lists, Partial<SettingsDraft>][] = [
+      ["zones", { zones: many(lists.zones + 1, (index) => (index === 0 ? "Бар" : `Зона ${index}`)) }],
+      ["tables", { tables: many(lists.tables + 1, (index) => ({ id: `t${index}`, seats: 6, zone: "Бар" })) }],
+      ["message_templates", { message_templates: many(lists.message_templates + 1, (index) => `Сообщение ${index}`) }],
+      ["cancel_reasons", { cancel_reasons: many(lists.cancel_reasons + 1, (index) => `Причина ${index}`) }],
+      ["staff", { staff: many(lists.staff + 1, (index) => ({ username: `member_${index}` })) }],
+    ];
+    for (const [list, overrides] of over) {
+      expect(reasonsAgainst(draft(overrides), LIMITS), list).toContainEqual({
+        kind: "list_too_long",
+        list,
+        max: lists[list],
+      });
+    }
+    const atBound = draft({
+      message_templates: many(lists.message_templates, (index) => `Сообщение ${index}`),
+      staff: many(lists.staff, (index) => ({ username: `member_${index}` })),
+    });
+    expect(reasonsAgainst(atBound, LIMITS)).toEqual([]);
   });
 
   it("refuses an empty room and an unreasonable table", () => {

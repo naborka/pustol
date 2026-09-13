@@ -9,8 +9,10 @@
  * An answer replaces the value on record when the server orders it after that value (a room carries
  * a version), or, when the server cannot tell the two apart or orders nothing, when it was asked
  * later. A write's own answer is numbered when the write was sent. A failure is recorded only when
- * it was asked after every answer applied, is cleared by an answer asked after it, and is shown only
- * while nothing else is on its way for that question — beside the value on record, if there is one.
+ * it was asked after every answer applied, and is shown only while nothing else is on its way for
+ * that question — beside the value on record, if there is one. Any answer asked after it clears it,
+ * a read's or a write's, applied or not: an answer too old to show still proves the question can be
+ * answered.
  */
 
 import type { ApiFailure } from "./errors";
@@ -62,14 +64,19 @@ function replaces<T>(entry: Entry<T>, number: number, data: T, order?: Order<T>)
   return said > 0 || (said === 0 && number > shown.number);
 }
 
-/** `entry` with `data`, asked as `number`, on record: a failure of a read asked after it stays. */
+/** `entry` once an answer asked as `number` came back: a failure of a read asked after it stays. */
+function heardAt<T>(entry: Entry<T>, number: number): Entry<T> {
+  if (!entry.failure || entry.failure.number > number) return entry;
+  const { failure: _cleared, ...rest } = entry;
+  return rest;
+}
+
+/** `entry` with `data`, asked as `number`, on record. */
 function applied<T>(entry: Entry<T>, number: number, data: T): Entry<T> {
-  const failure = entry.failure && entry.failure.number > number ? entry.failure : undefined;
   return {
+    ...heardAt(entry, number),
     value: { number, data },
     settled: Math.max(entry.settled, number),
-    ...(failure ? { failure } : {}),
-    answered: entry.answered,
   };
 }
 
@@ -97,7 +104,7 @@ export function answered<T>(
   const entry = entryOf(next, key);
   const apply = replaces(entry, number, data, order);
   const answeredUpTo = Math.max(entry.answered, number);
-  const kept = apply ? applied(entry, number, data) : entry;
+  const kept = apply ? applied(entry, number, data) : heardAt(entry, number);
   return { ledger: withEntry(next, key, { ...kept, answered: answeredUpTo }), apply };
 }
 
@@ -131,8 +138,8 @@ export function written<T>(
   const entry = entryOf(ledger, key);
   const data = change(entry.value?.data);
   const apply = data !== undefined && replaces(entry, sent, data, order);
-  if (!apply) return { ledger, apply, data };
-  return { ledger: withEntry(ledger, key, applied(entry, sent, data)), apply, data };
+  const kept = apply ? applied(entry, sent, data) : heardAt(entry, sent);
+  return { ledger: kept === entry ? ledger : withEntry(ledger, key, kept), apply, data };
 }
 
 /** Whether a read of `key` is on its way. */

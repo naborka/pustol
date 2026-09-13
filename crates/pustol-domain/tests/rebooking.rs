@@ -5,7 +5,7 @@ mod common;
 use chrono::{NaiveDate, TimeDelta};
 use pustol_domain::allocator::{Booking, BookingStatus};
 use pustol_domain::config::{BarConfig, DayHours, WeekSchedule};
-use pustol_domain::rebooking::Rebooking;
+use pustol_domain::rebooking::{Rebooking, refused_on};
 use pustol_domain::service_day::ServiceDay;
 use pustol_domain::slots::has_arrival_after;
 
@@ -70,6 +70,78 @@ fn a_plan_is_offered_a_move_to_any_evening_whatever_its_own_evening_has_left() {
 
     assert_eq!(
         plan.rebooking_on_offer(&config, now),
+        Some(Rebooking::AnyEvening)
+    );
+}
+
+#[test]
+fn a_booking_holds_its_evening_exactly_when_a_new_booking_on_it_is_refused() {
+    // Half past eight on Thursday, with two-hour sittings from eight.
+    let during = utc(2026, 7, 30, 18, 30);
+    let eight = |sequence, status| Booking {
+        status,
+        ..booking(sequence, thursday(), 1200, 2, None, 120)
+    };
+    let cases = [
+        ("at the table", eight(1, BookingStatus::Arrived), true),
+        ("under way, unmarked", eight(2, BookingStatus::Confirmed), true),
+        (
+            "a plan for ten",
+            booking(3, thursday(), 1320, 2, None, 120),
+            false,
+        ),
+        (
+            "not coming at ten, still held",
+            Booking {
+                status: BookingStatus::NoShow,
+                released_at: Some(utc(2026, 7, 30, 20, 15)),
+                ..booking(4, thursday(), 1320, 2, None, 120)
+            },
+            false,
+        ),
+        (
+            "gone home",
+            Booking {
+                released_at: Some(utc(2026, 7, 30, 18, 10)),
+                ..eight(5, BookingStatus::Left)
+            },
+            false,
+        ),
+    ];
+    for (what, held, holds) in cases {
+        assert_eq!(held.holds_evening(during), holds, "{what}");
+        assert_eq!(
+            refused_on(std::slice::from_ref(&held), thursday(), during),
+            holds,
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn a_held_no_show_on_an_evening_the_guest_may_no_longer_book_is_not_offered_a_move() {
+    // Booked for Sunday under a four-day horizon; the manager lowered it to two, and staff marked the
+    // party as not coming before it was due. Only a booking on Sunday takes its place, and Sunday is
+    // refused to guests now. A plan on Sunday is still replaced by a booking on any evening, so the
+    // screen still says so: the app names what it replaces from this.
+    let config = force(BarConfig {
+        horizon_days: 2,
+        ..grid(120, 30)
+    });
+    let sunday = thursday().checked_add_days(3).expect("in range");
+    let plan = booking(1, sunday, 1200, 2, None, 120);
+    let absent = Booking {
+        status: BookingStatus::NoShow,
+        released_at: Some(plan.window.start() + TimeDelta::minutes(15)),
+        ..booking(2, sunday, 1200, 2, None, 120)
+    };
+    let morning = utc(2026, 7, 30, 6, 0);
+
+    assert_eq!(absent.rebooking(morning), Some(Rebooking::SameEvening), "still held");
+    assert!(has_arrival_after(&config, sunday, morning));
+    assert_eq!(absent.rebooking_on_offer(&config, morning), None);
+    assert_eq!(
+        plan.rebooking_on_offer(&config, morning),
         Some(Rebooking::AnyEvening)
     );
 }

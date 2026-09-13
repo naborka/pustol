@@ -819,8 +819,9 @@ impl Store {
     /// Checked against the allocator's own list, in the transaction that writes. `None` asks the
     /// room to choose.
     ///
-    /// The party holds a turn, cut short where the shift ends: [`ValidConfig::walk_in_window`], the
-    /// window the shift's "who fits" line asks about.
+    /// The party holds a turn, cut short at closing: [`ValidConfig::walk_in_window`], the window the
+    /// shift's "who fits" line asks about. Refused as not the running shift on any other day, and on
+    /// this one before it opens or once the wall has last read its closing time.
     pub async fn seat_walk_in(
         &self,
         bar: BarId,
@@ -1242,7 +1243,7 @@ fn check_shift_is_offered(
     if !matches!(request.channel, Channel::Guest { .. }) {
         return Ok(());
     }
-    if bookable_days(config, config.current_service_day(now)).contains(&request.service_day) {
+    if slots::guest_may_book(config, request.service_day, now) {
         Ok(())
     } else {
         Err(Error::ShiftNotBookable {

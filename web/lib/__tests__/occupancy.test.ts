@@ -59,6 +59,7 @@ function shift(overrides: Partial<ShiftView> = {}): ShiftView {
     bookings: [],
     stats: { bookings: 0, guests: 0, free_now: null },
     now_minutes: 1_280,
+    walk_in_until_minutes: 1_400,
     largest_party_seatable_now: null,
     days: [],
     guest_horizon_days: 4,
@@ -113,9 +114,9 @@ describe("a party that leaves at 21:20", () => {
 
     // The walk-in sheet would not have offered the small table before they left, and does after.
     const before = shift({ bookings: [booking()], now_minutes: 1_279 });
-    expect(walkInOffers(before, 2, 120).map((offer) => offer.table.number)).toEqual([2]);
+    expect(walkInOffers(before, 2).map((offer) => offer.table.number)).toEqual([2]);
     expect(
-      walkInOffers(shift({ bookings: [gone], now_minutes: 1_280 }), 2, 120).map(
+      walkInOffers(shift({ bookings: [gone], now_minutes: 1_280 }), 2).map(
         (offer) => offer.table.number,
       ),
     ).toEqual([1, 2]);
@@ -208,7 +209,7 @@ describe("the tables offered to a party at the door", () => {
       tables: [table("t1", 1, 2), table("t2", 2, 6), table("t3", 3, 4)],
       now_minutes: 1_280,
     });
-    expect(walkInOffers(room, 3, 120).map((offer) => [offer.table.number, offer.fits])).toEqual([
+    expect(walkInOffers(room, 3).map((offer) => [offer.table.number, offer.fits])).toEqual([
       [3, true],
       [2, true],
       [1, false],
@@ -227,11 +228,25 @@ describe("the tables offered to a party at the door", () => {
       ],
       now_minutes: 1_280,
     });
-    expect(walkInOffers(room, 2, 120).map((offer) => offer.table.number)).toEqual([1]);
+    expect(walkInOffers(room, 2).map((offer) => offer.table.number)).toEqual([1]);
   });
 
   it("has nothing to offer on an evening that is not running", () => {
-    expect(walkInOffers(shift({ now_minutes: null }), 2, 120)).toEqual([]);
+    expect(walkInOffers(shift({ now_minutes: null, walk_in_until_minutes: null }), 2)).toEqual([]);
+  });
+
+  it("has nothing to offer while the server takes no party at the door", () => {
+    expect(walkInOffers(shift({ walk_in_until_minutes: null }), 2)).toEqual([]);
+  });
+
+  it("checks the tables over the window the server gave, not one worked out on the wall clock", () => {
+    const room = shift({
+      tables: [table("t1", 1, 2)],
+      bookings: [booking({ status: "confirmed", started: false, start_minutes: 1_540, end_minutes: 1_660 })],
+      now_minutes: 1_470,
+      walk_in_until_minutes: 1_530,
+    });
+    expect(walkInOffers(room, 2).map((offer) => offer.table.number)).toEqual([1]);
   });
 });
 

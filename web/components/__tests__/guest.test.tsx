@@ -18,6 +18,7 @@ import {
   HomeScreen,
   bookingDecision,
   heldAfter,
+  heldOn,
   pickerStart,
 } from "../GuestScreens";
 import { GuestCancelSheet } from "../Sheets";
@@ -254,8 +255,8 @@ describe("the picker", () => {
         partySize={2}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        daysFailed={false}
-        timesFailed={false}
+        daysFailure={null}
+        timesFailure={null}
         onPartySize={noop}
         onServiceDate={noop}
         onPick={noop}
@@ -322,8 +323,8 @@ describe("the picker", () => {
         partySize={2}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        daysFailed
-        timesFailed
+        daysFailure={{ code: "internal", message: "boom" }}
+        timesFailure={{ code: "network", message: "offline" }}
         onPartySize={noop}
         onServiceDate={noop}
         onPick={noop}
@@ -394,6 +395,18 @@ describe("the evening the picker opens on", () => {
   it("falls back to the first open evening when a plan's own is out of reach", () => {
     const far = { ...booking, service_date: "2026-09-20" };
     expect(pickerStart(session({ bookings: [far] }), far)).toBe("2026-09-11");
+  });
+});
+
+describe("an evening the guest already holds", () => {
+  it("is the server's word on each booking, never worked out from what a new booking would replace", () => {
+    // A no-show on an evening guests can no longer book: nothing the guest can do replaces it, and
+    // nothing about it stops a booking on its evening.
+    const outOfReach: GuestBooking = { ...heldNoShow, rebooking_replaces: null, holds_evening: false };
+    expect(heldOn([outOfReach], "2026-09-11")).toBe(false);
+    expect(heldOn([seated], "2026-09-11")).toBe(true);
+    expect(heldOn([seated], "2026-09-12")).toBe(false);
+    expect(pickerStart(session({ bookings: [outOfReach] }))).toBe("2026-09-11");
   });
 });
 
@@ -515,8 +528,8 @@ describe("the time grid, for a screen reader and a slow phone", () => {
         partySize={2}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        daysFailed={false}
-        timesFailed={false}
+        daysFailure={null}
+        timesFailure={null}
         onPartySize={noop}
         onServiceDate={noop}
         onPick={noop}
@@ -539,8 +552,8 @@ describe("the time grid, for a screen reader and a slow phone", () => {
         partySize={4}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        daysFailed={false}
-        timesFailed={false}
+        daysFailure={null}
+        timesFailure={null}
         timesPending
         onPartySize={noop}
         onServiceDate={noop}
