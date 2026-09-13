@@ -15,10 +15,9 @@
  * booking and each evening. The screens read it; they never work it out again from a clock.
  */
 
-import type { BarView, DayOffer, GuestBooking, Session } from "@/lib/api";
+import type { Availability, BarView, DayOffer, GuestAvailability, GuestBooking, Session } from "@/lib/api";
 import type { ApiFailure } from "@/lib/errors";
 import * as fmt from "@/lib/format";
-import type { Availability } from "@/lib/api";
 import { RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
 import {
   Card,
@@ -29,23 +28,13 @@ import {
   PartySizeGrid,
   Pressable,
   Rail,
-  ReadFailed,
+  ReadView,
   SectionLabel,
   Separator,
   SlotGrid,
-  Spinner,
-  StaleNotice,
 } from "./ui";
 
 // ---- what a new booking would do ---------------------------------------------------------------
-
-/** Whether a new booking on `serviceDate` would replace `held`. */
-export function replacedBy(held: GuestBooking, serviceDate: fmt.IsoDate): boolean {
-  return (
-    held.rebooking_replaces === "any_evening" ||
-    (held.rebooking_replaces === "same_evening" && held.service_date === serviceDate)
-  );
-}
 
 /**
  * The time the guest chose, while the times on screen still have it free. Read off the times rather
@@ -85,7 +74,6 @@ export function heldOn(bookings: GuestBooking[], serviceDate: fmt.IsoDate): bool
 
 /** Who the bar is, and whether it is open. The name was in the payload and drawn nowhere. */
 export function BarHeader({ bar }: { bar: BarView }) {
-  const open = bar.open_now;
   return (
     <div
       style={{
@@ -119,9 +107,9 @@ export function BarHeader({ bar }: { bar: BarView }) {
           background: "var(--sec)",
         }}
       >
-        <Dot color={open ? "var(--ok)" : "var(--hint)"} size={6} />
+        <Dot color={bar.open_now ? "var(--ok)" : "var(--hint)"} size={6} />
         <span style={{ fontSize: TEXT.sm, fontWeight: 600, color: "var(--txt)" }}>
-          {fmt.openLabel(bar.today_hours, bar.now_minutes, open)}
+          {fmt.openLabel(bar)}
         </span>
       </div>
     </div>
@@ -460,9 +448,6 @@ export function BookScreen({
   onRetry: () => void;
   onBack?: () => void;
 }) {
-  const slots = availability?.slots ?? [];
-  const offered = slots.filter((slot) => slot.state !== "past");
-
   return (
     <div
       style={{
@@ -495,36 +480,27 @@ export function BookScreen({
 
       <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
         <SectionLabel>Какой вечер</SectionLabel>
-        {days === null ? (
-          daysFailure ? (
-            <Card gap={SPACE[2]}>
-              <ReadFailed
-                failure={daysFailure}
-                audience="guest"
-                generic="Не удалось прочитать свободные вечера."
-                onRetry={onRetry}
-              />
-            </Card>
-          ) : (
-            <Spinner label="Смотрим вечера" />
-          )
-        ) : (
-          <>
-            {days.length === 0 ? (
+        <ReadView
+          value={days}
+          failure={daysFailure}
+          audience="guest"
+          generic="Не удалось прочитать свободные вечера."
+          loading="Смотрим вечера"
+          onRetry={onRetry}
+        >
+          {(offers) =>
+            offers.length === 0 ? (
               <Note tone="warn">Бар пока не принимает брони.</Note>
             ) : (
               <DayRailStrip
-                days={days}
+                days={offers}
                 today={bar.today}
                 serviceDate={serviceDate}
                 onServiceDate={onServiceDate}
               />
-            )}
-            {daysFailure ? (
-              <StaleNotice failure={daysFailure} audience="guest" onRetry={onRetry} />
-            ) : null}
-          </>
-        )}
+            )
+          }
+        </ReadView>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
@@ -537,22 +513,17 @@ export function BookScreen({
           </span>
         </div>
 
-        {availability === null ? (
-          timesFailure ? (
-            <Card gap={SPACE[2]}>
-              <ReadFailed
-                failure={timesFailure}
-                audience="guest"
-                generic="Не удалось прочитать свободные окна."
-                onRetry={onRetry}
-              />
-            </Card>
-          ) : (
-            <Spinner label="Считаем свободные окна" />
-          )
-        ) : (
-          <>
-            {offered.length === 0 ? (
+        <ReadView
+          value={availability}
+          failure={timesFailure}
+          audience="guest"
+          generic="Не удалось прочитать свободные окна."
+          loading="Считаем свободные окна"
+          onRetry={onRetry}
+        >
+          {(times) => {
+            const offered = times.slots.filter((slot) => slot.state !== "past");
+            return offered.length === 0 ? (
               <Note tone="warn">В этот вечер не осталось ни одного времени. Выберите другой.</Note>
             ) : (
               <>
@@ -564,16 +535,13 @@ export function BookScreen({
                   stale={timesPending}
                 />
                 <Note>
-                  Зачёркнутое время занято. Свободных окон: {availability.free_count} — за каждым
-                  уже стоит настоящий стол на {fmt.guests(partySize)}.
+                  Зачёркнутое время занято. Свободных окон: {times.free_count} — за каждым уже
+                  стоит настоящий стол на {fmt.guests(partySize)}.
                 </Note>
               </>
-            )}
-            {timesFailure ? (
-              <StaleNotice failure={timesFailure} audience="guest" onRetry={onRetry} />
-            ) : null}
-          </>
-        )}
+            );
+          }}
+        </ReadView>
       </div>
     </div>
   );
@@ -582,22 +550,22 @@ export function BookScreen({
 /**
  * What the main button says at the bottom of the picker: the whole decision, in one line.
  *
- * `booked` is the rail's word that the guest already holds this evening, where the server would
- * refuse the booking. A guest whose booking would be replaced is moving it, and «Забронировать»
- * would make them wonder whether they are about to hold two.
+ * `times` is the server's answer for this evening: whether the guest already holds it, where the
+ * server would refuse the booking, and which bookings a booking on it replaces. A guest whose booking
+ * would be replaced is moving it, and «Забронировать» would make them wonder whether they are about
+ * to hold two.
  */
 export function bookingDecision(
   partySize: number,
   serviceDate: string,
   bar: Pick<BarView, "today">,
   chosenMinutes: number | null,
-  bookings: GuestBooking[] = [],
-  booked = false,
+  times: Pick<GuestAvailability, "replacing" | "booked"> | null = null,
 ): { label: string; enabled: boolean } {
-  if (booked) return { label: "На этот вечер у вас уже есть бронь", enabled: false };
+  if (times?.booked) return { label: "На этот вечер у вас уже есть бронь", enabled: false };
   if (chosenMinutes === null) return { label: "Выберите время", enabled: false };
   const when = `${fmt.dayFull(serviceDate, bar.today).toLowerCase()} в ${fmt.time(chosenMinutes)}`;
-  const verb = bookings.some((held) => replacedBy(held, serviceDate)) ? "Перенести" : "Забронировать";
+  const verb = (times?.replacing.length ?? 0) > 0 ? "Перенести" : "Забронировать";
   return { label: `${verb} · ${fmt.guests(partySize)} · ${when}`, enabled: true };
 }
 

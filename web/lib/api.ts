@@ -3,12 +3,15 @@
  *
  * The first call carries the payload Telegram signed; the server answers it with a session, and
  * every call after carries that. The payload is accepted for an hour and Telegram never refreshes
- * it while the app stays open, so sending it for the whole of a shift locked staff out every hour.
- * The session is held in this closure only — never in storage, never in a URL.
+ * it while the app stays open. The session is held in this closure only — never in storage, never
+ * in a URL.
+ *
+ * A session the server refused for a reason only reopening the app answers is ended here, for every
+ * call: nothing but a read of the session asked after the end is sent until one of those answers.
  */
 
 import type { IsoDate } from "./format";
-import type { ApiFailure } from "./errors";
+import { ApiError, needsRelaunch, type ApiFailure } from "./errors";
 
 export interface Hours {
   open_minutes: number;
@@ -64,6 +67,8 @@ export interface BarView {
   last_arrival_minutes: number | null;
   /** The bar's own clock, in wall-clock minutes into today's shift. */
   now_minutes: number;
+  /** Today's opening in wall-clock minutes while it is still ahead, by the server's clock; else null. */
+  opens_at_minutes: number | null;
   /**
    * Whether the bar is serving now, decided on instants by the opening and closing walk-ins go by:
    * on the night the clocks change, wall minutes say the wrong thing.
@@ -116,6 +121,25 @@ export interface Availability {
   turn_minutes: number;
   slots: Slot[];
   free_count: number;
+}
+
+/** The guest's times, with what a booking on that evening would do to the ones they hold. */
+export interface GuestAvailability extends Availability {
+  /** The bookings a booking on this evening would replace, to be sent back with it. */
+  replacing: string[];
+  /** The guest already holds this evening with a booking a new one would not replace. */
+  booked: boolean;
+}
+
+export interface StaffSlot extends Slot {
+  /** The tables free for this slot's window for this party, the booking being moved set aside. */
+  free_table_ids: string[];
+}
+
+export interface StaffAvailability extends Availability {
+  slots: StaffSlot[];
+  /** Tables free for the set-aside booking's own stored window; null when nothing is set aside. */
+  kept_free_table_ids: string[] | null;
 }
 
 export interface BookingTaken {
@@ -212,8 +236,7 @@ export interface Reconciliation {
 
 /**
  * Every staff write that can change the room answers with the evening as it stands after the write,
- * read inside the write's own transaction: a room the phone patched itself kept every other booking
- * the server had just reseated where it used to be.
+ * read inside the write's own transaction, so the phone never patches its own copy of the room.
  */
 interface WithShift {
   shift: ShiftView;
@@ -291,7 +314,6 @@ export interface SettingsTable {
   number: number;
   seats: number;
   zone: string;
-  bookings_today: number;
 }
 
 export interface SettingsView {
@@ -303,8 +325,6 @@ export interface SettingsView {
   week: Hours[];
   zones: string[];
   tables: SettingsTable[];
-  /** The evening every `bookings_today` counts bookings for. */
-  service_date: IsoDate;
   turn_minutes: number;
   slot_step_minutes: number;
   max_party: number;
@@ -316,8 +336,8 @@ export interface SettingsView {
   staff: { username: string; bound: boolean }[];
   next_table_number: number;
   limits: Limits;
-  /** When these settings were last saved. A save names it, and is refused if anybody saved since. */
-  version: string;
+  /** The bar's count of saves. A save names it, and is refused if anybody saved since. */
+  version: number;
 }
 
 export interface SavedSettings {
@@ -354,21 +374,11 @@ export interface SettingsDraft {
   cancel_reasons: string[];
   staff: { username: string }[];
   /** The version of the settings this proposal was made from. */
-  version: string;
+  version: number;
 }
 
-/** A failure that carries the API's own code, so callers can decide what to say. */
-export class ApiError extends Error {
-  readonly failure: ApiFailure;
-  readonly status: number;
-
-  constructor(status: number, failure: ApiFailure) {
-    super(failure.message);
-    this.name = "ApiError";
-    this.status = status;
-    this.failure = failure;
-  }
-}
+/** Why the session ended, and whether a read of it asked since is on its way; null while it has not. */
+export type SessionEnd = { failure: ApiFailure; retrying: boolean } | null;
 
 /**
  * How long a call may take before the app stops waiting and says so.
@@ -441,26 +451,87 @@ function query(params: Record<string, string | number | undefined>): string {
   return search.toString();
 }
 
-/** Every call the app can make, bound to one set of credentials. */
-export function client(credentials: string) {
+/**
+ * Every call the app can make, bound to one set of credentials. `onSessionEnd` hears each change to
+ * whether the session has ended.
+ */
+export function client(credentials: string, onSessionEnd: (end: SessionEnd) => void = () => {}) {
   let session: string | null = null;
   const authorization = () => (session === null ? `tma ${credentials}` : `session ${session}`);
-  const get = <T>(path: string) => request<T>(authorization(), path);
+
+  // Calls are numbered as they are asked. `at` marks the moment the session was found ended and `told`
+  // the call whose failure is said; a refusal asked before the session last came back is old news.
+  let asked = 0;
+  let end: { at: number; told: number; error: ApiError } | null = null;
+  let resumed = 0;
+  const reading = new Set<number>();
+  let said: SessionEnd = null;
+
+  const tell = () => {
+    const now: SessionEnd =
+      end === null
+        ? null
+        : { failure: end.error.failure, retrying: [...reading].some((number) => number > (end?.at ?? 0)) };
+    if (now?.failure === said?.failure && now?.retrying === said?.retrying) return;
+    said = now;
+    onSessionEnd(now);
+  };
+
+  const heard = (number: number, error: unknown, sessionRead: boolean) => {
+    if (!(error instanceof ApiError)) return;
+    const relaunch = needsRelaunch(error.failure);
+    if (end === null) {
+      if (!relaunch || number <= resumed) return;
+      const at = (asked += 1);
+      end = { at, told: at, error };
+    } else if (number > end.told && (relaunch || sessionRead)) {
+      end = { ...end, told: number, error };
+    }
+  };
+
+  const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
+    if (end !== null) throw end.error;
+    const number = (asked += 1);
+    try {
+      return await request<T>(authorization(), path, init);
+    } catch (error) {
+      heard(number, error, false);
+      tell();
+      throw error;
+    }
+  };
+  const get = <T>(path: string) => call<T>(path);
   const send = <T>(method: string, path: string, body?: unknown) =>
-    request<T>(authorization(), path, {
+    call<T>(path, {
       method,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
 
   return {
+    /** Asked whether or not the session has ended: an answer asked after the end brings it back. */
     session: async () => {
-      const answer = await get<Session>("/api/session");
-      session = answer.session_token;
-      return answer;
+      const number = (asked += 1);
+      reading.add(number);
+      tell();
+      try {
+        const answer = await request<Session>(authorization(), "/api/session");
+        session = answer.session_token;
+        if (end !== null && number > end.at) {
+          end = null;
+          resumed = number;
+        }
+        return answer;
+      } catch (error) {
+        heard(number, error, true);
+        throw error;
+      } finally {
+        reading.delete(number);
+        tell();
+      }
     },
 
     availability: (serviceDate: IsoDate, partySize: number) =>
-      get<Availability>(
+      get<GuestAvailability>(
         `/api/availability?${query({ service_date: serviceDate, party_size: partySize })}`,
       ),
 
@@ -486,7 +557,7 @@ export function client(credentials: string) {
 
     /** `ignoring` is a booking being moved, which must not block its own time. */
     staffAvailability: (serviceDate: IsoDate, partySize: number, ignoring?: string) =>
-      get<Availability>(
+      get<StaffAvailability>(
         `/api/admin/availability?${query({
           service_date: serviceDate,
           party_size: partySize,
@@ -561,15 +632,9 @@ export function client(credentials: string) {
         service_date: serviceDate,
       }),
 
-    settings: (serviceDate: IsoDate) =>
-      get<SettingsView>(`/api/admin/settings?${query({ service_date: serviceDate })}`),
+    settings: () => get<SettingsView>("/api/admin/settings"),
 
-    saveSettings: (serviceDate: IsoDate, draft: SettingsDraft) =>
-      send<SavedSettings>(
-        "PUT",
-        `/api/admin/settings?${query({ service_date: serviceDate })}`,
-        draft,
-      ),
+    saveSettings: (draft: SettingsDraft) => send<SavedSettings>("PUT", "/api/admin/settings", draft),
   };
 }
 

@@ -625,9 +625,8 @@ export function TablesPane({
   const orphans = byTable.get(null) ?? [];
 
   /** One booking, drawn over the hours it actually holds its table for. */
-  // A function called for each booking rather than a component declared inside this one: a
-  // component defined during render is a new type every render, so React threw every block away
-  // and rebuilt it whenever anything on the page changed.
+  // A function per booking, not a component declared in here: a component defined during render is
+  // a new type every render, and React remounts every block whenever anything on the page changes.
   const block = (booking: ShiftBooking) => {
     const standing = standingOf(booking, shift.now_minutes, graceMinutes);
     const held = occupancyEnd(booking) - booking.start_minutes;

@@ -12,7 +12,6 @@
 //! room — because bookings that already happened at it must keep resolving to it, and its printed
 //! number must never be handed to a different table.
 
-use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -97,7 +96,7 @@ pub struct StaffDraft {
 pub struct Draft {
     /// The version of the settings this proposal was made from. Saving it over any other version
     /// would quietly put back whatever changed in between, so that is refused.
-    pub version: DateTime<Utc>,
+    pub version: i64,
     pub name: String,
     pub address: String,
     pub timezone: String,

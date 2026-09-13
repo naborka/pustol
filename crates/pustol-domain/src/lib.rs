@@ -27,15 +27,16 @@ pub mod reconcile;
 pub mod schedule;
 pub mod service_day;
 pub mod slots;
+pub mod text;
 
 pub use allocator::{
-    Assignment, Booking, BookingId, BookingStatus, TableBlock, WalkIn, free_tables,
-    largest_party_seatable, seating_is_sound, walk_in,
+    Assignment, Booking, BookingId, BookingStatus, TableBlock, WalkIn, free_during, free_tables,
+    seating_is_sound, walk_in,
 };
 pub use config::{
-    BarConfig, BarList, Bounds, ConfigError, DayHours, LIMITS, Limits, ScheduleConflict, Setting,
-    StaffMember, ValidConfig, WeekSchedule, is_telegram_username, parties_above_cap,
-    schedule_conflicts,
+    BarConfig, BarList, Bounds, ConfigError, Contact, DayHours, LIMITS, Limits, ListLimits,
+    ScheduleConflict, Setting, StaffMember, TextLimits, ValidConfig, WeekSchedule,
+    is_telegram_username, parties_above_cap, schedule_conflicts,
 };
 pub use draft::{DayHoursDraft, Draft, DraftError, StaffDraft, TableDraft};
 pub use rebooking::{HoldingConflict, Rebooking};
@@ -43,5 +44,7 @@ pub use reconcile::{Reconciliation, Reseating};
 pub use schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 pub use service_day::{Interval, ServiceDay, TimeError, minutes_within, resolve};
 pub use slots::{
-    PartOfDay, Slot, SlotAvailability, bookable_days, days_from, first_free_minutes, horizon_days,
+    PartOfDay, Slot, SlotAvailability, bookable_days, days_from, first_free_minutes,
+    horizon_days, open_tables_at,
 };
+pub use text::{BlankGuestName, BlockReason, GuestName, MissingBlockReason, longer_than};

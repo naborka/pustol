@@ -7,46 +7,22 @@ import { describe, expect, it } from "vitest";
 import { draftOf, type SettingsDraft, type SettingsView } from "../api";
 import { removeStaff, removeTable, resizeTable } from "../settingsEdits";
 import { edited } from "../settingsRules";
-import {
-  asStored,
-  compareVersions,
-  fresh,
-  isDirty,
-  mergeDrafts,
-  received,
-  savedInto,
-  type SettingsPair,
-} from "../settingsSync";
+import { asStored, fresh, isDirty, mergeDrafts, received, savedInto, type SettingsPair } from "../settingsSync";
 import { settingsView } from "@/components/__tests__/fixtures";
 
-const v1 = settingsView({ version: "2026-09-13T08:00:00Z" });
-const v2 = settingsView({ version: "2026-09-13T08:00:00.000001Z" });
+const v1 = settingsView({ version: 1 });
+const v2 = settingsView({ version: 2 });
 
 function editing(settings: SettingsView, change: (draft: SettingsDraft) => void): SettingsPair {
   const pair = fresh(settings);
   return { ...pair, draft: edited(pair.draft, change) };
 }
 
-describe("which settings are newer", () => {
-  it("reads the server's timestamps to the last digit it sends", () => {
-    expect(compareVersions("2026-09-13T08:00:00Z", "2026-09-13T08:00:00.5Z")).toBeLessThan(0);
-    expect(compareVersions("2026-09-13T08:00:00.123456Z", "2026-09-13T08:00:00.1235Z")).toBeLessThan(0);
-    expect(compareVersions("2026-09-13T08:00:00.10Z", "2026-09-13T08:00:00.1Z")).toBe(0);
-    expect(compareVersions("2026-09-13T09:00:00+01:00", "2026-09-13T08:00:00Z")).toBe(0);
-    expect(compareVersions("2026-09-14T00:00:00Z", "2026-09-13T23:59:59.999999Z")).toBeGreaterThan(0);
-  });
-
-  it("still orders versions that are not timestamps", () => {
-    expect(compareVersions("v1", "v2")).toBeLessThan(0);
-    expect(compareVersions("v2", "v2")).toBe(0);
-  });
-});
-
 describe("a proposal as the server stores it", () => {
   it("trims what the server trims, lists staff and tables in the server's order, and keeps the rest as typed", () => {
     const draft = edited(draftOf(v1), (next) => {
       next.name = " Чердак ";
-      next.address = "Невский, 1 ";
+      next.address = "Невский, 1 ";
       next.contact = " @podval_bar ";
       next.zones = [" Зал", "Стойка"];
       next.message_templates = [" Ждём вас "];
@@ -115,29 +91,9 @@ describe("settings that arrive", () => {
     expect(received(fresh(v1), next).pair).toEqual(fresh(next));
   });
 
-  it("never replace newer settings with older ones", () => {
-    const current = fresh(settingsView({ name: "Подвал", version: v2.version }));
-    expect(received(current, v1)).toEqual({ pair: current, notice: null });
-  });
-
-  it("of the same version bring another evening's counts without touching the edit", () => {
-    const current = editing(v1, (draft) => {
-      draft.name = "Чердак";
-    });
-    const tomorrow = settingsView({
-      version: v1.version,
-      service_date: "2026-09-12",
-      tables: v1.tables.map((table) => ({ ...table, bookings_today: 3 })),
-    });
-    const { pair, notice } = received(current, tomorrow);
-    expect(pair).toEqual({ ...current, settings: tomorrow });
-    expect(notice).toBeNull();
-  });
-
-  it("of the same version change nothing but the evening's counts, whatever order they list the staff in", () => {
-    // A save answered in the order it was sent while reads listed the staff sorted: the reread made
-    // the manager's untouched roster look like an edit, and the next save put back a member somebody
-    // else had removed.
+  it("of the same version change nothing, whatever order they list the staff in", () => {
+    // A save answered in the order it was sent while reads listed the staff sorted: taking the reread
+    // made the manager's untouched roster look like an edit.
     const shown = settingsView({
       version: v2.version,
       staff: [
@@ -148,15 +104,10 @@ describe("settings that arrive", () => {
     });
     const reread = settingsView({
       version: v2.version,
-      service_date: "2026-09-12",
       staff: [...shown.staff].sort((left, right) => left.username.localeCompare(right.username)),
-      tables: shown.tables.map((table) => ({ ...table, bookings_today: 3 })),
     });
     for (const current of [fresh(shown), editing(shown, (draft) => void (draft.name = "Мансарда"))]) {
-      const { pair, notice } = received(current, reread);
-      expect(pair.draft).toBe(current.draft);
-      expect(pair.settings).toEqual({ ...shown, service_date: "2026-09-12", tables: reread.tables });
-      expect(notice).toBeNull();
+      expect(received(current, reread)).toEqual({ pair: current, notice: null });
     }
   });
 
@@ -178,7 +129,7 @@ describe("settings that arrive", () => {
       },
     };
     const removed = settingsView({
-      version: "2026-09-13T09:00:00Z",
+      version: 3,
       staff: sorted.staff.filter((member) => member.username !== "pavel"),
     });
     const { pair, notice } = received(current, removed);
@@ -242,12 +193,12 @@ describe("settings that arrive", () => {
     };
     const stored = settingsView({
       version: v2.version,
-      tables: [...v1.tables, { ...table, number: 9, bookings_today: 0 }],
+      tables: [...v1.tables, { ...table, number: 9 }],
     });
     const saved = savedInto(editing(v1, adding), stored, []);
     expect(isDirty(saved)).toBe(false);
 
-    const later = settingsView({ ...stored, name: "Подвал", version: "2026-09-13T09:00:00Z" });
+    const later = settingsView({ ...stored, name: "Подвал", version: 3 });
     const { pair, notice } = received({ ...saved, draft: edited(saved.draft, typing) }, later);
     expect(pair.draft.tables).toEqual(draftOf(stored).tables);
     expect(pair.draft).toMatchObject({ name: "Подвал", address: "Невский, 1" });
@@ -297,15 +248,5 @@ describe("a save that answers", () => {
     ]);
     expect(pair.draft.staff).toEqual([{ username: "aaron_bar" }, { username: "marina" }, { username: "nastya" }]);
     expect(pair.draft.tables).toEqual([{ id: "t2", seats: 5, zone: "Зал" }]);
-  });
-
-  it("is applied whatever evening its counts are for", () => {
-    const stored = settingsView({ name: "Чердак", version: v2.version, service_date: "2026-09-12" });
-    expect(savedInto(fresh(v1), stored, [])).toEqual(fresh(stored));
-  });
-
-  it("never puts older settings over newer ones that arrived meanwhile", () => {
-    const newer = fresh(settingsView({ name: "Подвал", version: "2026-09-13T10:00:00Z" }));
-    expect(savedInto(newer, v2, [])).toBe(newer);
   });
 });

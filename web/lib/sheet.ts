@@ -30,19 +30,6 @@ export type OpenSheet = { kind: "none" } | (SheetContent & { opened: number });
 
 export const NO_SHEET: OpenSheet = { kind: "none" };
 
-/** The sheet with `booking` in place of its copy, if it still shows that booking; otherwise as it was. */
-export function withBooking(sheet: OpenSheet, booking: ShiftBooking): OpenSheet {
-  switch (sheet.kind) {
-    case "booking":
-    case "templates":
-    case "cancelBooking":
-    case "move":
-      return sheet.booking.id === booking.id ? { ...sheet, booking } : sheet;
-    default:
-      return sheet;
-  }
-}
-
 /**
  * The sheet as `shift` now has what it shows, or no sheet once the shift no longer has it: a sheet
  * left open on a cancelled booking was a way to seat, move or message something that is gone.
@@ -54,7 +41,7 @@ export function refreshedSheet(sheet: OpenSheet, shift: ShiftView): OpenSheet {
     case "cancelBooking":
     case "move": {
       const current = shift.bookings.find((booking) => booking.id === sheet.booking.id);
-      return current ? withBooking(sheet, current) : NO_SHEET;
+      return current ? { ...sheet, booking: current } : NO_SHEET;
     }
     case "table": {
       const current = shift.tables.find((table) => table.id === sheet.table.id);

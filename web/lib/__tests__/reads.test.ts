@@ -7,13 +7,12 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_LEDGER,
   answered,
-  answeredUpTo,
   begun,
   failed,
   failureOn,
   marked,
   pendingOn,
-  pendingUpTo,
+  pruned,
   valueOn,
   written,
   type Ledger,
@@ -135,18 +134,6 @@ describe("an answer", () => {
     expect(tie.apply).toBe(true);
     expect(valueOn(tie.ledger, "11")?.name).toBe("second");
   });
-
-  it("counts as answered even when it is not applied", () => {
-    let ledger: Ledger<string> = EMPTY_LEDGER;
-    let read: number;
-    let sent: number;
-    [ledger, read] = ask(ledger, "session");
-    [ledger, sent] = marked(ledger);
-    ledger = write(ledger, "session", sent, () => "written").ledger;
-    ledger = answered(ledger, read, "session", "read").ledger;
-    expect(valueOn(ledger, "session")).toBe("written");
-    expect(answeredUpTo(ledger, "session")).toBe(read);
-  });
 });
 
 describe("a write that puts its own answer on screen", () => {
@@ -236,22 +223,32 @@ describe("a write that puts its own answer on screen", () => {
   });
 });
 
-describe("the reads on their way", () => {
-  it("name the newest one asked, so a read asked before a moment is not taken for one asked after", () => {
+describe("the questions kept", () => {
+  function answeredAll(keys: string[]): Ledger<string> {
     let ledger: Ledger<string> = EMPTY_LEDGER;
-    let before: number;
-    let mark: number;
-    let after: number;
-    expect(pendingUpTo(ledger, "session")).toBe(0);
-    [ledger, before] = ask(ledger, "session");
-    [ledger, mark] = marked(ledger);
-    expect(pendingUpTo(ledger, "session")).toBe(before);
-    expect(pendingUpTo(ledger, "session")).toBeLessThan(mark);
-    [ledger, after] = ask(ledger, "session");
-    expect(pendingUpTo(ledger, "session")).toBe(after);
-    ledger = failed(ledger, after, "session", boom).ledger;
-    expect(pendingUpTo(ledger, "session")).toBe(before);
-    expect(pendingUpTo(ledger, "other")).toBe(0);
+    for (const key of keys) {
+      let number: number;
+      [ledger, number] = ask(ledger, key);
+      ledger = answered(ledger, number, key, key).ledger;
+    }
+    return ledger;
+  }
+
+  it("are the one on screen, every one on its way, and the few heard from last of the rest", () => {
+    let ledger = answeredAll(["a", "b", "c", "d", "e"]);
+    [ledger] = ask(ledger, "a");
+    let broken: number;
+    [ledger, broken] = ask(ledger, "f");
+    ledger = failed(ledger, broken, "f", boom).ledger;
+    const kept = pruned(ledger, "b", 2);
+    expect(Object.keys(kept.entries).sort()).toEqual(["a", "b", "e", "f"]);
+    expect(valueOn(kept, "e")).toBe("e");
+    expect(failureOn(kept, "f")).toEqual(boom);
+  });
+
+  it("leave the ledger as it is when nothing is past the few kept", () => {
+    const ledger = answeredAll(["a", "b", "c"]);
+    expect(pruned(ledger, null, 3)).toBe(ledger);
   });
 });
 
@@ -404,9 +401,6 @@ describe("a moment marked from outside every read", () => {
     [ledger, after] = ask(ledger, "session");
     expect(before).toBeLessThan(mark);
     expect(after).toBeGreaterThan(mark);
-    ledger = answered(ledger, before, "session", "before").ledger;
-    expect(answeredUpTo(ledger, "session")).toBeLessThan(mark);
-    ledger = answered(ledger, after, "session", "after").ledger;
-    expect(answeredUpTo(ledger, "session")).toBeGreaterThan(mark);
+    expect(pendingOn(ledger, "session")).toBe(true);
   });
 });

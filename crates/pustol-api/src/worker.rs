@@ -36,17 +36,24 @@ const MAX_BACKOFF: TimeDelta = TimeDelta::hours(1);
 /// After this many attempts a message is abandoned: about three hours of waiting in all.
 ///
 /// Without a ceiling a message Telegram keeps refusing for a reason nobody anticipated is retried
-/// for ever, and a queue that never drains hides every later message behind it. A fixed two-minute
-/// wait with a low ceiling gave up on a guest's cancellation notice after ten minutes of outage.
+/// for ever, and a queue that never drains hides every later message behind it. The ceiling is long
+/// enough that an outage of a few minutes gives up on nothing.
 pub const MAX_ATTEMPTS: i32 = 8;
 
 fn backoff(attempts: i32) -> TimeDelta {
-    let doublings = u32::try_from(attempts.saturating_sub(1)).unwrap_or(0).min(6);
+    let doublings = u32::try_from(attempts.saturating_sub(1))
+        .unwrap_or(0)
+        .min(6);
     (FIRST_BACKOFF * 2_i32.pow(doublings)).min(MAX_BACKOFF)
 }
 
 /// Runs until the process is asked to stop.
-pub async fn run(store: Store, bot: Bot, clock: Clock, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+pub async fn run(
+    store: Store,
+    bot: Bot,
+    clock: Clock,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         let sent = match drain_once(&store, &bot, &clock).await {
             Ok(count) => count,

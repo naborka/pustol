@@ -17,6 +17,7 @@ use pustol_api::callbacks;
 use pustol_api::inbox::Inbox;
 use pustol_api::state::Clock;
 use pustol_domain::BookingId;
+use pustol_telegram::updates::UPDATE_RETENTION;
 use pustol_telegram::{Bot, BotToken, Update, messages};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
@@ -54,7 +55,11 @@ impl Telegram {
         } else {
             offset.unwrap_or(0)
         };
-        updates.iter().filter(|update| id(update) >= from).cloned().collect()
+        updates
+            .iter()
+            .filter(|update| id(update) >= from)
+            .cloned()
+            .collect()
     }
 
     /// Hands new updates over, waking a long poll that is waiting for them.
@@ -83,7 +88,10 @@ impl Telegram {
     }
 }
 
-#[allow(clippy::disallowed_types, reason = "a stub of Telegram, not of this API")]
+#[allow(
+    clippy::disallowed_types,
+    reason = "a stub of Telegram, not of this API"
+)]
 async fn method(
     State(stub): State<Telegram>,
     axum::extract::Path((_token, method)): axum::extract::Path<(String, String)>,
@@ -176,8 +184,7 @@ fn update(value: serde_json::Value) -> Update {
 
 async fn book(app: &Harness, guest: &Caller) -> BookingId {
     let body = app
-        .post(
-            "/api/booking",
+        .book(
             guest,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
         )
@@ -675,7 +682,12 @@ async fn after_telegram_counts_update_ids_afresh_the_next_update_is_answered_onc
         stub.answered().await,
         vec![serde_json::json!(77), serde_json::json!(78)]
     );
-    let last = stub.calls_to("getUpdates").await.last().cloned().expect("polled");
+    let last = stub
+        .calls_to("getUpdates")
+        .await
+        .last()
+        .cloned()
+        .expect("polled");
     assert_eq!(last["offset"], 6, "update 5 is confirmed: {last}");
 }
 
@@ -782,10 +794,12 @@ async fn a_stop_after_telegram_counted_ids_afresh_confirms_an_offset_lower_than_
     ])
     .await;
     eventually("update 6 is taken in hand", async || {
-        sqlx::query_scalar::<_, bool>("select exists (select 1 from bot_update where update_id = 6)")
-            .fetch_one(app.store.pool())
-            .await
-            .expect("read")
+        sqlx::query_scalar::<_, bool>(
+            "select exists (select 1 from bot_update where update_id = 6)",
+        )
+        .fetch_one(app.store.pool())
+        .await
+        .expect("read")
     })
     .await;
     stop.send(true).expect("the inbox is listening");
@@ -794,7 +808,11 @@ async fn a_stop_after_telegram_counted_ids_afresh_confirms_an_offset_lower_than_
         .expect("the inbox stopped")
         .expect("the inbox did not panic");
 
-    assert_eq!(stub.calls_to("answerCallbackQuery").await.len(), 1, "update 5 was answered");
+    assert_eq!(
+        stub.calls_to("answerCallbackQuery").await.len(),
+        1,
+        "update 5 was answered"
+    );
     let polls = stub.calls_to("getUpdates").await;
     let last = polls.last().expect("polled");
     assert_eq!(last["offset"], 6, "{polls:?}");
@@ -826,11 +844,39 @@ async fn an_update_that_cannot_be_answered_is_let_go_after_its_retries_and_the_n
         .expect("update 7 is let go, and update 8 answered");
     assert_eq!(next, Some(9));
     assert_eq!(stub.calls_to("answerCallbackQuery").await.len(), 1);
-    assert!(stub.answered().await.is_empty(), "update 7 was never answered");
+    assert!(
+        stub.answered().await.is_empty(),
+        "update 7 was never answered"
+    );
 
-    assert_eq!(inbox.poll_once(next).await.expect("telegram answered"), Some(9));
+    assert_eq!(
+        inbox.poll_once(next).await.expect("telegram answered"),
+        Some(9)
+    );
     let polls = stub.calls_to("getUpdates").await;
-    assert_eq!(polls.last().expect("polled")["offset"], 9, "update 7 is not fetched again");
+    assert_eq!(
+        polls.last().expect("polled")["offset"],
+        9,
+        "update 7 is not fetched again"
+    );
+}
+
+#[tokio::test]
+async fn a_claim_counts_each_time_its_owner_takes_it_and_starts_again_once_taken_over() {
+    let app = harness().await;
+    let (owner, stranger) = (Uuid::new_v4(), Uuid::new_v4());
+    let now = app.now;
+    let later = now + UPDATE_RETENTION + chrono::TimeDelta::minutes(1);
+    let claim = |who: Uuid, at: chrono::DateTime<chrono::Utc>| {
+        app.store
+            .claim_update(1, 42, who, at, at - UPDATE_RETENTION)
+    };
+
+    assert_eq!(claim(owner, now).await.expect("claimed"), Some(1));
+    assert_eq!(claim(owner, now).await.expect("claimed"), Some(2));
+    assert_eq!(claim(stranger, now).await.expect("read"), None);
+    assert_eq!(claim(stranger, later).await.expect("taken over"), Some(1));
+    assert_eq!(claim(stranger, later).await.expect("claimed"), Some(2));
 }
 
 #[tokio::test]

@@ -3,9 +3,9 @@
  */
 
 import type {
-  Availability,
   BarView,
   DayOffer,
+  GuestAvailability,
   GuestBooking,
   Limits,
   Session,
@@ -13,6 +13,7 @@ import type {
   ShiftBooking,
   ShiftTable,
   ShiftView,
+  StaffAvailability,
 } from "@/lib/api";
 
 export const bar: BarView = {
@@ -28,6 +29,7 @@ export const bar: BarView = {
   today_hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
   last_arrival_minutes: 1_440,
   now_minutes: 1_280,
+  opens_at_minutes: null,
   open_now: true,
   contact: null,
 };
@@ -55,6 +57,17 @@ export const seated: GuestBooking = {
   started: true,
   rebooking_replaces: null,
   holds_evening: true,
+};
+
+/** A no-show whose table is still held tonight: only a booking tonight replaces it. */
+export const heldNoShow: GuestBooking = {
+  ...booking,
+  id: "b9",
+  start_minutes: 1_260,
+  end_minutes: 1_380,
+  status: "no_show",
+  started: true,
+  rebooking_replaces: "same_evening",
 };
 
 export function session(overrides: Partial<Session> = {}): Session {
@@ -92,18 +105,30 @@ export function rail(length: number): DayOffer[] {
   return days;
 }
 
-export function availability(overrides: Partial<Availability> = {}): Availability {
+/**
+ * Arrival times as either side answers them: for the guest, nothing held that a booking would replace
+ * or refuse; for staff, every table free at each time that is not taken, the booking being moved set
+ * aside.
+ */
+export function availability(
+  overrides: Partial<GuestAvailability & StaffAvailability> = {},
+): GuestAvailability & StaffAvailability {
+  const everyTable = ["t1", "t2", "t3"];
   return {
     service_date: "2026-09-11",
     party_size: 2,
     turn_minutes: 120,
     slots: [
-      { start_minutes: 1_080, state: "past", evening: true },
-      { start_minutes: 1_290, state: "free", evening: true },
-      { start_minutes: 1_320, state: "taken", evening: true },
-      { start_minutes: 1_350, state: "free", evening: true },
+      { start_minutes: 1_080, state: "past", evening: true, free_table_ids: everyTable },
+      { start_minutes: 1_260, state: "past", evening: true, free_table_ids: everyTable },
+      { start_minutes: 1_290, state: "free", evening: true, free_table_ids: everyTable },
+      { start_minutes: 1_320, state: "taken", evening: true, free_table_ids: [] },
+      { start_minutes: 1_350, state: "free", evening: true, free_table_ids: everyTable },
     ],
     free_count: 2,
+    kept_free_table_ids: null,
+    replacing: [],
+    booked: false,
     ...overrides,
   };
 }
@@ -190,8 +215,8 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     })),
     zones: ["Зал", "Стойка", "Веранда"],
     tables: [
-      { id: "t1", number: 7, seats: 2, zone: "Стойка", bookings_today: 0 },
-      { id: "t2", number: 8, seats: 6, zone: "Зал", bookings_today: 0 },
+      { id: "t1", number: 7, seats: 2, zone: "Стойка" },
+      { id: "t2", number: 8, seats: 6, zone: "Зал" },
     ],
     turn_minutes: 120,
     slot_step_minutes: 30,
@@ -210,8 +235,7 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     next_table_number: 9,
     limits: LIMITS,
     contact: "",
-    service_date: "2026-09-11",
-    version: "2026-09-13T08:00:00Z",
+    version: 1,
     ...overrides,
   };
 }

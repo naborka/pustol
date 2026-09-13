@@ -122,7 +122,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Viewer> {
         let mut transaction = self.pool().begin().await?;
-        let account = note_account(&mut transaction, account, now).await?;
+        let account = note_account(&mut transaction, account, now).await?.account;
         let is_staff = is_staff(&mut transaction, bar, account.id).await?;
         let reminders = load_reminder_standing(&mut transaction, account.id).await?;
         transaction.commit().await?;
@@ -194,18 +194,26 @@ pub enum ReminderChoice {
     NotNow,
 }
 
+/// An account as stored once noted, with when the stored profile was signed.
+struct NotedAccount {
+    account: TelegramAccount,
+    profile_signed_at: Option<DateTime<Utc>>,
+    profile_contested: bool,
+}
+
 /// Records an account never seen before and returns the account as stored.
 async fn note_account(
     connection: &mut PgConnection,
     account: &TelegramAccount,
     now: DateTime<Utc>,
-) -> Result<TelegramAccount> {
+) -> Result<NotedAccount> {
     let row = sqlx::query(
         "insert into telegram_user (id, username, first_name, last_name, language_code,
                                     first_seen_at, last_seen_at)
          values ($1, $2, $3, $4, $5, $6, $6)
          on conflict (id) do update set last_seen_at = excluded.last_seen_at
-         returning id, username, first_name, last_name, language_code",
+         returning id, username, first_name, last_name, language_code, profile_signed_at,
+                   profile_contested",
     )
     .bind(account.id.0)
     .bind(&account.username)
@@ -215,7 +223,11 @@ async fn note_account(
     .bind(now)
     .fetch_one(connection)
     .await?;
-    account_from(&row)
+    Ok(NotedAccount {
+        account: account_from(&row)?,
+        profile_signed_at: row.try_get("profile_signed_at")?,
+        profile_contested: row.try_get("profile_contested")?,
+    })
 }
 
 /// The account as stored after a payload was recorded, and whether that payload's profile is it.
@@ -241,15 +253,11 @@ async fn record_profile(
     signed_at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Result<RecordedProfile> {
-    let stored = note_account(&mut *connection, account, now).await?;
-    let row = sqlx::query(
-        "select profile_signed_at, profile_contested from telegram_user where id = $1",
-    )
-    .bind(account.id.0)
-    .fetch_one(&mut *connection)
-    .await?;
-    let stored_at: Option<DateTime<Utc>> = row.try_get("profile_signed_at")?;
-    let contested: bool = row.try_get("profile_contested")?;
+    let NotedAccount {
+        account: stored,
+        profile_signed_at: stored_at,
+        profile_contested: contested,
+    } = note_account(&mut *connection, account, now).await?;
     let same_profile = stored == *account;
 
     let rewritten = match stored_at {
@@ -299,6 +307,13 @@ fn account_from(row: &sqlx::postgres::PgRow) -> Result<TelegramAccount> {
     })
 }
 
+/// A seat of bar `$1` under username `$2`, whatever its case, that no account has claimed.
+macro_rules! unclaimed_seat {
+    () => {
+        "bar_id = $1 and telegram_user_id is null and username_lower = lower($2)"
+    };
+}
+
 /// Whether the roster has an unclaimed seat under the payload's username.
 async fn seat_offered(
     connection: &mut PgConnection,
@@ -308,12 +323,11 @@ async fn seat_offered(
     let Some(username) = account.username.as_ref() else {
         return Ok(false);
     };
-    let row = sqlx::query(
-        "select exists (
-             select 1 from bar_staff
-             where bar_id = $1 and telegram_user_id is null and username_lower = lower($2)
-         ) as offered",
-    )
+    let row = sqlx::query(concat!(
+        "select exists (select 1 from bar_staff where ",
+        unclaimed_seat!(),
+        ") as offered"
+    ))
     .bind(bar)
     .bind(username)
     .fetch_one(connection)
@@ -347,17 +361,17 @@ async fn bind_staff_seat(
     let Some(username) = account.username.as_ref() else {
         return Ok(());
     };
-    sqlx::query(
-        "update bar_staff set telegram_user_id = $2, bound_at = $4
-         where bar_id = $1 and telegram_user_id is null and username_lower = lower($3)
-           and invited_at <= $5
-           and not exists (
-               select 1 from bar_staff held where held.bar_id = $1 and held.telegram_user_id = $2
-           )",
-    )
+    sqlx::query(concat!(
+        "update bar_staff set telegram_user_id = $3, bound_at = $4 where ",
+        unclaimed_seat!(),
+        " and invited_at <= $5
+          and not exists (
+              select 1 from bar_staff held where held.bar_id = $1 and held.telegram_user_id = $3
+          )"
+    ))
     .bind(bar)
-    .bind(account.id.0)
     .bind(username)
+    .bind(account.id.0)
     .bind(now)
     .bind(signature.earliest())
     .execute(connection)

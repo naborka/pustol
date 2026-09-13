@@ -1,20 +1,23 @@
 //! Taking bookings, moving them, and closing tables.
 
 use chrono::{DateTime, Utc};
-use pustol_domain::allocator::{Assignment, Booking, BookingId};
+use pustol_domain::allocator::{Assignment, Booking, BookingId, TableBlock};
 use pustol_domain::config::ValidConfig;
 use pustol_domain::rebooking::{self, HoldingConflict};
+use pustol_domain::reconcile::{Request as ReconcileRequest, reconcile};
 use pustol_domain::schedule::{BarTable, TableId};
 use pustol_domain::service_day::ServiceDay;
-use pustol_domain::slots::{self, Slot, SlotAvailability};
-use pustol_domain::reconcile::{Request as ReconcileRequest, reconcile};
-use pustol_domain::{BookingStatus, Interval, Reconciliation, bookable_days, minutes_within};
+use pustol_domain::slots::{self, SlotAvailability};
+use pustol_domain::{
+    BlockReason, BookingStatus, GuestName, Interval, Reconciliation, bookable_days, longer_than,
+    minutes_within,
+};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use crate::bar::load_config;
 use crate::error::{Error, Result};
-use crate::evening::{Evening, read_evening};
+use crate::evening::{Evening, ShiftRows, evening_around, read_evening, read_shift};
 use crate::ids::{BarId, TelegramUserId};
 use crate::records::{
     BlockRecord, BlockRow, BookingRecord, BookingRow, BookingSource, StoredStatus, blocks_of,
@@ -93,22 +96,17 @@ impl Attendance {
         let moment = match self {
             Self::Confirmed | Self::Arrived => return None,
             Self::Left => now,
-            Self::NoShow => now.max(
-                window.start() + chrono::Duration::minutes(i64::from(grace_minutes)),
-            ),
+            Self::NoShow => {
+                now.max(window.start() + chrono::Duration::minutes(i64::from(grace_minutes)))
+            }
         };
         Some(moment.clamp(window.start(), window.end()))
     }
 
     /// The status a booking has once this attendance is recorded.
     #[must_use]
-    pub const fn status(self) -> BookingStatus {
-        match self {
-            Self::Confirmed => BookingStatus::Confirmed,
-            Self::Arrived => BookingStatus::Arrived,
-            Self::NoShow => BookingStatus::NoShow,
-            Self::Left => BookingStatus::Left,
-        }
+    pub fn status(self) -> BookingStatus {
+        BookingStatus::from(StoredStatus::from(self))
     }
 
     /// The attendance a booking's status records, or `None` for a cancelled booking, which has none.
@@ -155,7 +153,7 @@ pub enum Channel {
     /// `table` is the one staff chose; `None` asks the room. It lives here, not on the request,
     /// so a guest booking has no field for it at all.
     Staff {
-        guest_name: String,
+        guest_name: GuestName,
         table: Option<TableId>,
     },
 }
@@ -353,11 +351,44 @@ pub struct ReopenedTable {
     pub reason: String,
 }
 
-/// Arrival times, and the configuration they were computed from.
+/// One evening's room as allocation sees it, with the configuration in force: what arrival times and
+/// the tables free at them are asked of.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct AvailabilityReading {
+pub struct Room {
     pub config: ValidConfig,
-    pub slots: Vec<Slot>,
+    pub day: ServiceDay,
+    /// Live bookings of the evening and its neighbours, since a window can outlast midnight.
+    bookings: Vec<Booking>,
+    /// Closures of the evening and its neighbours.
+    blocks: Vec<TableBlock>,
+}
+
+impl Room {
+    /// The picker's question about this room for a party of `party_size` at `now`, with `ignoring`
+    /// set aside.
+    #[must_use]
+    pub fn query<'a>(
+        &'a self,
+        party_size: i32,
+        now: DateTime<Utc>,
+        ignoring: &'a [BookingId],
+    ) -> slots::Query<'a> {
+        slots::Query {
+            config: &self.config,
+            service_day: self.day,
+            party_size,
+            bookings: &self.bookings,
+            blocks: &self.blocks,
+            now,
+            ignoring,
+        }
+    }
+
+    /// The live booking `id` among the room's, if it is one of them.
+    #[must_use]
+    pub fn booking(&self, id: BookingId) -> Option<&Booking> {
+        self.bookings.iter().find(|booking| booking.id == id)
+    }
 }
 
 /// What asking the room again settled, and the evening as it then stood.
@@ -369,36 +400,21 @@ pub struct ReconciledShift {
 }
 
 impl Store {
-    /// Arrival times for a party on one shift, each with the reason it can or cannot be taken.
+    /// The room on one shift, which arrival times and the tables free at them are asked of.
     ///
     /// No lock: availability is advice, true at the moment it was read. The guarantee that two
     /// guests cannot both act on it lives in [`Self::create_booking`] and, beneath that, in the
     /// exclusion constraint.
-    ///
-    /// `ignoring` is set aside: a booking being moved, or the ones a guest's booking on `day` would
-    /// replace, which [`pustol_domain::rebooking::replaced_on`] names.
-    pub async fn availability(
-        &self,
-        bar: BarId,
-        day: ServiceDay,
-        party_size: i32,
-        now: DateTime<Utc>,
-        ignoring: &[BookingId],
-    ) -> Result<AvailabilityReading> {
+    pub async fn room(&self, bar: BarId, day: ServiceDay) -> Result<Room> {
         let mut connection = self.pool().acquire().await?;
         let config = load_config(&mut connection, bar).await?;
-        let bookings = load_window(&mut connection, bar, day).await?;
-        let blocks = load_blocks(&mut connection, bar, day).await?;
-        let slots = slots::slot_list(&slots::Query {
-            config: &config,
-            service_day: day,
-            party_size,
-            bookings: &bookings_of(&bookings),
-            blocks: &blocks_of(&blocks),
-            now,
-            ignoring,
-        });
-        Ok(AvailabilityReading { config, slots })
+        let (bookings, blocks) = load_room(&mut connection, bar, day).await?;
+        Ok(Room {
+            config,
+            day,
+            bookings,
+            blocks,
+        })
     }
 
     /// Shifts a guest may choose from.
@@ -464,8 +480,7 @@ impl Store {
     ///
     /// Refused for the first reason it cannot be taken, widest first: the party, the evening, the time,
     /// the table. Only a booking that could otherwise be taken is held to what the guest's app promised
-    /// it replaces, and refused as changed when that promise is wrong. Refused as changed first, a guest
-    /// whose time has gone read their bookings again, found nothing to name, and was refused again.
+    /// it replaces, and refused as changed when that promise is wrong.
     pub async fn create_booking(
         &self,
         request: &NewBooking,
@@ -481,16 +496,14 @@ impl Store {
         // What booking again does to the guest's bookings is `rebooking` and nothing else, asked of them
         // as this transaction reads them under the bar's lock.
         let user = request.channel.guest();
-        let mine = bookings_of(&running_bookings_of(&mut transaction, request.bar, user, now).await?);
+        let held = running_bookings_of(&mut transaction, request.bar, user, now).await?;
+        let mine = bookings_of(&held);
         if rebooking::refused_on(&mine, request.service_day, now) {
             return Err(Error::AlreadyBookedThisShift);
         }
         let replacing = rebooking::replaced_on(&mine, request.service_day, now);
 
-        let bookings = load_window(&mut transaction, request.bar, request.service_day).await?;
-        let blocks = load_blocks(&mut transaction, request.bar, request.service_day).await?;
-        let live = bookings_of(&bookings);
-        let closed = blocks_of(&blocks);
+        let (live, closed) = load_room(&mut transaction, request.bar, request.service_day).await?;
         let asking = slots::Query {
             config: &config,
             service_day: request.service_day,
@@ -504,10 +517,10 @@ impl Store {
 
         let (source, name, username, chosen) = match &request.channel {
             Channel::Guest { name, username, .. } => {
-                (BookingSource::App, name.clone(), username.clone(), None)
+                (BookingSource::App, name.as_str(), username.as_deref(), None)
             }
             Channel::Staff { guest_name, table } => {
-                (BookingSource::Staff, guest_name.clone(), None, *table)
+                (BookingSource::Staff, guest_name.as_str(), None, *table)
             }
         };
         let free = pustol_domain::free_tables(&asking.request(window));
@@ -516,7 +529,8 @@ impl Store {
 
         // Cancelled in the same transaction the booking is taken in, so there is no instant in which the
         // guest holds two or none.
-        let replaced = cancel_replaced(&mut transaction, request.bar, &mine, &replacing, now).await?;
+        let replaced =
+            cancel_replaced(&mut transaction, request.bar, &mine, &replacing, now).await?;
         let id = insert_booking(
             &mut transaction,
             &Written {
@@ -525,8 +539,8 @@ impl Store {
                 service_day: request.service_day,
                 window,
                 party_size: request.party_size,
-                guest_name: &name,
-                guest_username: username.as_deref(),
+                guest_name: name,
+                guest_username: username,
                 user,
                 source,
                 status: StoredStatus::Confirmed,
@@ -552,14 +566,27 @@ impl Store {
         let mut evenings: Vec<ServiceDay> = replaced.iter().map(|(_, day)| *day).collect();
         evenings.sort_unstable();
         evenings.dedup();
+        let mut room_moved = false;
         for day in evenings {
-            reconcile_shift(&mut transaction, request.bar, &config, day, now).await?;
+            let reconciled =
+                reconcile_shift(&mut transaction, request.bar, &config, day, now).await?;
+            room_moved |= !reconciled.reseated.is_empty();
         }
 
         let record = fetch_booking(&mut transaction, request.bar, id).await?;
-        let guest_bookings = running_bookings_of(&mut transaction, request.bar, user, now).await?;
-        let evening =
-            read_evening(&mut transaction, request.bar, config, request.service_day, now).await?;
+        let guest_bookings = if room_moved {
+            running_bookings_of(&mut transaction, request.bar, user, now).await?
+        } else {
+            held_after(held, &replacing, user.map(|_| record.clone()))
+        };
+        let evening = read_evening(
+            &mut transaction,
+            request.bar,
+            config,
+            request.service_day,
+            now,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(CreatedBooking {
             record,
@@ -611,8 +638,7 @@ impl Store {
         let current = fetch_booking(&mut transaction, bar, booking).await?;
         let previous =
             Attendance::of(current.booking.status).ok_or(Error::NotFound { entity: "booking" })?;
-        let released_at =
-            attendance.released_at(current.booking.window, config.grace_minutes, now);
+        let released_at = attendance.released_at(current.booking.window, config.grace_minutes, now);
         check_table_free(
             &mut transaction,
             bar,
@@ -636,11 +662,20 @@ impl Store {
         .await
         .map_err(Error::from_write)?;
 
-        check_holdings(&mut transaction, bar, current.telegram_user_id, booking, now).await?;
+        check_holdings(
+            &mut transaction,
+            bar,
+            current.telegram_user_id,
+            booking,
+            now,
+        )
+        .await?;
         let day = current.booking.service_day;
-        let reconciliation = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
-        let record = fetch_booking(&mut transaction, bar, booking).await?;
-        let evening = read_evening(&mut transaction, bar, config, day, now).await?;
+        let reconciled = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
+        let record = reconciled.booking(&mut transaction, bar, booking).await?;
+        let (reconciliation, evening) = reconciled
+            .evening(&mut transaction, bar, config, now)
+            .await?;
         transaction.commit().await?;
         Ok(AttendanceRecorded {
             record,
@@ -665,7 +700,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<NoteWritten> {
         let trimmed = note.map(str::trim).filter(|text| !text.is_empty());
-        if trimmed.is_some_and(|text| text.chars().count() > NOTE_MAX_CHARS) {
+        if trimmed.is_some_and(|text| longer_than(text, NOTE_MAX_CHARS)) {
             return Err(Error::NoteTooLong {
                 limit: NOTE_MAX_CHARS,
             });
@@ -686,8 +721,14 @@ impl Store {
             return Err(Error::NotFound { entity: "booking" });
         }
         let record = fetch_booking(&mut transaction, bar, booking).await?;
-        let evening =
-            read_evening(&mut transaction, bar, config, record.booking.service_day, now).await?;
+        let evening = read_evening(
+            &mut transaction,
+            bar,
+            config,
+            record.booking.service_day,
+            now,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(NoteWritten { record, evening })
     }
@@ -721,10 +762,7 @@ impl Store {
         }
 
         let day = current.booking.service_day;
-        let bookings = load_window(&mut transaction, bar, day).await?;
-        let blocks = load_blocks(&mut transaction, bar, day).await?;
-        let live = bookings_of(&bookings);
-        let closed = blocks_of(&blocks);
+        let (live, closed) = load_room(&mut transaction, bar, day).await?;
         let was = current.booking.window;
         let moving = [booking];
         let asking = slots::Query {
@@ -767,11 +805,18 @@ impl Store {
         .await
         .map_err(Error::from_write)?;
 
-        check_holdings(&mut transaction, bar, current.telegram_user_id, booking, now).await?;
+        check_holdings(
+            &mut transaction,
+            bar,
+            current.telegram_user_id,
+            booking,
+            now,
+        )
+        .await?;
         // The table they left is capacity appearing, and capacity appearing is offered to whoever
         // the room could not seat — the same rule a cancellation and a party going home follow.
-        let reconciliation = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
-        let record = fetch_booking(&mut transaction, bar, booking).await?;
+        let reconciled = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
+        let record = reconciled.booking(&mut transaction, bar, booking).await?;
         let mut notice_queued = false;
         if let (Some(recipient), Some(words)) = (current.telegram_user_id, words) {
             // Only a new time is news: the guest never saw a table number, and a change of size
@@ -804,7 +849,9 @@ impl Store {
             }
         }
         let guest_notified = notice_queued && record.reachable_by_bot;
-        let evening = read_evening(&mut transaction, bar, config, day, now).await?;
+        let (reconciliation, evening) = reconciled
+            .evening(&mut transaction, bar, config, now)
+            .await?;
         transaction.commit().await?;
         Ok(MovedBooking {
             record,
@@ -844,8 +891,7 @@ impl Store {
         lock_bar(&mut transaction, bar).await?;
         let config = load_config(&mut transaction, bar).await?;
         check_party_size(party_size, &config)?;
-        let bookings = bookings_of(&load_window(&mut transaction, bar, day).await?);
-        let blocks = blocks_of(&load_blocks(&mut transaction, bar, day).await?);
+        let (bookings, blocks) = load_room(&mut transaction, bar, day).await?;
         let offer = pustol_domain::walk_in(&config, day, now, &bookings, &blocks).ok_or(
             Error::NotTheRunningShift {
                 service_day: day.date(),
@@ -961,8 +1007,16 @@ impl Store {
                     && record.booking.status == pustol_domain::BookingStatus::Confirmed
             })
             .ok_or(Error::NotFound { entity: "booking" })?;
-        let cancelled =
-            cancel_locked(&mut transaction, bar, config, mine.booking.id, None, None, now).await?;
+        let cancelled = cancel_locked(
+            &mut transaction,
+            bar,
+            config,
+            mine.booking.id,
+            None,
+            None,
+            now,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(cancelled)
     }
@@ -982,8 +1036,8 @@ impl Store {
         let mut transaction = self.pool().begin().await?;
         lock_bar(&mut transaction, bar).await?;
         let config = load_config(&mut transaction, bar).await?;
-        let reconciliation = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
-        let evening = read_evening(&mut transaction, bar, config, day, now).await?;
+        let (reconciliation, evening) =
+            reconcile_and_read(&mut transaction, bar, config, day, now).await?;
         transaction.commit().await?;
         Ok(ReconciledShift {
             reconciliation,
@@ -992,27 +1046,57 @@ impl Store {
     }
 
     /// Takes tables out of service for a shift and re-seats whoever was sitting at them.
+    ///
+    /// What was closed is read from the rows the statement wrote, not from what was asked: a table
+    /// closed twice is not news to report. Every table named has to be one of this room's live
+    /// tables, or nothing is written.
     pub async fn block_tables(
         &self,
         bar: BarId,
         day: ServiceDay,
         tables: &[TableId],
-        reason: &str,
+        reason: &BlockReason,
         by: Option<TelegramUserId>,
         now: DateTime<Utc>,
     ) -> Result<ClosedTables> {
-        let changed = self
-            .change_blocks(bar, day, tables, &[], Some((reason, by)), now)
+        let (mut transaction, config) = self.changing_tables(bar, tables).await?;
+        let mut closed = Vec::new();
+        if !tables.is_empty() {
+            let rows = sqlx::query(
+                "insert into table_block (bar_id, table_id, service_date, reason, created_by)
+                 select $1, table_id, $2, $3, $4 from unnest($5::uuid[]) as table_id
+                 on conflict (table_id, service_date) do nothing
+                 returning table_id",
+            )
+            .bind(bar)
+            .bind(day.date())
+            .bind(reason.as_str())
+            .bind(by.map(|user| user.0))
+            .bind(tables.iter().map(|table| table.0).collect::<Vec<_>>())
+            .fetch_all(&mut *transaction)
             .await?;
+            let inserted: Vec<TableId> = rows
+                .iter()
+                .map(|row| Ok(TableId(row.try_get("table_id")?)))
+                .collect::<Result<_>>()?;
+            closed = in_order_asked(tables, inserted, |table| *table);
+        }
+        let (reconciliation, evening) =
+            reconcile_and_read(&mut transaction, bar, config, day, now).await?;
+        transaction.commit().await?;
         Ok(ClosedTables {
-            closed: changed.closed,
-            reconciliation: changed.reconciliation,
-            evening: changed.evening,
+            closed,
+            reconciliation,
+            evening,
         })
     }
 
     /// Puts tables back into service. Reconciliation runs afterwards because a freed table may be
     /// exactly what an orphaned booking has been waiting for.
+    ///
+    /// What was reopened is read from the rows the statement removed: a table that was never shut is
+    /// not news to report. Every table named has to be one of this room's live tables, or nothing is
+    /// written.
     pub async fn unblock_tables(
         &self,
         bar: BarId,
@@ -1020,45 +1104,9 @@ impl Store {
         tables: &[TableId],
         now: DateTime<Utc>,
     ) -> Result<ReopenedTables> {
-        let changed = self.change_blocks(bar, day, &[], tables, None, now).await?;
-        Ok(ReopenedTables {
-            reopened: changed.reopened,
-            reconciliation: changed.reconciliation,
-            evening: changed.evening,
-        })
-    }
-
-    /// Closing and opening tables are the same operation with the arrow reversed: change what is
-    /// in service, then let reconciliation put every booking where it now belongs.
-    ///
-    /// What changed is read from the rows the statements actually wrote, not from what was asked:
-    /// a table closed twice, or opened when it was never shut, is not news to report.
-    ///
-    /// Every table named has to be one of this room's live tables, or nothing is written. An
-    /// identity no table has reached the database as a key it refused, and one of another bar's
-    /// tables was stored against this bar.
-    async fn change_blocks(
-        &self,
-        bar: BarId,
-        day: ServiceDay,
-        add: &[TableId],
-        remove: &[TableId],
-        reason: Option<(&str, Option<TelegramUserId>)>,
-        now: DateTime<Utc>,
-    ) -> Result<BlocksChanged> {
-        let mut transaction = self.pool().begin().await?;
-        lock_bar(&mut transaction, bar).await?;
-        let config = load_config(&mut transaction, bar).await?;
-        if add
-            .iter()
-            .chain(remove)
-            .any(|asked| !config.active_tables().any(|table| table.id == *asked))
-        {
-            return Err(Error::NotFound { entity: "table" });
-        }
-
+        let (mut transaction, config) = self.changing_tables(bar, tables).await?;
         let mut reopened = Vec::new();
-        if !remove.is_empty() {
+        if !tables.is_empty() {
             let rows = sqlx::query(
                 "delete from table_block
                  where bar_id = $1 and service_date = $2 and table_id = any($3::uuid[])
@@ -1066,7 +1114,7 @@ impl Store {
             )
             .bind(bar)
             .bind(day.date())
-            .bind(remove.iter().map(|table| table.0).collect::<Vec<_>>())
+            .bind(tables.iter().map(|table| table.0).collect::<Vec<_>>())
             .fetch_all(&mut *transaction)
             .await?;
             let removed: Vec<ReopenedTable> = rows
@@ -1078,49 +1126,38 @@ impl Store {
                     })
                 })
                 .collect::<Result<_>>()?;
-            reopened = in_order_asked(remove, removed, |table| table.table_id);
+            reopened = in_order_asked(tables, removed, |table| table.table_id);
         }
-        let mut closed = Vec::new();
-        if !add.is_empty() {
-            let (text, by) = reason.ok_or(Error::MissingBlockReason)?;
-            let rows = sqlx::query(
-                "insert into table_block (bar_id, table_id, service_date, reason, created_by)
-                 select $1, table_id, $2, $3, $4 from unnest($5::uuid[]) as table_id
-                 on conflict (table_id, service_date) do nothing
-                 returning table_id",
-            )
-            .bind(bar)
-            .bind(day.date())
-            .bind(text)
-            .bind(by.map(|user| user.0))
-            .bind(add.iter().map(|table| table.0).collect::<Vec<_>>())
-            .fetch_all(&mut *transaction)
-            .await?;
-            let inserted: Vec<TableId> = rows
-                .iter()
-                .map(|row| Ok(TableId(row.try_get("table_id")?)))
-                .collect::<Result<_>>()?;
-            closed = in_order_asked(add, inserted, |table| *table);
-        }
-
-        let reconciliation = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
-        let evening = read_evening(&mut transaction, bar, config, day, now).await?;
+        let (reconciliation, evening) =
+            reconcile_and_read(&mut transaction, bar, config, day, now).await?;
         transaction.commit().await?;
-        Ok(BlocksChanged {
-            closed,
+        Ok(ReopenedTables {
             reopened,
             reconciliation,
             evening,
         })
     }
-}
 
-/// What one change to the closures did, before it is told to the caller as a closing or an opening.
-struct BlocksChanged {
-    closed: Vec<TableId>,
-    reopened: Vec<ReopenedTable>,
-    reconciliation: Reseated,
-    evening: Evening,
+    /// A transaction under the bar's lock, and the configuration it read, for a change to the closures
+    /// of `tables`: refused as not found unless every one is a live table of this room. An identity no
+    /// table has would reach the database as a key it refuses, and one of another bar's tables would be
+    /// stored against this bar.
+    async fn changing_tables(
+        &self,
+        bar: BarId,
+        tables: &[TableId],
+    ) -> Result<(sqlx::Transaction<'static, sqlx::Postgres>, ValidConfig)> {
+        let mut transaction = self.pool().begin().await?;
+        lock_bar(&mut transaction, bar).await?;
+        let config = load_config(&mut transaction, bar).await?;
+        if tables
+            .iter()
+            .any(|asked| !config.active_tables().any(|table| table.id == *asked))
+        {
+            return Err(Error::NotFound { entity: "table" });
+        }
+        Ok((transaction, config))
+    }
 }
 
 /// `changed` in the order its tables were `asked` for, since a statement returns rows in no order.
@@ -1167,14 +1204,11 @@ async fn check_table_free(
     let (Some(table), Some(held)) = (changed.table_id, changed.occupancy()) else {
         return Ok(());
     };
-    let taken = load_window(connection, bar, changed.service_day)
-        .await?
-        .iter()
-        .any(|other| other.booking.id != changed.id && other.booking.holds(table, held));
-    if taken {
-        Err(Error::TableTaken)
-    } else {
+    let window = bookings_of(&load_window(connection, bar, changed.service_day).await?);
+    if pustol_domain::free_during(table, held, &window, &[changed.id]) {
         Ok(())
+    } else {
+        Err(Error::TableTaken)
     }
 }
 
@@ -1197,10 +1231,7 @@ struct Written<'a> {
 }
 
 /// Writes the row, letting the exclusion constraint have the last word on who got the table.
-async fn insert_booking(
-    connection: &mut PgConnection,
-    written: &Written<'_>,
-) -> Result<BookingId> {
+async fn insert_booking(connection: &mut PgConnection, written: &Written<'_>) -> Result<BookingId> {
     sqlx::query(
         "insert into booking (bar_id, table_id, service_date, starts_at, ends_at, party_size,
                               guest_name, guest_username, telegram_user_id, source, status)
@@ -1272,32 +1303,15 @@ fn window_at(query: &slots::Query<'_>, start_minutes: i32) -> Result<Interval> {
     }
 }
 
-impl Store {
-    /// Reads specific bookings, for reports that need to name the guests involved.
-    ///
-    /// Reconciliation deals in identities because allocation must not be able to see who a guest
-    /// is; the report staff read has to say "Тимур", so the names are fetched afterwards.
-    pub async fn bookings_by_id(
-        &self,
-        bar: BarId,
-        ids: &[BookingId],
-    ) -> Result<Vec<BookingRecord>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query(concat!(
-            "select ",
-            booking_columns!(),
-            " where b.bar_id = $1 and b.id = any($2::uuid[])"
-        ))
-        .bind(bar)
-        .bind(ids.iter().map(|id| id.0).collect::<Vec<_>>())
-        .fetch_all(self.pool())
-        .await?;
-        rows.into_iter()
-            .map(|row| BookingRecord::try_from(row_into(&row)?))
-            .collect()
-    }
+/// The live bookings and the closures allocation weighs for `day`, as the domain sees them.
+async fn load_room(
+    connection: &mut PgConnection,
+    bar: BarId,
+    day: ServiceDay,
+) -> Result<(Vec<Booking>, Vec<TableBlock>)> {
+    let bookings = bookings_of(&load_window(&mut *connection, bar, day).await?);
+    let blocks = blocks_of(&load_blocks(connection, bar, day).await?);
+    Ok((bookings, blocks))
 }
 
 /// Bookings on `day` — what the admin screen draws.
@@ -1505,7 +1519,7 @@ pub(crate) async fn reconcile_shift(
     config: &ValidConfig,
     day: ServiceDay,
     now: DateTime<Utc>,
-) -> Result<Reseated> {
+) -> Result<Reconciled> {
     let bookings = load_window(&mut *connection, bar, day).await?;
     let blocks = load_blocks(&mut *connection, bar, day).await?;
     let outcome = reconcile(&ReconcileRequest {
@@ -1514,15 +1528,109 @@ pub(crate) async fn reconcile_shift(
         blocks: &blocks_of(&blocks),
         now,
     });
+    if outcome.is_empty() {
+        return Ok(Reconciled {
+            day,
+            reseated: Reseated {
+                outcome,
+                affected: Vec::new(),
+            },
+            unmoved: Some((bookings, blocks)),
+        });
+    }
     persist_reconciliation(&mut *connection, &outcome).await?;
-    Ok(with_affected(outcome, bookings))
+    Ok(Reconciled {
+        day,
+        reseated: with_affected(outcome, bookings),
+        unmoved: None,
+    })
+}
+
+/// One shift reconciled, with the rows it read while they are still the room.
+pub(crate) struct Reconciled {
+    day: ServiceDay,
+    pub(crate) reseated: Reseated,
+    /// The window's bookings and closures as reconciliation read them, when it moved nothing.
+    unmoved: Option<(Vec<BookingRecord>, Vec<BlockRecord>)>,
+}
+
+impl Reconciled {
+    /// `booking` as the room now holds it: from the rows in hand when it is among them, read again
+    /// otherwise.
+    async fn booking(
+        &self,
+        connection: &mut PgConnection,
+        bar: BarId,
+        booking: BookingId,
+    ) -> Result<BookingRecord> {
+        let held = self
+            .unmoved
+            .as_ref()
+            .and_then(|(bookings, _)| bookings.iter().find(|record| record.booking.id == booking));
+        match held {
+            Some(record) => Ok(record.clone()),
+            None => fetch_booking(connection, bar, booking).await,
+        }
+    }
+
+    /// What reconciling did, and the evening reconciled as the room now stands.
+    async fn evening(
+        self,
+        connection: &mut PgConnection,
+        bar: BarId,
+        config: ValidConfig,
+        now: DateTime<Utc>,
+    ) -> Result<(Reseated, Evening)> {
+        let day = self.day;
+        let rows = match self.unmoved {
+            Some((bookings, blocks)) => ShiftRows {
+                day,
+                bookings: bookings
+                    .into_iter()
+                    .filter(|record| record.booking.service_day == day)
+                    .collect(),
+                blocks: blocks
+                    .into_iter()
+                    .filter(|block| block.block.service_day == day)
+                    .collect(),
+            },
+            None => read_shift(&mut *connection, bar, day).await?,
+        };
+        let evening = evening_around(connection, bar, config, rows, now).await?;
+        Ok((self.reseated, evening))
+    }
+}
+
+/// Reconciles `day`, then reads the evening as that left it.
+async fn reconcile_and_read(
+    connection: &mut PgConnection,
+    bar: BarId,
+    config: ValidConfig,
+    day: ServiceDay,
+    now: DateTime<Utc>,
+) -> Result<(Reseated, Evening)> {
+    let reconciled = reconcile_shift(&mut *connection, bar, &config, day, now).await?;
+    reconciled.evening(connection, bar, config, now).await
+}
+
+/// The guest's running bookings once a booking is taken, when nothing else about them changed:
+/// `held` without the `replaced`, and `taken` among them, soonest first.
+fn held_after(
+    held: Vec<BookingRecord>,
+    replaced: &[BookingId],
+    taken: Option<BookingRecord>,
+) -> Vec<BookingRecord> {
+    let mut running: Vec<BookingRecord> = held
+        .into_iter()
+        .filter(|record| !replaced.contains(&record.booking.id))
+        .chain(taken)
+        .collect();
+    running.sort_by_key(|record| record.booking.window.start());
+    running
 }
 
 /// Keeps the records a reconciliation touched, discarding the rest of the window.
-pub(crate) fn with_affected(
-    outcome: Reconciliation,
-    loaded: Vec<BookingRecord>,
-) -> Reseated {
+pub(crate) fn with_affected(outcome: Reconciliation, loaded: Vec<BookingRecord>) -> Reseated {
     let touched: Vec<BookingId> = outcome
         .moved
         .iter()
@@ -1743,7 +1851,10 @@ async fn cancel_locked(
     // handler happens to call: a rule about what reaches a guest should not depend on every
     // future caller remembering it.
     if let Some(reason) = reason
-        && !config.cancel_reasons.iter().any(|offered| offered == reason)
+        && !config
+            .cancel_reasons
+            .iter()
+            .any(|offered| offered == reason)
     {
         return Err(Error::UnknownCancelReason);
     }
@@ -1764,7 +1875,8 @@ async fn cancel_locked(
     // Queued in the same transaction as the cancellation: a notice that survives a crash the
     // cancellation did not would tell a guest their table is gone when it is not.
     let mut notice_queued = false;
-    if let (Some(recipient), Some(reason), Some(wording)) = (record.telegram_user_id, reason, notice)
+    if let (Some(recipient), Some(reason), Some(wording)) =
+        (record.telegram_user_id, reason, notice)
     {
         notifications::enqueue(
             &mut *connection,
@@ -1780,9 +1892,8 @@ async fn cancel_locked(
     }
 
     let day = record.booking.service_day;
-    let reconciliation = reconcile_shift(&mut *connection, bar, &config, day, now).await?;
     let guest_notified = notice_queued && record.reachable_by_bot;
-    let evening = read_evening(&mut *connection, bar, config, day, now).await?;
+    let (reconciliation, evening) = reconcile_and_read(connection, bar, config, day, now).await?;
     Ok(CancelledBooking {
         record,
         reconciliation,

@@ -71,11 +71,6 @@ pub enum Error {
     #[error("the bot has no chat with this guest")]
     NoBotChat,
 
-    /// Closing a table without saying why. Guarded here so the reason can never be optional in
-    /// storage, where staff would find rows they cannot explain.
-    #[error("closing a table needs a reason")]
-    MissingBlockReason,
-
     /// A note longer than a row in a list can show.
     #[error("a note is at most {limit} characters")]
     NoteTooLong { limit: usize },

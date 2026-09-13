@@ -1,71 +1,45 @@
 /**
- * One occupancy rule, and the four consumers that have to agree with it.
+ * One occupancy rule, and the consumers that have to agree with it.
  *
- * The bug this file exists to prevent: a party marked `Ушли` at 21:20 still drawn as busy until
- * 23:00 on the timeline, while `свободно сейчас` had already counted the table and the walk-in
- * sheet was offering it. Four readings of one fact is four chances to contradict the room.
+ * A party marked `Ушли` at 21:20 is not busy until 23:00 on the timeline while `свободно сейчас`
+ * already counts the table and the walk-in sheet offers it. Every reading of one fact agrees.
  */
 
 import { describe, expect, it } from "vitest";
 
-import type { ShiftBooking, ShiftTable, ShiftView } from "../api";
+import type { ShiftBooking, ShiftView } from "../api";
 import {
   heldBy,
-  holdsAt,
   holdsDuring,
   hourlyLoad,
   occupancyEnd,
   peakHour,
   shiftTotals,
-  tableOffers,
+  slotOffers,
   walkInOffers,
 } from "../occupancy";
+import { availability, shift, shiftBooking, shiftTable } from "@/components/__tests__/fixtures";
 
-function table(id: string, number: number, seats: number): ShiftTable {
-  return { id, number, seats, zone: "Зал", blocked_because: null };
-}
-
+/** A party seated at table 1 from 20:00 to 22:00. */
 function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
-  return {
-    id: "b1",
-    table_id: "t1",
+  return shiftBooking({
     table_number: 1,
-    table_zone: "Зал",
     start_minutes: 1_200,
     end_minutes: 1_320,
-    released_minutes: null,
-    party_size: 2,
-    guest_name: "Саша",
-    guest_username: null,
     status: "arrived",
-    source: "app",
-    note: null,
-    reachable_by_bot: true,
     started: true,
-    finished: false,
     ...overrides,
-  };
+  });
 }
 
-function shift(overrides: Partial<ShiftView> = {}): ShiftView {
-  return {
-    service_date: "2026-09-11",
-    today: "2026-09-11",
-    version: 1,
-    hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
-    tables: [table("t1", 1, 2), table("t2", 2, 6)],
+/** An evening with a two-top and a six-top and nothing booked. */
+function room(overrides: Partial<ShiftView> = {}): ShiftView {
+  return shift({
+    tables: [shiftTable({ number: 1 }), shiftTable({ id: "t2", number: 2, seats: 6 })],
     bookings: [],
-    stats: { bookings: 0, guests: 0, free_now: null, seated_now: null },
-    now_minutes: 1_280,
-    walk_in_until_minutes: 1_400,
     walk_in_free_table_ids: [],
-    largest_party_seatable_now: null,
-    days: [],
-    guest_horizon_days: 4,
-    cancel_reasons: [],
-    message_templates: [],
     ...overrides,
-  };
+  });
 }
 
 describe("the occupancy end", () => {
@@ -91,22 +65,22 @@ describe("the occupancy end", () => {
 
 describe("a party that leaves at 21:20", () => {
   const gone = booking({ status: "left", released_minutes: 1_280 });
-  const room = shift({ bookings: [gone] });
+  const evening = room({ bookings: [gone] });
 
   it("is holding its table a minute before, and not a minute after", () => {
-    expect(holdsAt(gone, 1_279)).toBe(true);
-    expect(holdsAt(gone, 1_280)).toBe(false);
+    expect(holdsDuring(gone, 1_279, 1_280)).toBe(true);
+    expect(holdsDuring(gone, 1_280, 1_281)).toBe(false);
   });
 
   it("makes the readings of the room this screen works out agree", () => {
     // The hourly bars and the width of the block on the timeline: one function, and they move
     // together.
-    expect(hourlyLoad(room).map((hour) => hour.tables)).toEqual([0, 0, 1, 1, 0, 0, 0, 0]);
+    expect(hourlyLoad(evening).map((hour) => hour.tables)).toEqual([0, 0, 1, 1, 0, 0, 0, 0]);
     expect(occupancyEnd(gone) - gone.start_minutes).toBe(80);
   });
 
   it("still counts as a party that came, on the shift's own receipt", () => {
-    const totals = shiftTotals(room);
+    const totals = shiftTotals(evening);
     expect(totals.arrived).toBe(1);
     expect(totals.noShow).toBe(0);
     expect(totals.guests).toBe(2);
@@ -115,13 +89,13 @@ describe("a party that leaves at 21:20", () => {
 
 describe("what the shift adds up to", () => {
   it("keeps walk-ins out of the booking count and names them on their own", () => {
-    const room = shift({
+    const evening = room({
       bookings: [
         booking({ id: "a", source: "app" }),
         booking({ id: "b", table_id: "t2", table_number: 2, source: "walk", party_size: 4 }),
       ],
     });
-    const totals = shiftTotals(room);
+    const totals = shiftTotals(evening);
     expect(totals.bookings).toBe(1);
     expect(totals.walkIns).toBe(1);
     expect(totals.guests).toBe(6);
@@ -129,47 +103,42 @@ describe("what the shift adds up to", () => {
 
   it("measures occupancy as table-hours held over table-hours open", () => {
     // Two tables, eight hours open: sixteen table-hours. One two-hour booking is one eighth.
-    const room = shift({ bookings: [booking()] });
-    expect(shiftTotals(room).occupancy).toBeCloseTo(120 / (480 * 2), 6);
+    const evening = room({ bookings: [booking()] });
+    expect(shiftTotals(evening).occupancy).toBeCloseTo(120 / (480 * 2), 6);
   });
 
   it("never exceeds one, however far a turn runs past closing", () => {
-    const room = shift({
+    const evening = room({
       hours: { open_minutes: 1_080, close_minutes: 1_320, closed: false },
-      tables: [table("t1", 1, 2)],
+      tables: [shiftTable({ number: 1 })],
       bookings: [booking({ start_minutes: 1_080, end_minutes: 1_560 })],
     });
-    expect(shiftTotals(room).occupancy).toBeLessThanOrEqual(1);
+    expect(shiftTotals(evening).occupancy).toBeLessThanOrEqual(1);
   });
 
   it("reports nothing at all on a day the bar is shut", () => {
-    const room = shift({
-      hours: { open_minutes: 1_080, close_minutes: 1_560, closed: true },
-      bookings: [],
-    });
-    expect(shiftTotals(room).occupancy).toBe(0);
-    expect(hourlyLoad(room)).toEqual([]);
-    expect(peakHour(hourlyLoad(room))).toBeNull();
+    const evening = room({ hours: { open_minutes: 1_080, close_minutes: 1_560, closed: true } });
+    expect(shiftTotals(evening).occupancy).toBe(0);
+    expect(hourlyLoad(evening)).toEqual([]);
+    expect(peakHour(hourlyLoad(evening))).toBeNull();
   });
 });
 
 describe("the hourly bars", () => {
   it("count a table in the hours it is actually held for", () => {
-    const room = shift({
-      bookings: [booking({ start_minutes: 1_260, end_minutes: 1_380 })],
-    });
-    const load = hourlyLoad(room);
+    const evening = room({ bookings: [booking({ start_minutes: 1_260, end_minutes: 1_380 })] });
+    const load = hourlyLoad(evening);
     expect(load.map((hour) => hour.tables)).toEqual([0, 0, 0, 1, 1, 0, 0, 0]);
     expect(peakHour(load)).toEqual({ minute: 1_260, tables: 1 });
   });
 
   it("shrink when a party leaves early", () => {
-    const room = shift({
+    const evening = room({
       bookings: [
         booking({ start_minutes: 1_260, end_minutes: 1_380, status: "left", released_minutes: 1_300 }),
       ],
     });
-    expect(hourlyLoad(room).map((hour) => hour.tables)).toEqual([0, 0, 0, 1, 0, 0, 0, 0]);
+    expect(hourlyLoad(evening).map((hour) => hour.tables)).toEqual([0, 0, 0, 1, 0, 0, 0, 0]);
   });
 });
 
@@ -185,11 +154,15 @@ describe("the tables offered to a party at the door", () => {
   it("lists every table the server names as free, the ones the party fits at first", () => {
     // Free-but-too-small tables are still drawn. A bartender looking at an empty room and reading
     // «свободного стола нет» is being told the app has lost the plot; the reason is the answer.
-    const room = shift({
-      tables: [table("t1", 1, 2), table("t2", 2, 6), table("t3", 3, 4)],
+    const evening = room({
+      tables: [
+        shiftTable({ number: 1 }),
+        shiftTable({ id: "t2", number: 2, seats: 6 }),
+        shiftTable({ id: "t3", number: 3, seats: 4 }),
+      ],
       walk_in_free_table_ids: ["t2", "t1", "t3"],
     });
-    expect(walkInOffers(room, 3).map((offer) => [offer.table.number, offer.fits])).toEqual([
+    expect(walkInOffers(evening, 3).map((offer) => [offer.table.number, offer.fits])).toEqual([
       [3, true],
       [2, true],
       [1, false],
@@ -199,33 +172,35 @@ describe("the tables offered to a party at the door", () => {
   it("offers no table the server does not name, however free the wall clock says it is", () => {
     // The night the clocks go back: seated at the first 02:00, the turn ends at the second 02:00,
     // an empty window in wall minutes that a booking at the first 02:30 does not touch.
-    const room = shift({
-      tables: [table("t1", 1, 2), table("t2", 2, 2)],
+    const evening = room({
+      tables: [shiftTable({ number: 1 }), shiftTable({ id: "t2", number: 2 })],
       bookings: [
         booking({ status: "confirmed", started: false, start_minutes: 1_590, end_minutes: 1_590 }),
         booking({ id: "b2", table_id: "t2", status: "confirmed", started: false, start_minutes: 1_590, end_minutes: 1_590 }),
       ],
       now_minutes: 1_560,
       walk_in_until_minutes: 1_560,
-      walk_in_free_table_ids: [],
     });
-    expect(walkInOffers(room, 2)).toEqual([]);
+    expect(walkInOffers(evening, 2)).toEqual([]);
   });
 
   it("ignores a table it is not drawing", () => {
-    expect(walkInOffers(shift({ walk_in_free_table_ids: ["gone"] }), 2)).toEqual([]);
+    expect(walkInOffers(room({ walk_in_free_table_ids: ["gone"] }), 2)).toEqual([]);
   });
 });
 
-describe("the tables offered for a booking being moved", () => {
-  it("does not let the booking block its own new place", () => {
-    const room = shift({
-      tables: [table("t1", 1, 2)],
-      bookings: [booking({ start_minutes: 1_200, end_minutes: 1_320 })],
+describe("the tables offered for a booking at a time", () => {
+  it("are the ones the server names as free for that time's window, in the walk-in order", () => {
+    const { slots } = availability({
+      slots: [{ start_minutes: 1_290, state: "free", evening: true, free_table_ids: ["t2", "t1"] }],
     });
-    expect(tableOffers(room, 2, 1_200, 1_320)).toEqual([]);
-    expect(tableOffers(room, 2, 1_200, 1_320, "b1").map((offer) => offer.table.number)).toEqual([
-      1,
+    expect(slotOffers(room(), slots, 1_290, 3).map((offer) => [offer.table.number, offer.fits])).toEqual([
+      [2, true],
+      [1, false],
     ]);
+  });
+
+  it("are none at a time the answer has no slot for", () => {
+    expect(slotOffers(room(), availability().slots, 1_300, 2)).toEqual([]);
   });
 });

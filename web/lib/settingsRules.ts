@@ -111,7 +111,14 @@ function isBlank(text: string): boolean {
 }
 
 function longerThan(text: string, limit: number): boolean {
-  return characters(trimmed(text)) > limit;
+  // A character is one or two UTF-16 units, so a text of no more units than the limit fits.
+  if (text.length <= limit) return false;
+  let count = 0;
+  for (const _character of trimmed(text)) {
+    count += 1;
+    if (count > limit) return true;
+  }
+  return false;
 }
 
 const LISTS = ["zones", "tables", "message_templates", "cancel_reasons", "staff"] as const satisfies readonly (keyof ListLimits)[];
@@ -300,9 +307,14 @@ export function shortestShiftMinutes(draft: SettingsDraft): number | null {
   );
 }
 
+/** Whether two plain JSON values are equal. */
+export function same(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 /** Whether two proposals differ, which is what makes the Save button live. */
 export function differs(left: SettingsDraft, right: SettingsDraft): boolean {
-  return JSON.stringify(left) !== JSON.stringify(right);
+  return !same(left, right);
 }
 
 const WEEKDAY = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];

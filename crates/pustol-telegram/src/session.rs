@@ -10,11 +10,10 @@
 //! is no second encoding to disagree with.
 
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use hmac::{KeyInit, Mac};
 use subtle::ConstantTimeEq;
 
-use crate::init_data::{BotToken, TelegramUser, VerifyError};
+use crate::init_data::{BotToken, HmacSha256, TelegramUser, VerifyError};
 
 /// A session this server issued, verified.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -71,7 +70,7 @@ pub fn verify_session(
 
 fn sign(claims: &str, token: &BotToken) -> [u8; 32] {
     let mut mac =
-        Hmac::<Sha256>::new_from_slice(&token.session_key).expect("hmac accepts any key length");
+        HmacSha256::new_from_slice(&token.session_key).expect("hmac accepts any key length");
     mac.update(claims.as_bytes());
     mac.finalize().into_bytes().into()
 }

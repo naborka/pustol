@@ -21,8 +21,8 @@ use pustol_db::Store;
 use pustol_db::ids::BarId;
 use pustol_domain::config::{BarConfig, DayHours, StaffMember, ValidConfig, WeekSchedule};
 use pustol_domain::schedule::{BarTable, TableId, Zone};
-use pustol_telegram::init_data::{BotToken, sign_for_tests};
 use pustol_telegram::Bot;
+use pustol_telegram::init_data::{BotToken, sign_for_tests};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -283,6 +283,14 @@ impl Answer {
         );
         &self.body
     }
+
+    /// The id of the booking a successful answer carries.
+    pub fn booking_id(&self) -> String {
+        self.expect_ok()["booking"]["id"]
+            .as_str()
+            .expect("an id")
+            .to_owned()
+    }
 }
 
 impl Harness {
@@ -357,8 +365,41 @@ impl Harness {
         self.send("POST", path, caller, body).await
     }
 
+    /// A guest booking a table in the app.
+    pub async fn book(&self, guest: &Caller, body: serde_json::Value) -> Answer {
+        self.post("/api/booking", guest, body).await
+    }
+
+    /// Staff recording whether the party of booking `id` turned up.
+    pub async fn mark(&self, staff: &Caller, id: &str, attendance: &str) -> Answer {
+        self.send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/attendance"),
+            staff,
+            serde_json::json!({ "attendance": attendance }),
+        )
+        .await
+    }
+
+    /// Staff moving booking `id` to where and when `to` names.
+    pub async fn move_booking(&self, staff: &Caller, id: &str, to: serde_json::Value) -> Answer {
+        self.send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            staff,
+            to,
+        )
+        .await
+    }
+
     /// A JSON call whose request says how long its body is, as a browser's does.
-    pub async fn send_sized(&self, method: &str, path: &str, caller: &Caller, body: String) -> Answer {
+    pub async fn send_sized(
+        &self,
+        method: &str,
+        path: &str,
+        caller: &Caller,
+        body: String,
+    ) -> Answer {
         self.call(
             Request::builder()
                 .method(method)

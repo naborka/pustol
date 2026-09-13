@@ -47,6 +47,14 @@ pub struct DayCount {
     pub bookings: usize,
 }
 
+/// One evening's bookings, cancelled ones left out, and its closures, as [`load_shift`] and
+/// [`load_blocks_on`] order them.
+pub(crate) struct ShiftRows {
+    pub(crate) day: ServiceDay,
+    pub(crate) bookings: Vec<BookingRecord>,
+    pub(crate) blocks: Vec<BlockRecord>,
+}
+
 impl Store {
     /// One evening as it stands at `now`.
     ///
@@ -69,9 +77,9 @@ impl Store {
 
 /// Reads one evening on a transaction that has already read the configuration in force.
 ///
-/// Every write that changes the room calls this before it commits, under the bar's lock: nothing
-/// else changes the room in between, so the answer is the room exactly as that write left it, and a
-/// failure to read it takes the write back with it.
+/// Every write that changes the room calls this, or [`evening_around`] with rows it already holds,
+/// before it commits, under the bar's lock: nothing else changes the room in between, so the answer
+/// is the room exactly as that write left it, and a failure to read it takes the write back with it.
 pub(crate) async fn read_evening(
     connection: &mut PgConnection,
     bar: BarId,
@@ -79,55 +87,87 @@ pub(crate) async fn read_evening(
     day: ServiceDay,
     now: DateTime<Utc>,
 ) -> Result<Evening> {
-    let bookings = load_shift(&mut *connection, bar, day).await?;
-    let blocks = load_blocks_on(&mut *connection, bar, day).await?;
+    let rows = read_shift(&mut *connection, bar, day).await?;
+    evening_around(connection, bar, config, rows, now).await
+}
+
+/// `day`'s bookings and closures.
+pub(crate) async fn read_shift(
+    connection: &mut PgConnection,
+    bar: BarId,
+    day: ServiceDay,
+) -> Result<ShiftRows> {
+    Ok(ShiftRows {
+        day,
+        bookings: load_shift(&mut *connection, bar, day).await?,
+        blocks: load_blocks_on(&mut *connection, bar, day).await?,
+    })
+}
+
+/// The evening `rows` are, with the day sheet and the version read around them.
+pub(crate) async fn evening_around(
+    connection: &mut PgConnection,
+    bar: BarId,
+    config: ValidConfig,
+    rows: ShiftRows,
+    now: DateTime<Utc>,
+) -> Result<Evening> {
     let today = config.current_service_day(now);
-    let days = day_counts(&mut *connection, bar, &days_from(today, STAFF_REACH_DAYS)).await?;
-    let version = sqlx::query_scalar("select version from room_version where bar_id = $1")
-        .bind(bar)
-        .fetch_one(&mut *connection)
-        .await?;
+    let (days, version) =
+        day_counts_and_version(connection, bar, &days_from(today, STAFF_REACH_DAYS)).await?;
     Ok(Evening {
         now,
-        day,
+        day: rows.day,
         today,
         config,
-        bookings,
-        blocks,
+        bookings: rows.bookings,
+        blocks: rows.blocks,
         days,
         version,
     })
 }
 
-/// How many bookings sit on each of `days`, in one read of the span.
-async fn day_counts(
+/// How many bookings sit on each of `days`, and the room's version, in one round trip.
+async fn day_counts_and_version(
     connection: &mut PgConnection,
     bar: BarId,
     days: &[ServiceDay],
-) -> Result<Vec<DayCount>> {
-    let (Some(first), Some(last)) = (days.first(), days.last()) else {
-        return Ok(Vec::new());
-    };
+) -> Result<(Vec<DayCount>, i64)> {
     let rows = sqlx::query(
-        "select service_date, count(*) as total from booking
-         where bar_id = $1 and status <> 'cancelled' and service_date between $2 and $3
-         group by service_date",
+        "select v.version, counted.service_date, counted.total
+         from room_version v
+         left join (
+             select service_date, count(*) as total from booking
+             where bar_id = $1 and status <> 'cancelled' and service_date between $2 and $3
+             group by service_date
+         ) counted on true
+         where v.bar_id = $1",
     )
     .bind(bar)
-    .bind(first.date())
-    .bind(last.date())
+    .bind(days.first().map(|day| day.date()))
+    .bind(days.last().map(|day| day.date()))
     .fetch_all(connection)
     .await?;
 
-    let counted: std::collections::HashMap<NaiveDate, i64> = rows
-        .iter()
-        .map(|row| Ok((row.try_get("service_date")?, row.try_get("total")?)))
-        .collect::<Result<_>>()?;
-    Ok(days
+    let version = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .try_get("version")?;
+    let mut counted = std::collections::HashMap::<NaiveDate, i64>::with_capacity(rows.len());
+    for row in &rows {
+        if let (Some(date), Some(total)) = (
+            row.try_get::<Option<NaiveDate>, _>("service_date")?,
+            row.try_get::<Option<i64>, _>("total")?,
+        ) {
+            counted.insert(date, total);
+        }
+    }
+    let days = days
         .iter()
         .map(|day| DayCount {
             day: *day,
             bookings: usize::try_from(counted.get(&day.date()).copied().unwrap_or(0)).unwrap_or(0),
         })
-        .collect())
+        .collect();
+    Ok((days, version))
 }

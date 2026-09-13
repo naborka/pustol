@@ -16,7 +16,7 @@
 
 import { useState, type ReactNode } from "react";
 
-import type { Limits, SettingsDraft, SettingsView } from "@/lib/api";
+import type { Limits, SettingsDraft, SettingsView, ShiftView } from "@/lib/api";
 import * as fmt from "@/lib/format";
 import { uuid } from "@/lib/ids";
 import { moveTableTo, removeStaff, removeTable, resizeTable } from "@/lib/settingsEdits";
@@ -64,8 +64,8 @@ type Ask = (change: Edit) => boolean;
 interface Context {
   draft: SettingsDraft;
   settings: SettingsView;
-  /** The settings counted each table's bookings for the evening on screen. */
-  countsShown: boolean;
+  /** How many of the evening's bookings each table holds, by table id; null until it is read. */
+  bookingsByTable: ReadonlyMap<string, number> | null;
   limits: Limits;
   editedWeekday: number;
   onEditWeekday: (weekday: number) => void;
@@ -95,10 +95,21 @@ export function sectionValue(section: Section, draft: SettingsDraft, weekday: nu
   }
 }
 
+/** How many of an evening's bookings each table holds, by table id. */
+function bookingsByTableOf(room: ShiftView): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const booking of room.bookings) {
+    if (booking.table_id !== null) {
+      counts.set(booking.table_id, (counts.get(booking.table_id) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
 export function SettingsScreen({
   settings,
   draft,
-  serviceDate,
+  room,
   editedWeekday,
   onEdit,
   onEditWeekday,
@@ -107,8 +118,8 @@ export function SettingsScreen({
 }: {
   settings: SettingsView;
   draft: SettingsDraft;
-  /** The evening on screen. A table's bookings are counted only once the settings were read for it. */
-  serviceDate: fmt.IsoDate;
+  /** The evening on screen, whose bookings each table's count is of; null until it is read. */
+  room: ShiftView | null;
   editedWeekday: number;
   onEdit: (change: Edit) => void;
   onEditWeekday: (weekday: number) => void;
@@ -126,7 +137,7 @@ export function SettingsScreen({
   const context: Context = {
     draft,
     settings,
-    countsShown: settings.service_date === serviceDate,
+    bookingsByTable: room === null ? null : bookingsByTableOf(room),
     limits,
     editedWeekday,
     onEditWeekday,
@@ -444,7 +455,7 @@ function HoursSection({ ctx }: { ctx: Context }) {
 }
 
 function RoomSection({ ctx }: { ctx: Context }) {
-  const { draft, settings, countsShown, limits, edit, allowed } = ctx;
+  const { draft, settings, bookingsByTable, limits, edit, allowed } = ctx;
   const totalSeats = draft.tables.reduce((total, table) => total + table.seats, 0);
   const largest = largestTable(draft);
   /** The number a row that has only just been tapped into being will be given. */
@@ -459,7 +470,7 @@ function RoomSection({ ctx }: { ctx: Context }) {
       {draft.tables.map((table) => {
         const existing = settings.tables.find((stored) => stored.id === table.id);
         const number = existing?.number ?? provisional++;
-        const bookingsToday = countsShown ? (existing?.bookings_today ?? 0) : 0;
+        const bookingsToday = bookingsByTable?.get(table.id) ?? 0;
         const zoneIndex = draft.zones.indexOf(table.zone);
         const nextZone =
           draft.zones[(zoneIndex + 1) % Math.max(1, draft.zones.length)] ?? table.zone;

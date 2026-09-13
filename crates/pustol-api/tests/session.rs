@@ -11,7 +11,7 @@ use chrono::TimeDelta;
 
 use common::{Caller, draft_from, harness, morning};
 
-const SETTINGS: &str = "/api/admin/settings?service_date=2026-07-30";
+const SETTINGS: &str = "/api/admin/settings";
 const SHIFT: &str = "/api/admin/shift?service_date=2026-07-30";
 
 async fn session_of(app: &common::Harness, caller: &Caller) -> String {
@@ -29,12 +29,26 @@ async fn the_session_outlasts_the_payload_it_was_exchanged_for() {
 
     let later = app.at(morning() + TimeDelta::hours(6));
     let payload = later
-        .send_raw("GET", "/api/session", Some(&bartender.credentials(morning())), None)
+        .send_raw(
+            "GET",
+            "/api/session",
+            Some(&bartender.credentials(morning())),
+            None,
+        )
         .await;
-    assert_eq!(payload.error_code(), Some("session_expired"), "the payload still expires in an hour");
+    assert_eq!(
+        payload.error_code(),
+        Some("session_expired"),
+        "the payload still expires in an hour"
+    );
 
     let answer = later
-        .send_raw("GET", "/api/session", Some(&format!("session {session}")), None)
+        .send_raw(
+            "GET",
+            "/api/session",
+            Some(&format!("session {session}")),
+            None,
+        )
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
     assert_eq!(answer.body["user"]["id"], bartender.id);
@@ -48,7 +62,12 @@ async fn a_session_ends_a_day_after_telegram_signed_the_payload() {
 
     let next_day = app.at(morning() + TimeDelta::hours(24));
     let answer = next_day
-        .send_raw("GET", "/api/session", Some(&format!("session {session}")), None)
+        .send_raw(
+            "GET",
+            "/api/session",
+            Some(&format!("session {session}")),
+            None,
+        )
         .await;
     assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
     assert_eq!(answer.error_code(), Some("session_expired"));
@@ -61,7 +80,12 @@ async fn a_session_is_counted_from_when_telegram_signed_not_from_when_it_was_exc
     let signed = morning();
     let session = app
         .at(signed + TimeDelta::minutes(50))
-        .send_raw("GET", "/api/session", Some(&bartender.credentials(signed)), None)
+        .send_raw(
+            "GET",
+            "/api/session",
+            Some(&bartender.credentials(signed)),
+            None,
+        )
         .await
         .expect_ok()["session_token"]
         .as_str()
@@ -79,7 +103,11 @@ async fn a_session_is_counted_from_when_telegram_signed_not_from_when_it_was_exc
         .at(signed + TimeDelta::hours(24))
         .send_raw("GET", "/api/session", Some(&credentials), None)
         .await;
-    assert_eq!(over.error_code(), Some("session_expired"), "not 24 hours after the exchange");
+    assert_eq!(
+        over.error_code(),
+        Some("session_expired"),
+        "not 24 hours after the exchange"
+    );
 }
 
 #[tokio::test]
@@ -88,7 +116,12 @@ async fn a_session_renewed_with_a_session_still_ends_when_the_first_one_did() {
     let first = session_of(&app, &Caller::new("Паша")).await;
     let renewed = app
         .at(morning() + TimeDelta::hours(2))
-        .send_raw("GET", "/api/session", Some(&format!("session {first}")), None)
+        .send_raw(
+            "GET",
+            "/api/session",
+            Some(&format!("session {first}")),
+            None,
+        )
         .await
         .expect_ok()["session_token"]
         .as_str()
@@ -97,7 +130,12 @@ async fn a_session_renewed_with_a_session_still_ends_when_the_first_one_did() {
 
     let over = app
         .at(morning() + TimeDelta::hours(24))
-        .send_raw("GET", "/api/session", Some(&format!("session {renewed}")), None)
+        .send_raw(
+            "GET",
+            "/api/session",
+            Some(&format!("session {renewed}")),
+            None,
+        )
         .await;
     assert_eq!(over.error_code(), Some("session_expired"));
 }
@@ -111,7 +149,12 @@ async fn an_edited_session_is_refused_as_not_from_telegram() {
     edited.push(if last == '0' { '1' } else { '0' });
 
     let answer = app
-        .send_raw("GET", "/api/session", Some(&format!("session {edited}")), None)
+        .send_raw(
+            "GET",
+            "/api/session",
+            Some(&format!("session {edited}")),
+            None,
+        )
         .await;
     assert_eq!(answer.error_code(), Some("not_telegram"));
 }
@@ -141,7 +184,10 @@ async fn a_username_kept_in_a_session_does_not_claim_a_seat_offered_after_it() {
         .find(|member| member["username"] == serde_json::json!(newcomer.username))
         .expect("invited")
         .clone();
-    assert_eq!(seat["bound"], false, "the name may have passed to somebody else since: {seat}");
+    assert_eq!(
+        seat["bound"], false,
+        "the name may have passed to somebody else since: {seat}"
+    );
 
     app.at(morning() + TimeDelta::minutes(2))
         .get(SHIFT, &newcomer)
@@ -164,8 +210,13 @@ async fn a_session_never_writes_back_a_name_the_account_has_since_changed() {
         .await
         .expect_ok();
 
-    let answer = app.send_raw("GET", "/api/session", Some(&session), None).await;
-    assert_eq!(answer.expect_ok()["user"]["username"], serde_json::json!(after.username));
+    let answer = app
+        .send_raw("GET", "/api/session", Some(&session), None)
+        .await;
+    assert_eq!(
+        answer.expect_ok()["user"]["username"],
+        serde_json::json!(after.username)
+    );
 
     app.send_raw(
         "POST",
@@ -195,8 +246,13 @@ async fn an_older_payload_never_writes_back_a_name_a_newer_one_replaced() {
     let later = app.at(morning() + TimeDelta::minutes(10));
     later.get("/api/session", &after).await.expect_ok();
 
-    let answer = later.send_raw("GET", "/api/session", Some(&signed_early), None).await;
-    assert_eq!(answer.expect_ok()["user"]["username"], serde_json::json!(after.username));
+    let answer = later
+        .send_raw("GET", "/api/session", Some(&signed_early), None)
+        .await;
+    assert_eq!(
+        answer.expect_ok()["user"]["username"],
+        serde_json::json!(after.username)
+    );
 
     later
         .send_raw(
@@ -207,7 +263,11 @@ async fn an_older_payload_never_writes_back_a_name_a_newer_one_replaced() {
         )
         .await
         .expect_ok();
-    let shift = later.get(SHIFT, &Caller::manager()).await.expect_ok().clone();
+    let shift = later
+        .get(SHIFT, &Caller::manager())
+        .await
+        .expect_ok()
+        .clone();
     assert_eq!(
         shift["bookings"][0]["guest_username"],
         serde_json::json!(after.username),
@@ -228,7 +288,10 @@ async fn a_telegram_profile_holding_a_nul_character_is_refused_as_text_the_bar_c
         r#"{{"id":5550001,"first_name":"Ан{escaped_nul}на","username":"nul_guest","language_code":"ru"}}"#
     );
     let init_data = sign_for_tests(
-        &[("auth_date", &morning().timestamp().to_string()), ("user", &user)],
+        &[
+            ("auth_date", &morning().timestamp().to_string()),
+            ("user", &user),
+        ],
         &BotToken::new(common::TOKEN),
     );
     let session = pustol_telegram::session::issue(
@@ -248,14 +311,20 @@ async fn a_telegram_profile_holding_a_nul_character_is_refused_as_text_the_bar_c
     for credentials in [format!("tma {init_data}"), format!("session {session}")] {
         for path in ["/api/session", SHIFT] {
             let answer = app.send_raw("GET", path, Some(&credentials), None).await;
-            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{path}: {}", answer.body);
+            assert_eq!(
+                answer.status,
+                StatusCode::BAD_REQUEST,
+                "{path}: {}",
+                answer.body
+            );
             assert_eq!(answer.error_code(), Some("text_invalid"), "{path}");
         }
     }
-    let stored: i64 = sqlx::query_scalar("select count(*) from telegram_user where id in (5550001, 5550002)")
-        .fetch_one(app.store.pool())
-        .await
-        .expect("counted");
+    let stored: i64 =
+        sqlx::query_scalar("select count(*) from telegram_user where id in (5550001, 5550002)")
+            .fetch_one(app.store.pool())
+            .await
+            .expect("counted");
     assert_eq!(stored, 0);
 }
 
@@ -267,10 +336,18 @@ async fn a_telegram_profile_storage_cannot_keep_is_refused_before_anything_is_st
 
     let app = harness().await;
     let token = BotToken::new(common::TOKEN);
-    for (id, first_name) in [(5_560_001, ""), (5_560_002, "   "), (0, "Анна"), (-1, "Анна")] {
+    for (id, first_name) in [
+        (5_560_001, ""),
+        (5_560_002, "   "),
+        (0, "Анна"),
+        (-1, "Анна"),
+    ] {
         let user = format!(r#"{{"id":{id},"first_name":"{first_name}","language_code":"ru"}}"#);
         let payload = sign_for_tests(
-            &[("auth_date", &morning().timestamp().to_string()), ("user", &user)],
+            &[
+                ("auth_date", &morning().timestamp().to_string()),
+                ("user", &user),
+            ],
             &token,
         );
         let session = pustol_telegram::session::issue(
@@ -294,7 +371,12 @@ async fn a_telegram_profile_storage_cannot_keep_is_refused_before_anything_is_st
             ] {
                 let answer = app.send_raw(method, path, Some(&credentials), None).await;
                 let what = format!("{id} {first_name:?} {method} {path}");
-                assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{what}: {}", answer.body);
+                assert_eq!(
+                    answer.status,
+                    StatusCode::BAD_REQUEST,
+                    "{what}: {}",
+                    answer.body
+                );
                 assert_eq!(answer.error_code(), Some("text_invalid"), "{what}");
             }
         }

@@ -10,7 +10,7 @@ use common::{default_config, id};
 
 fn draft_of(config: &BarConfig) -> Draft {
     Draft {
-        version: chrono::DateTime::UNIX_EPOCH,
+        version: 1,
         name: config.name.clone(),
         address: config.address.clone(),
         timezone: config.timezone.name().to_owned(),
@@ -53,9 +53,7 @@ fn draft_of(config: &BarConfig) -> Draft {
 #[test]
 fn a_proposal_that_changes_nothing_resolves_to_what_is_already_in_force() {
     let current = default_config();
-    let resolved = draft_of(&current)
-        .resolve(&current)
-        .expect("resolvable");
+    let resolved = draft_of(&current).resolve(&current).expect("resolvable");
     assert_eq!(resolved, current);
 }
 
@@ -101,7 +99,11 @@ fn a_table_in_the_shapes_the_previous_app_sent_is_still_understood() {
         serde_json::json!({ "id": existing, "seats": 6, "zone": "Зал" }),
     ] {
         let table: TableDraft = serde_json::from_value(shape.clone()).expect("understood");
-        assert_eq!((table.id, table.seats, table.zone.as_str()), (existing, 6, "Зал"), "{shape}");
+        assert_eq!(
+            (table.id, table.seats, table.zone.as_str()),
+            (existing, 6, "Зал"),
+            "{shape}"
+        );
     }
 
     let added = || {
@@ -168,9 +170,7 @@ fn a_table_the_proposal_leaves_out_is_retired_with_its_number_and_history_intact
         .clone();
 
     let mut draft = draft_of(&current);
-    draft
-        .tables
-        .retain(|table| table.id != removed.id.0);
+    draft.tables.retain(|table| table.id != removed.id.0);
 
     let resolved = draft.resolve(&current).expect("resolvable");
     let still_there = resolved
@@ -192,9 +192,7 @@ fn a_table_the_proposal_leaves_out_is_retired_with_its_number_and_history_intact
 fn a_table_already_retired_stays_retired() {
     let mut current = default_config();
     current.tables[0].retired = true;
-    let resolved = draft_of(&current)
-        .resolve(&current)
-        .expect("resolvable");
+    let resolved = draft_of(&current).resolve(&current).expect("resolvable");
     assert!(resolved.tables.iter().any(|table| table.retired));
 }
 
@@ -246,7 +244,11 @@ fn a_retired_table_named_again_comes_back_with_its_own_number() {
     assert!(!back.retired);
     assert_eq!(back.number, 7, "its number was never anybody else's");
     assert_eq!(back.seats, 2);
-    assert_eq!(resolved.tables.len(), current.tables.len(), "no table was added");
+    assert_eq!(
+        resolved.tables.len(),
+        current.tables.len(),
+        "no table was added"
+    );
 }
 
 #[test]
@@ -306,9 +308,7 @@ fn an_existing_binding_survives_a_round_trip_through_the_settings_screen() {
         .expect("fixture has a bound member")
         .clone();
 
-    let resolved = draft_of(&current)
-        .resolve(&current)
-        .expect("resolvable");
+    let resolved = draft_of(&current).resolve(&current).expect("resolvable");
     assert_eq!(
         resolved
             .staff
@@ -365,8 +365,5 @@ fn a_blank_zone_name_is_refused_before_anything_else_is_considered() {
     let current = default_config();
     let mut draft = draft_of(&current);
     draft.zones.push("   ".to_owned());
-    assert!(matches!(
-        draft.resolve(&current),
-        Err(DraftError::Zone(_))
-    ));
+    assert!(matches!(draft.resolve(&current), Err(DraftError::Zone(_))));
 }

@@ -9,9 +9,9 @@ use pustol_domain::allocator::BookingId;
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
+use crate::Store;
 use crate::error::Result;
 use crate::ids::{BarId, TelegramUserId};
-use crate::Store;
 
 /// How long a claimed message is kept from other workers while it is being delivered.
 ///
@@ -56,6 +56,15 @@ pub struct PendingNotification {
     pub lease: DateTime<Utc>,
 }
 
+/// The condition that the claim a delivery result is for is still the message's: the same row, lease
+/// and attempt, not yet settled. Binds `$1` to `$3`, which [`of_claim`] fills.
+macro_rules! still_claimed {
+    () => {
+        " where id = $1 and scheduled_for = $2 and attempts = $3
+            and sent_at is null and gave_up_at is null"
+    };
+}
+
 impl Store {
     /// Queues one of the bar's own messages, chosen by staff from a guest's card.
     ///
@@ -79,13 +88,14 @@ impl Store {
         crate::lock_bar(&mut transaction, bar).await?;
         let config = crate::bar::load_config(&mut transaction, bar).await?;
         let record = crate::bookings::fetch_booking(&mut transaction, bar, booking).await?;
-        let Some(recipient) = record
-            .telegram_user_id
-            .filter(|_| record.reachable_by_bot)
-        else {
+        let Some(recipient) = record.telegram_user_id.filter(|_| record.reachable_by_bot) else {
             return Err(crate::Error::NoBotChat);
         };
-        if !config.message_templates.iter().any(|offered| offered == text) {
+        if !config
+            .message_templates
+            .iter()
+            .any(|offered| offered == text)
+        {
             return Err(crate::Error::UnknownMessage);
         }
         let id = enqueue(
@@ -118,30 +128,29 @@ impl Store {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<PendingNotification>> {
-        let mut transaction = self.pool().begin().await?;
-        sqlx::query(
-            "update notification n
-             set gave_up_at = $1,
-                 last_error = case when b.ends_at <= $1 then 'the evening is over'
-                                   else 'the booking is no longer upcoming' end
-             from booking b
-             where b.id = n.booking_id
-               and n.sent_at is null and n.gave_up_at is null and n.scheduled_for <= $1
-               and n.kind in ('reminder', 'cancelled', 'moved')
-               and (b.ends_at <= $1
-                    or (n.kind = 'reminder' and (b.status = 'cancelled' or b.starts_at <= $1)))",
-        )
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-
+        // One statement: every part sees the same snapshot, so the messages it settles are set aside
+        // from the ones it claims by identity rather than by what the settling wrote.
         let rows = sqlx::query(
-            "with due as (
+            "with settled as (
+                 update notification n
+                 set gave_up_at = $1,
+                     last_error = case when b.ends_at <= $1 then 'the evening is over'
+                                       else 'the booking is no longer upcoming' end
+                 from booking b
+                 where b.id = n.booking_id
+                   and n.sent_at is null and n.gave_up_at is null and n.scheduled_for <= $1
+                   and n.kind in ('reminder', 'cancelled', 'moved')
+                   and (b.ends_at <= $1
+                        or (n.kind = 'reminder' and (b.status = 'cancelled' or b.starts_at <= $1)))
+                 returning n.id
+             ),
+             due as (
                  select n.id
                  from notification n
                  join booking b on b.id = n.booking_id
                  join telegram_user u on u.id = n.telegram_user_id
                  where n.sent_at is null and n.gave_up_at is null and n.scheduled_for <= $1
+                   and n.id not in (select id from settled)
                    and (
                        n.kind <> 'reminder'
                        or (b.table_id is not null and u.reminders_opted_in and u.can_receive_messages)
@@ -158,9 +167,8 @@ impl Store {
         .bind(now)
         .bind(limit)
         .bind(now + CLAIM_LEASE)
-        .fetch_all(&mut *transaction)
+        .fetch_all(self.pool())
         .await?;
-        transaction.commit().await?;
 
         rows.into_iter()
             .map(|row| {
@@ -180,14 +188,13 @@ impl Store {
 
     /// Records a delivered message.
     pub async fn mark_sent(&self, claimed: &PendingNotification, now: DateTime<Utc>) -> Result<()> {
-        sqlx::query(
-            "update notification set sent_at = $4, last_error = null
-             where id = $1 and scheduled_for = $2 and attempts = $3
-               and sent_at is null and gave_up_at is null",
+        of_claim(
+            concat!(
+                "update notification set sent_at = $4, last_error = null",
+                still_claimed!()
+            ),
+            claimed,
         )
-        .bind(claimed.id)
-        .bind(claimed.lease)
-        .bind(claimed.attempts)
         .bind(now)
         .execute(self.pool())
         .await?;
@@ -201,14 +208,13 @@ impl Store {
         retry_at: DateTime<Utc>,
         error: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "update notification set scheduled_for = $4, last_error = $5
-             where id = $1 and scheduled_for = $2 and attempts = $3
-               and sent_at is null and gave_up_at is null",
+        of_claim(
+            concat!(
+                "update notification set scheduled_for = $4, last_error = $5",
+                still_claimed!()
+            ),
+            claimed,
         )
-        .bind(claimed.id)
-        .bind(claimed.lease)
-        .bind(claimed.attempts)
         .bind(retry_at)
         .bind(error)
         .execute(self.pool())
@@ -226,15 +232,14 @@ impl Store {
         retry_at: DateTime<Utc>,
         error: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "update notification
-             set scheduled_for = $4, last_error = $5, attempts = greatest(attempts - 1, 0)
-             where id = $1 and scheduled_for = $2 and attempts = $3
-               and sent_at is null and gave_up_at is null",
+        of_claim(
+            concat!(
+                "update notification
+                 set scheduled_for = $4, last_error = $5, attempts = greatest(attempts - 1, 0)",
+                still_claimed!()
+            ),
+            claimed,
         )
-        .bind(claimed.id)
-        .bind(claimed.lease)
-        .bind(claimed.attempts)
         .bind(retry_at)
         .bind(error)
         .execute(self.pool())
@@ -250,20 +255,30 @@ impl Store {
         now: DateTime<Utc>,
         error: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "update notification set gave_up_at = $4, last_error = $5
-             where id = $1 and scheduled_for = $2 and attempts = $3
-               and sent_at is null and gave_up_at is null",
+        of_claim(
+            concat!(
+                "update notification set gave_up_at = $4, last_error = $5",
+                still_claimed!()
+            ),
+            claimed,
         )
-        .bind(claimed.id)
-        .bind(claimed.lease)
-        .bind(claimed.attempts)
         .bind(now)
         .bind(error)
         .execute(self.pool())
         .await?;
         Ok(())
     }
+}
+
+/// `sql`, with the identity of `claimed` bound to `$1`, `$2` and `$3`.
+fn of_claim<'q>(
+    sql: &'static str,
+    claimed: &'q PendingNotification,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    sqlx::query(sql)
+        .bind(claimed.id)
+        .bind(claimed.lease)
+        .bind(claimed.attempts)
 }
 
 /// Puts a message in the outbox, on whichever transaction the caller is already in.
@@ -297,9 +312,8 @@ pub(crate) async fn enqueue(
 
 /// The reminder a booking should have, for the window it now has.
 ///
-/// One function for taking a booking and for moving one, because they ask the same question. Kept
-/// as two — insert once, then update what was inserted — a booking taken too late for a reminder
-/// and then moved later got none, and one moved past its reminder and back got none either.
+/// One function for taking a booking and for moving one, because they ask the same question: the
+/// reminder follows the window the booking has now, however it came to have it.
 ///
 /// A reminder whose moment has already passed is not kept: telling somebody three hours in advance
 /// about a table they booked ten minutes ago is noise. One already delivered is left alone. Whether

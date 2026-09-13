@@ -913,8 +913,7 @@ export function Toast({ message }: { message: ToastMessage | null }) {
         left: SPACE[3],
         right: SPACE[3],
         bottom: SPACE[2],
-        // Above the sheet's backdrop and panel: a failure reported from inside a sheet used to be
-        // drawn under it, so the only sign anything happened was a buzz.
+        // Above the sheet's backdrop and panel, so a failure reported from inside a sheet is seen.
         zIndex: LAYER.toast,
         background: "var(--txt)",
         borderRadius: RADIUS.md,
@@ -1020,31 +1019,80 @@ export function StaleNotice({
 }) {
   return (
     <Card gap={SPACE[2]}>
-      <Note tone="warn">
-        {readFailureText(failure, audience, "Не удалось обновить — показано прежнее.")}
-      </Note>
-      {canRetry(failure) ? <CardAction label="Повторить" onClick={onRetry} /> : null}
+      <ReadFailed
+        failure={failure}
+        audience={audience}
+        generic="Не удалось обновить — показано прежнее."
+        retryLabel="Повторить"
+        onRetry={onRetry}
+      />
     </Card>
   );
 }
 
-/** A read with nothing on screen failed: why, and a way to ask again where asking again can help. */
+/** A read failed: why, and a way to ask again where asking again can help. */
 export function ReadFailed({
   failure,
   audience,
   generic,
+  retryLabel = "Попробовать снова",
   onRetry,
 }: {
   failure: ApiFailure;
   audience: Audience;
   /** What to say while asking again may help. */
   generic: string;
+  retryLabel?: string;
   onRetry: () => void;
 }) {
   return (
     <>
       <Note tone="warn">{readFailureText(failure, audience, generic)}</Note>
-      {canRetry(failure) ? <CardAction label="Попробовать снова" onClick={onRetry} /> : null}
+      {canRetry(failure) ? <CardAction label={retryLabel} onClick={onRetry} /> : null}
+    </>
+  );
+}
+
+/**
+ * A read's answer, however far it has got: a spinner until there is one, why it failed while there
+ * is none, and once there is one, the answer with a notice over it when reading it again failed.
+ */
+export function ReadView<T>({
+  value,
+  failure,
+  audience,
+  generic,
+  loading,
+  onRetry,
+  padding,
+  children,
+}: {
+  value: T | null;
+  failure: ApiFailure | null;
+  audience: Audience;
+  /** What a failure with nothing on screen says while asking again may help. */
+  generic: string;
+  /** What the spinner says it is reading. */
+  loading: string;
+  onRetry: () => void;
+  /** Around the failure and the notice, for an answer that sets its own padding. */
+  padding?: string;
+  children: (value: T) => ReactNode;
+}) {
+  const framed = (node: ReactNode) =>
+    padding === undefined ? node : <div style={{ padding }}>{node}</div>;
+  if (value === null) {
+    if (failure === null) return <Spinner label={loading} />;
+    return framed(
+      <Card gap={SPACE[2]}>
+        <ReadFailed failure={failure} audience={audience} generic={generic} onRetry={onRetry} />
+      </Card>,
+    );
+  }
+  return (
+    <>
+      {failure ? framed(<StaleNotice failure={failure} audience={audience} onRetry={onRetry} />) : null}
+      {children(value)}
     </>
   );
 }

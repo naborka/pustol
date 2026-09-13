@@ -16,18 +16,17 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 
 import type {
-  Availability,
   GuestBooking,
   ShiftBooking,
   ShiftDay,
   ShiftTable,
   ShiftView,
+  StaffAvailability,
 } from "@/lib/api";
 import type { ApiFailure } from "@/lib/errors";
 import * as fmt from "@/lib/format";
-import { tableOffers, walkInOffers } from "@/lib/occupancy";
+import { offersOf, slotOffers, walkInOffers, type TableOffer } from "@/lib/occupancy";
 import type { Refusal } from "@/lib/outcomes";
-import type { TableOffer } from "@/lib/occupancy";
 import { trimmed } from "@/lib/settingsRules";
 import { standingOf, statusLabel } from "@/lib/status";
 import { openChatWith } from "@/lib/telegram";
@@ -39,14 +38,13 @@ import {
   Note,
   PartySizeGrid,
   Pressable,
-  ReadFailed,
+  ReadView,
   SectionLabel,
   Separator,
   Sheet,
   SheetChoice,
   SheetTitle,
   SlotGrid,
-  Spinner,
   TextField,
 } from "./ui";
 
@@ -756,6 +754,32 @@ function TableChoiceList({
   );
 }
 
+/** The evening's times as staff read them: a spinner, why they could not be read, or `children`. */
+function TimesRead({
+  availability,
+  loadFailure,
+  onRetry,
+  children,
+}: {
+  availability: StaffAvailability | null;
+  loadFailure: ApiFailure | null;
+  onRetry: () => void;
+  children: (availability: StaffAvailability) => ReactNode;
+}) {
+  return (
+    <ReadView
+      value={availability}
+      failure={loadFailure}
+      audience="staff"
+      generic="Не удалось прочитать свободные окна."
+      loading="Считаем свободные окна"
+      onRetry={onRetry}
+    >
+      {children}
+    </ReadView>
+  );
+}
+
 /** The evening's arrival times, or why there are none to show. */
 function SlotSection({
   availability,
@@ -766,7 +790,7 @@ function SlotSection({
   onTaken,
   onRetry,
 }: {
-  availability: Availability | null;
+  availability: StaffAvailability | null;
   chosen: number | null;
   loadFailure: ApiFailure | null;
   stale: boolean;
@@ -774,39 +798,50 @@ function SlotSection({
   onTaken: () => void;
   onRetry: () => void;
 }) {
-  const offered = (availability?.slots ?? []).filter((slot) => slot.state !== "past");
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
       <SectionLabel>Время</SectionLabel>
-      {availability === null ? (
-        loadFailure ? (
-          <>
-            <ReadFailed
-              failure={loadFailure}
-              audience="staff"
-              generic="Не удалось прочитать свободные окна."
-              onRetry={onRetry}
+      <TimesRead availability={availability} loadFailure={loadFailure} onRetry={onRetry}>
+        {(times) => {
+          const offered = times.slots.filter((slot) => slot.state !== "past");
+          return offered.length === 0 ? (
+            <Note tone="warn">В этот вечер не осталось ни одного времени.</Note>
+          ) : (
+            <SlotGrid
+              slots={offered}
+              chosen={chosen}
+              onPick={onPick}
+              onTaken={onTaken}
+              height={40}
+              fontSize={TEXT.base}
+              gap={SPACE[1] + 2}
+              stale={stale}
             />
-          </>
-        ) : (
-          <Spinner label="Считаем свободные окна" />
-        )
-      ) : offered.length === 0 ? (
-        <Note tone="warn">В этот вечер не осталось ни одного времени.</Note>
-      ) : (
-        <SlotGrid
-          slots={offered}
-          chosen={chosen}
-          onPick={onPick}
-          onTaken={onTaken}
-          height={40}
-          fontSize={TEXT.base}
-          gap={SPACE[1] + 2}
-          stale={stale}
-        />
-      )}
+          );
+        }}
+      </TimesRead>
     </div>
   );
+}
+
+/**
+ * The tables the times on screen name as free at `minutes`, none while those times answer a question
+ * the sheet has since changed. At `keptAt`, a moved booking's own start, the tables free for its own
+ * stored window, which no slot of the current grid need describe.
+ */
+function offersAt(
+  shift: ShiftView,
+  availability: StaffAvailability | null,
+  timesPending: boolean,
+  minutes: number,
+  partySize: number,
+  keptAt: number | null = null,
+): TableOffer[] {
+  if (availability === null || timesPending) return [];
+  if (minutes === keptAt && availability.kept_free_table_ids !== null) {
+    return offersOf(shift, availability.kept_free_table_ids, partySize);
+  }
+  return slotOffers(shift, availability.slots, minutes, partySize);
 }
 
 /** One table a party could be put at, or one standing empty that they do not fit at. */
@@ -858,7 +893,6 @@ export function ManualBookingSheet({
   open,
   shift,
   maxParty,
-  turnMinutes,
   availability,
   partySize,
   chosenMinutes,
@@ -878,8 +912,7 @@ export function ManualBookingSheet({
   open: boolean;
   shift: ShiftView | null;
   maxParty: number;
-  turnMinutes: number;
-  availability: Availability | null;
+  availability: StaffAvailability | null;
   partySize: number;
   chosenMinutes: number | null;
   chosenTableId: string | null;
@@ -899,7 +932,7 @@ export function ManualBookingSheet({
   if (!open) return null;
   const offers =
     shift && chosenMinutes !== null
-      ? tableOffers(shift, partySize, chosenMinutes, chosenMinutes + turnMinutes)
+      ? offersAt(shift, availability, timesPending, chosenMinutes, partySize)
       : [];
   const table = chosenTable(offers, chosenTableId);
   const ready = trimmed(guestName).length > 0 && chosenMinutes !== null && table !== null;
@@ -991,7 +1024,7 @@ export function MoveBookingSheet({
   maxParty: number;
   /** How many are coming now. «Нас будет шесть» is the call a bar takes most. */
   partySize: number;
-  availability: Availability | null;
+  availability: StaffAvailability | null;
   chosenMinutes: number | null;
   chosenTableId: string | null;
   loadFailure: ApiFailure | null;
@@ -1009,7 +1042,14 @@ export function MoveBookingSheet({
   const started = booking.started;
   const minutes = started ? booking.start_minutes : (chosenMinutes ?? booking.start_minutes);
   const until = minutes === booking.start_minutes ? booking.end_minutes : minutes + turnMinutes;
-  const offers = tableOffers(shift, partySize, minutes, until, booking.id);
+  const offers = offersAt(
+    shift,
+    availability,
+    timesPending,
+    minutes,
+    partySize,
+    booking.start_minutes,
+  );
   const table = chosenTable(offers, chosenTableId ?? booking.table_id);
   const retimed = minutes !== booking.start_minutes;
   const resized = partySize !== booking.party_size;
@@ -1054,9 +1094,14 @@ export function MoveBookingSheet({
         </div>
 
         {started ? (
-          <Note tone="warn">
-            Бронь уже началась — время не меняем. Стол можно поменять в любой момент.
-          </Note>
+          <>
+            <Note tone="warn">
+              Бронь уже началась — время не меняем. Стол можно поменять в любой момент.
+            </Note>
+            <TimesRead availability={availability} loadFailure={loadFailure} onRetry={onRetry}>
+              {() => null}
+            </TimesRead>
+          </>
         ) : (
           <SlotSection
             availability={availability}

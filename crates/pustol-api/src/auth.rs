@@ -19,7 +19,7 @@ use pustol_telegram::init_data::{CLOCK_SKEW, TelegramUser};
 use pustol_telegram::session::{issue, verify_session};
 use pustol_telegram::{BotToken, verify};
 
-use crate::body::refuse_nul;
+use crate::body::nul_refused;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -63,18 +63,13 @@ pub struct Authenticated {
     user: TelegramUser,
     proof: Proof,
     /// When the proof this caller holds stops being accepted.
-    pub expires_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
 }
 
 impl Authenticated {
     #[must_use]
     pub const fn user_id(&self) -> TelegramUserId {
         TelegramUserId(self.user.id)
-    }
-
-    #[must_use]
-    pub const fn proof(&self) -> Proof {
-        self.proof
     }
 
     /// The account as storage knows it, and what it may do.
@@ -133,42 +128,28 @@ impl FromRequestParts<AppState> for Authenticated {
 
         if let Some(payload) = header.strip_prefix(PAYLOAD_SCHEME) {
             let verified = verify(payload, state.bot_token(), state.now(), MAX_INIT_DATA_AGE)?;
-            return Self::accepted(
-                verified.user,
-                Proof::Telegram {
+            refuse_unstorable(&verified.user)?;
+            return Ok(Self {
+                user: verified.user,
+                proof: Proof::Telegram {
                     signed_at: verified.auth_date,
                 },
-                verified.auth_date + SESSION_LIFETIME,
-            );
+                expires_at: verified.auth_date + SESSION_LIFETIME,
+            });
         }
         if let Some(session) = header.strip_prefix(SESSION_SCHEME) {
             let verified = verify_session(session, state.bot_token(), state.now())?;
-            return Self::accepted(verified.user, Proof::Session, verified.expires_at);
+            refuse_unstorable(&verified.user)?;
+            return Ok(Self {
+                user: verified.user,
+                proof: Proof::Session,
+                expires_at: verified.expires_at,
+            });
         }
         Err(ApiError::unauthorised(
             "no_credentials",
             "expected an Authorization header of the form `tma <initData>` or `session <token>`",
         ))
-    }
-}
-
-impl Authenticated {
-    /// A caller whose proof holds, unless their profile is one storage cannot keep.
-    ///
-    /// The only way to build the value every handler reaches storage through, for a payload and a
-    /// session alike, since a session carries the profile it was issued with. So no signed profile
-    /// reaches a database check: one that broke the account row's rules came back as a server fault.
-    fn accepted(
-        user: TelegramUser,
-        proof: Proof,
-        expires_at: DateTime<Utc>,
-    ) -> Result<Self, ApiError> {
-        refuse_unstorable(&user)?;
-        Ok(Self {
-            user,
-            proof,
-            expires_at,
-        })
     }
 }
 
@@ -190,8 +171,17 @@ fn refuse_unstorable(user: &TelegramUser) -> Result<(), ApiError> {
             "the Telegram profile's first name is blank",
         ));
     }
-    let profile = serde_json::to_value(user).expect("a profile is plain data");
-    refuse_nul(&profile, "the Telegram profile")
+    let texts = [
+        Some(&user.first_name),
+        user.last_name.as_ref(),
+        user.username.as_ref(),
+        user.language_code.as_ref(),
+        user.photo_url.as_ref(),
+    ];
+    if texts.into_iter().flatten().any(|text| text.contains('\0')) {
+        return Err(nul_refused("the Telegram profile"));
+    }
+    Ok(())
 }
 
 /// A caller who is on the bar's admin roster.

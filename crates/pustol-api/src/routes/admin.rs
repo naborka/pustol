@@ -12,12 +12,15 @@
 use axum::extract::State;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use pustol_db::bar::Settings;
 use pustol_db::bookings::{Attendance, Channel, MoveTo, MoveWords, NewBooking};
 use pustol_db::evening::Evening;
 use pustol_db::records::BookingRecord;
 use pustol_domain::config::ValidConfig;
 use pustol_domain::draft::Draft;
-use pustol_domain::{BookingId, ServiceDay, TableId};
+use pustol_domain::allocator::open_tables_for;
+use pustol_domain::slots::{open_tables_at, slot_list};
+use pustol_domain::{BarTable, BlockReason, BookingId, GuestName, TableId};
 use pustol_telegram::messages;
 use uuid::Uuid;
 
@@ -27,9 +30,10 @@ use crate::dto::{
     AttendanceRequest, Availability, AvailabilityQuery, BlockRequest, CancelRequest, Hours,
     LimitsView, MessageRequest, MoveRequest, NoteRequest, ReconcileRequest, ReconciliationView,
     SavedSettingsView, SettingsTable, SettingsView, ShiftBooking, ShiftQuery, ShiftView,
-    StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest, in_calendar,
+    StaffAvailability, StaffBookingRequest, StaffSlotView, StaffView, UnblockRequest,
+    WalkInRequest,
 };
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::params::{RequestPath, RequestQuery};
 use crate::state::AppState;
 
@@ -66,23 +70,35 @@ fn drawn_in(record: &BookingRecord, evening: &Evening) -> ShiftBooking {
     ShiftBooking::of(record, &evening.config, evening.now)
 }
 
+/// Arrival times for a party on one shift, each with the tables free for it, a booking being moved
+/// set aside, and the tables free for that booking's own window.
 async fn availability(
     State(state): State<AppState>,
     _staff: Staff,
     RequestQuery(query): RequestQuery<AvailabilityQuery>,
-) -> ApiResult<Json<Availability>> {
+) -> ApiResult<Json<StaffAvailability>> {
     let day = query.service_date.day()?;
     let moving: Vec<BookingId> = query.ignoring.map(BookingId).into_iter().collect();
-    let reading = state
-        .store
-        .availability(state.bar, day, query.party_size, state.now(), &moving)
-        .await?;
-    Ok(Json(Availability::of(
-        day,
-        query.party_size,
-        &reading.config,
-        &reading.slots,
-    )))
+    let room = state.store.room(state.bar, day).await?;
+    let asking = room.query(query.party_size, state.now(), &moving);
+    let slots = slot_list(&asking);
+    let kept_free_table_ids = moving
+        .first()
+        .and_then(|id| room.booking(*id))
+        .map(|booking| table_ids(&open_tables_for(&asking.request(booking.window))));
+    Ok(Json(StaffAvailability {
+        offer: Availability::drawn(day, query.party_size, &room.config, &slots, |slot, view| {
+            StaffSlotView {
+                slot: view,
+                free_table_ids: table_ids(&open_tables_at(&asking, slot)),
+            }
+        }),
+        kept_free_table_ids,
+    }))
+}
+
+fn table_ids(tables: &[&BarTable]) -> Vec<Uuid> {
+    tables.iter().map(|table| table.id.0).collect()
 }
 
 /// A booking staff just wrote, and the evening it is on.
@@ -98,12 +114,7 @@ async fn create_booking(
     JsonBody(request): JsonBody<StaffBookingRequest>,
 ) -> ApiResult<Json<BookedView>> {
     let service_day = request.service_date.day()?;
-    if request.guest_name.trim().is_empty() {
-        return Err(ApiError::bad_request(
-            "blank_guest_name",
-            "a booking needs a name to call out",
-        ));
-    }
+    let guest_name = GuestName::new(&request.guest_name)?;
     let created = state
         .store
         .create_booking(
@@ -113,7 +124,7 @@ async fn create_booking(
                 start_minutes: request.start_minutes,
                 party_size: request.party_size,
                 channel: Channel::Staff {
-                    guest_name: request.guest_name.trim().to_owned(),
+                    guest_name,
                     table: request.table_id.map(TableId),
                 },
                 // A booking taken at the door has no account behind it, so there is nobody to
@@ -345,12 +356,7 @@ async fn block(
     JsonBody(request): JsonBody<BlockRequest>,
 ) -> ApiResult<Json<ClosedView>> {
     let day = request.service_date.day()?;
-    if request.reason.trim().is_empty() {
-        return Err(ApiError::bad_request(
-            "missing_block_reason",
-            "closing a table needs a reason staff can read later",
-        ));
-    }
+    let reason = BlockReason::new(&request.reason)?;
     let tables: Vec<TableId> = request.table_ids.into_iter().map(TableId).collect();
     let closed = state
         .store
@@ -358,7 +364,7 @@ async fn block(
             state.bar,
             day,
             &tables,
-            request.reason.trim(),
+            &reason,
             Some(staff.viewer.account.id),
             state.now(),
         )
@@ -393,12 +399,7 @@ async fn unblock(
     let tables: Vec<TableId> = request.table_ids.into_iter().map(TableId).collect();
     let reopened = state
         .store
-        .unblock_tables(
-            state.bar,
-            request.service_date.day()?,
-            &tables,
-            state.now(),
-        )
+        .unblock_tables(state.bar, request.service_date.day()?, &tables, state.now())
         .await?;
     Ok(Json(ReopenedView {
         reconciliation: ReconciliationView::of(&reopened.reconciliation),
@@ -436,65 +437,32 @@ async fn reconcile_shift(
     }))
 }
 
-async fn settings(
-    State(state): State<AppState>,
-    _staff: Staff,
-    RequestQuery(query): RequestQuery<ShiftQuery>,
-) -> ApiResult<Json<SettingsView>> {
-    let reading = state
-        .store
-        .settings_on(state.bar, query.service_date.day()?)
-        .await?;
-    Ok(Json(view_of(
-        &reading.config,
-        reading.version,
-        reading.day,
-        &reading.bookings,
-        reading.next_table_number,
-    )))
+async fn settings(State(state): State<AppState>, _staff: Staff) -> ApiResult<Json<SettingsView>> {
+    let settings = state.store.settings(state.bar).await?;
+    Ok(Json(view_of(&settings)))
 }
 
 async fn save_settings(
     State(state): State<AppState>,
     _staff: Staff,
-    RequestQuery(query): RequestQuery<ShiftQuery>,
     JsonBody(draft): JsonBody<Draft>,
 ) -> ApiResult<Json<SavedSettingsView>> {
-    let day = query.service_date.day()?;
-    // The version is an instant rather than a date, and it is a date in a request all the same.
-    if !in_calendar(draft.version.date_naive()) {
-        return Err(ApiError::bad_request(
-            "invalid_date",
-            "the settings version is not a moment in the years 1 to 9999",
-        ));
-    }
     let saved = state
         .store
-        .save_settings(state.bar, &draft, day, state.now())
+        .save_settings(state.bar, &draft, state.now())
         .await?;
     Ok(Json(SavedSettingsView {
-        settings: view_of(
-            &saved.config,
-            saved.version,
-            saved.day,
-            &saved.bookings,
-            saved.next_table_number,
-        ),
+        settings: view_of(&saved.settings),
         reconciliation: ReconciliationView::of(&saved.reconciliation),
         above_cap: saved.above_cap,
     }))
 }
 
-/// The settings screen, with each table's count of the bookings on `day`.
-fn view_of(
-    config: &ValidConfig,
-    version: chrono::DateTime<chrono::Utc>,
-    day: ServiceDay,
-    bookings: &[BookingRecord],
-    next_table_number: i32,
-) -> SettingsView {
+/// The settings screen.
+fn view_of(settings: &Settings) -> SettingsView {
+    let config = &settings.config;
     SettingsView {
-        version,
+        version: settings.version,
         name: config.name.clone(),
         address: config.address.clone(),
         contact: config.contact.clone().unwrap_or_default(),
@@ -512,10 +480,6 @@ fn view_of(
                 number: table.number,
                 seats: table.seats,
                 zone: table.zone.as_str().to_owned(),
-                bookings_today: bookings
-                    .iter()
-                    .filter(|record| record.booking.table_id == Some(table.id))
-                    .count(),
             })
             .collect(),
         turn_minutes: config.turn_minutes,
@@ -534,8 +498,7 @@ fn view_of(
                 bound: member.telegram_user_id.is_some(),
             })
             .collect(),
-        next_table_number,
-        service_date: day.date(),
+        next_table_number: settings.next_table_number,
         limits: LimitsView::current(),
     }
 }

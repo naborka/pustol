@@ -7,7 +7,8 @@ use pustol_db::bookings::{Channel, NewBooking};
 use pustol_db::identity::ReminderChoice;
 use pustol_db::records::bookings_of;
 use pustol_domain::config::ValidConfig;
-use pustol_domain::rebooking::replaced_on;
+use pustol_domain::rebooking::{refused_on, replaced_on};
+use pustol_domain::slots::slot_list;
 use pustol_domain::{Booking, BookingId, Interval, ServiceDay};
 use pustol_telegram::messages;
 use uuid::Uuid;
@@ -16,7 +17,7 @@ use crate::auth::Authenticated;
 use crate::body::JsonBody;
 use crate::dto::{
     Availability, AvailabilityQuery, BarView, BookingRequest, DayOffer, DayRail, DayRailQuery,
-    GuestBooking, RemindersView, Session, UserView,
+    GuestAvailability, GuestBooking, RemindersView, Session, UserView,
 };
 use crate::error::ApiResult;
 use crate::params::{RequestPath, RequestQuery};
@@ -44,18 +45,19 @@ pub fn routes() -> Router<AppState> {
 ///
 /// A Mini App opens on a phone over whatever connection the bar's basement has; three round trips
 /// to draw one card is three chances to show a spinner.
-async fn session(
-    State(state): State<AppState>,
-    caller: Authenticated,
-) -> ApiResult<Json<Session>> {
+async fn session(State(state): State<AppState>, caller: Authenticated) -> ApiResult<Json<Session>> {
     let now = state.now();
-    let viewer = caller.viewer(&state).await?;
-    let config = state.store.config(state.bar).await?;
+    let (viewer, config, mine) = tokio::try_join!(
+        caller.viewer(&state),
+        async { Ok(state.store.config(state.bar).await?) },
+        async {
+            Ok(state
+                .store
+                .bookings_of_guest(state.bar, caller.user_id(), now)
+                .await?)
+        },
+    )?;
     let today = config.current_service_day(now);
-    let mine = state
-        .store
-        .bookings_of_guest(state.bar, caller.user_id(), now)
-        .await?;
     let held = bookings_of(&mine);
     let tonight = state
         .store
@@ -80,9 +82,7 @@ async fn session(
             .into_iter()
             .map(ServiceDay::date)
             .collect(),
-        today_free_from_minutes: tonight
-            .first()
-            .and_then(|offer| offer.free_from_minutes),
+        today_free_from_minutes: tonight.first().and_then(|offer| offer.free_from_minutes),
         today_free_for_party: HOME_CARD_PARTY,
     }))
 }
@@ -99,9 +99,11 @@ async fn days(
     RequestQuery(query): RequestQuery<DayRailQuery>,
 ) -> ApiResult<Json<DayRail>> {
     let now = state.now();
-    let config = state.store.config(state.bar).await?;
+    let (config, mine) = tokio::try_join!(
+        async { Ok(state.store.config(state.bar).await?) },
+        own_bookings(&state, &caller, now),
+    )?;
     let horizon = pustol_domain::horizon_days(&config, config.current_service_day(now));
-    let mine = own_bookings(&state, &caller, now).await?;
     let offers = state
         .store
         .day_offers(state.bar, &config, &horizon, query.party_size, now, &mine)
@@ -120,7 +122,7 @@ async fn days(
     }))
 }
 
-/// Arrival times for a party on one shift.
+/// Arrival times for a party on one shift, and what booking on it would do to what the guest holds.
 ///
 /// A guest changing an existing booking must still see their own time as free, or the only way to
 /// move from 20:00 to 20:30 would be to give up 20:00 first and hope. What is set aside is exactly
@@ -129,26 +131,20 @@ async fn availability(
     State(state): State<AppState>,
     caller: Authenticated,
     RequestQuery(query): RequestQuery<AvailabilityQuery>,
-) -> ApiResult<Json<Availability>> {
+) -> ApiResult<Json<GuestAvailability>> {
     let now = state.now();
     let day = query.service_date.day()?;
-    let mine = own_bookings(&state, &caller, now).await?;
-    let reading = state
-        .store
-        .availability(
-            state.bar,
-            day,
-            query.party_size,
-            now,
-            &replaced_on(&mine, day, now),
-        )
-        .await?;
-    Ok(Json(Availability::of(
-        day,
-        query.party_size,
-        &reading.config,
-        &reading.slots,
-    )))
+    let (room, mine) = tokio::try_join!(
+        async { Ok(state.store.room(state.bar, day).await?) },
+        own_bookings(&state, &caller, now),
+    )?;
+    let replacing = replaced_on(&mine, day, now);
+    let slots = slot_list(&room.query(query.party_size, now, &replacing));
+    Ok(Json(GuestAvailability {
+        offer: Availability::of(day, query.party_size, &room.config, &slots),
+        replacing: replacing.iter().map(|id| id.0).collect(),
+        booked: refused_on(&mine, day, now),
+    }))
 }
 
 /// The caller's own running bookings, which every offer made to them weighs by the rebooking rule.

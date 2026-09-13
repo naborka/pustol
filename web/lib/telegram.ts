@@ -132,40 +132,32 @@ export const haptics = {
   },
 };
 
+/**
+ * Opens a link: a Telegram one inside Telegram, or outside it in a new tab unless `outside` says in
+ * place; any other, such as a phone number, in place, where the device hands it to the dialer.
+ */
+export function openLink(url: string, outside: "new_tab" | "in_place" = "new_tab"): void {
+  if (typeof window === "undefined") return;
+  const app = webApp();
+  if (url.startsWith("https://t.me/") && app) app.openTelegramLink(url);
+  else if (url.startsWith("https://t.me/") && outside === "new_tab") {
+    window.open(url, "_blank", "noopener");
+  } else window.location.href = url;
+}
+
 /** Opens the bot's own chat, which is how a guest starts one so the bot may write to them. */
 export function openBotChat(botUsername: string, startParam = "reminders"): void {
-  const app = webApp();
-  const url = `https://t.me/${botUsername}?start=${encodeURIComponent(startParam)}`;
-  if (app) {
-    app.openTelegramLink(url);
-  } else if (typeof window !== "undefined") {
-    window.open(url, "_blank", "noopener");
-  }
+  openLink(`https://t.me/${botUsername}?start=${encodeURIComponent(startParam)}`);
 }
 
 /** Opens a chat with a guest, from their username. */
 export function openChatWith(username: string): void {
-  const app = webApp();
-  const url = `https://t.me/${username}`;
-  if (app) {
-    app.openTelegramLink(url);
-  } else if (typeof window !== "undefined") {
-    window.open(url, "_blank", "noopener");
-  }
+  openLink(`https://t.me/${username}`);
 }
 
-/**
- * Opens the bar's contact: a Telegram account inside Telegram, a phone number in the dialer.
- *
- * The link comes from the server, which has already decided which of the two it is.
- */
+/** Opens the bar's contact, whose link the server has already made a Telegram account or a phone. */
 export function openContact(url: string): void {
-  const app = webApp();
-  if (url.startsWith("https://t.me/") && app) {
-    app.openTelegramLink(url);
-  } else if (typeof window !== "undefined") {
-    window.location.href = url;
-  }
+  openLink(url, "in_place");
 }
 
 /** Device safe area plus Telegram's remaining chrome. Both are zero on old clients. */

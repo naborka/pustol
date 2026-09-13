@@ -23,14 +23,16 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use chrono_tz::Tz;
-use pustol_db::ids::{BarId, TelegramUserId};
+use pustol_db::Store;
 use pustol_db::bookings::{Channel, NewBooking};
 use pustol_db::identity::{Signature, TelegramAccount};
-use pustol_db::Store;
+use pustol_db::ids::{BarId, TelegramUserId};
 use pustol_domain::config::{BarConfig, DayHours, StaffMember, ValidConfig, WeekSchedule};
 use pustol_domain::draft::{DayHoursDraft, Draft, StaffDraft, TableDraft};
 use pustol_domain::schedule::{BarTable, TableId, Zone};
 use pustol_domain::service_day::{Interval, ServiceDay};
+use pustol_domain::slots::{Slot, slot_list};
+use pustol_domain::{BlockReason, BookingId, GuestName};
 use uuid::Uuid;
 
 pub const BELGRADE: Tz = chrono_tz::Europe::Belgrade;
@@ -43,6 +45,45 @@ pub const DEFAULT_HOURS: DayHours = DayHours {
 };
 
 static NEXT_ACCOUNT: AtomicI64 = AtomicI64::new(1);
+
+/// Arrival times, as the picker asks them of the room.
+pub struct Offered {
+    pub slots: Vec<Slot>,
+}
+
+/// The picker's read: the room on a shift, asked for a party's arrival times.
+#[allow(async_fn_in_trait)]
+pub trait Availability {
+    async fn availability(
+        &self,
+        bar: BarId,
+        day: ServiceDay,
+        party_size: i32,
+        now: DateTime<Utc>,
+        ignoring: &[BookingId],
+    ) -> pustol_db::Result<Offered>;
+}
+
+impl Availability for Store {
+    async fn availability(
+        &self,
+        bar: BarId,
+        day: ServiceDay,
+        party_size: i32,
+        now: DateTime<Utc>,
+        ignoring: &[BookingId],
+    ) -> pustol_db::Result<Offered> {
+        let room = self.room(bar, day).await?;
+        Ok(Offered {
+            slots: slot_list(&room.query(party_size, now, ignoring)),
+        })
+    }
+}
+
+/// A reason to close a table, known not to be blank.
+pub fn reason(text: &str) -> BlockReason {
+    BlockReason::new(text).expect("fixture reasons are not blank")
+}
 
 /// A migrated database of this test's own, with a pool belonging to this test's runtime.
 pub async fn store() -> Store {
@@ -152,7 +193,10 @@ pub fn default_config() -> BarConfig {
 pub async fn bar_with(store: &Store, config: BarConfig) -> (BarId, ValidConfig) {
     let config = ValidConfig::new(config)
         .unwrap_or_else(|errors| panic!("fixture config is illegal: {errors:?}"));
-    let bar = store.create_bar(&config, morning()).await.expect("bar is created");
+    let bar = store
+        .create_bar(&config, morning())
+        .await
+        .expect("bar is created");
     (bar, config)
 }
 
@@ -272,7 +316,7 @@ pub fn staff_booking(bar: BarId, name: &str, minutes: i32, party_size: i32) -> N
         start_minutes: minutes,
         party_size,
         channel: Channel::Staff {
-            guest_name: name.to_owned(),
+            guest_name: GuestName::new(name).expect("fixture names are not blank"),
             table: None,
         },
         // Nobody to remind: a booking taken at the door has no account behind it.
@@ -295,7 +339,10 @@ pub fn cancellation_wording(
     record: &pustol_db::records::BookingRecord,
     reason: &str,
 ) -> String {
-    format!("{}: бронь {} отменена — {reason}", config.name, record.guest_name)
+    format!(
+        "{}: бронь {} отменена — {reason}",
+        config.name, record.guest_name
+    )
 }
 
 pub fn move_words() -> pustol_db::bookings::MoveWords {

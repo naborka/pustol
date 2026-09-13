@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SECTIONS, SaveBar, SettingsScreen, sectionValue, type Section } from "../Settings";
 import { draftOf, type SettingsDraft } from "@/lib/api";
 import { edited, firstReason } from "@/lib/settingsRules";
-import { LIMITS, noop, settingsView } from "./fixtures";
+import { LIMITS, noop, settingsView, shift, shiftBooking } from "./fixtures";
 
 afterEach(cleanup);
 
@@ -28,7 +28,7 @@ function open(overrides: Partial<Omit<ScreenProps, "section" | "onSection">> = {
     <Settings
       settings={view}
       draft={draftOf(view)}
-      serviceDate="2026-09-11"
+      room={null}
       editedWeekday={5}
       onEdit={noop}
       onEditWeekday={noop}
@@ -78,7 +78,7 @@ describe("the index", () => {
     const draw = () => (
       <Settings
         settings={view}
-        serviceDate="2026-09-11"
+        room={null}
         draft={current}
         editedWeekday={5}
         onEdit={(change) => {
@@ -108,7 +108,7 @@ describe("the index", () => {
     const draw = () => (
       <Settings
         settings={view}
-        serviceDate="2026-09-11"
+        room={null}
         draft={current}
         editedWeekday={5}
         onEdit={(change) => {
@@ -127,13 +127,21 @@ describe("the index", () => {
     expect(firstReason(current, LIMITS)).toBe("Пустое сообщение отправить нельзя.");
   });
 
-  it("counts a table's bookings only for the evening on screen", async () => {
+  it("counts a table's bookings from the evening on screen, and none until that evening is read", async () => {
     const view = settingsView({
-      service_date: "2026-09-11",
-      tables: [{ id: "t1", number: 7, seats: 2, zone: "Стойка", bookings_today: 3 }],
+      tables: [{ id: "t1", number: 7, seats: 2, zone: "Стойка" }],
       max_party: 2,
     });
-    const { rerender } = open({ settings: view, draft: draftOf(view) });
+    const evening = shift({
+      bookings: [
+        shiftBooking({ id: "a" }),
+        shiftBooking({ id: "b" }),
+        shiftBooking({ id: "c" }),
+        shiftBooking({ id: "d", table_id: "t2", table_number: 8 }),
+        shiftBooking({ id: "e", table_id: null, table_number: null }),
+      ],
+    });
+    const { rerender } = open({ settings: view, draft: draftOf(view), room: evening });
     await userEvent.click(screen.getByText("Зал"));
     expect(screen.getByText("3 брони")).toBeDefined();
 
@@ -141,7 +149,7 @@ describe("the index", () => {
       <Settings
         settings={view}
         draft={draftOf(view)}
-        serviceDate="2026-09-12"
+        room={null}
         editedWeekday={5}
         onEdit={noop}
         onEditWeekday={noop}
@@ -157,7 +165,7 @@ describe("the index", () => {
     const draw = () => (
       <Settings
         settings={view}
-        serviceDate="2026-09-11"
+        room={null}
         draft={current}
         editedWeekday={5}
         onEdit={(change) => {

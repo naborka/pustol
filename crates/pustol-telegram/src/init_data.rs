@@ -19,7 +19,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-type HmacSha256 = Hmac<Sha256>;
+pub(crate) type HmacSha256 = Hmac<Sha256>;
 
 /// The constant Telegram derives the signing key with.
 const KEY_SALT: &[u8] = b"WebAppData";

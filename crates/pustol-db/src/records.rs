@@ -114,15 +114,6 @@ pub struct BookingRecord {
     pub cancel_reason: Option<String>,
 }
 
-impl BookingRecord {
-    /// Whether the bot could conceivably message this guest: staff-entered bookings have no
-    /// account behind them at all.
-    #[must_use]
-    pub fn has_telegram_account(&self) -> bool {
-        self.telegram_user_id.is_some()
-    }
-}
-
 impl TryFrom<BookingRow> for BookingRecord {
     type Error = Error;
 
@@ -185,7 +176,10 @@ impl From<BlockRow> for BlockRecord {
 /// a second hand-rolled projection up there would be a second chance to leave something out.
 #[must_use]
 pub fn bookings_of(records: &[BookingRecord]) -> Vec<Booking> {
-    records.iter().map(|record| record.booking.clone()).collect()
+    records
+        .iter()
+        .map(|record| record.booking.clone())
+        .collect()
 }
 
 #[must_use]

@@ -9,18 +9,16 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { ApiError } from "./api";
-import type { ApiFailure } from "./errors";
+import { failureOf } from "./errors";
 import {
   EMPTY_LEDGER,
   answered,
-  answeredUpTo,
   begun,
   failed,
   failureOn,
   marked,
   pendingOn,
-  pendingUpTo,
+  pruned,
   valueOn,
   written,
   type Ledger,
@@ -33,25 +31,13 @@ export interface Question<T> {
   ask: () => Promise<T>;
 }
 
-/** Where an applied answer belongs. */
-export interface Landing {
-  key: string;
-  /** Its question is the one on screen. */
-  onScreen: boolean;
-  /** It is a write's own answer, which whoever sent the write has already acted on. */
-  written: boolean;
-}
-
-/** A failure as the API described it, or as close as the app can get. */
-export function failureOf(error: unknown): ApiFailure {
-  return error instanceof ApiError ? error.failure : { code: "internal", message: String(error) };
-}
+/** How many questions neither on screen nor on their way keep what was heard of them. */
+const KEPT_ASIDE = 3;
 
 export function useRead<T>(
   question: Question<T> | null,
-  onAnswer: (answer: T, landing: Landing) => void,
-  /** A read failed; `number` is when it was asked, to compare with `mark`. */
-  onFailure: (failure: ApiFailure, number: number) => void,
+  /** A read's answer was put on record. A write's own answer is its writer's to act on. */
+  onAnswer: (answer: T) => void,
   /** How the server orders answers to this question, when it does. */
   order?: Order<T>,
 ) {
@@ -59,22 +45,18 @@ export function useRead<T>(
   const ledgerNow = useRef<Ledger<T>>(EMPTY_LEDGER);
   // The answer last applied while its question was on screen, drawn while a new question loads.
   const [lastOnScreen, setLastOnScreen] = useState<T | null>(null);
-  const latest = useRef({ question, onAnswer, onFailure, order });
+  const latest = useRef({ question, onAnswer, order });
   useEffect(() => {
-    latest.current = { question, onAnswer, onFailure, order };
+    latest.current = { question, onAnswer, order };
   });
 
   const actions = useMemo(() => {
     const keyNow = () => latest.current.question?.key ?? null;
     const commit = (next: Ledger<T>) => {
-      if (next === ledgerNow.current) return;
-      ledgerNow.current = next;
-      setLedger(next);
-    };
-    const land = (key: string, data: T, written: boolean) => {
-      const onScreen = key === keyNow();
-      if (onScreen) setLastOnScreen(data);
-      latest.current.onAnswer(data, { key, onScreen, written });
+      const kept = pruned(next, keyNow(), KEPT_ASIDE);
+      if (kept === ledgerNow.current) return;
+      ledgerNow.current = kept;
+      setLedger(kept);
     };
     const mark = (): number => {
       const [next, number] = marked(ledgerNow.current);
@@ -92,9 +74,7 @@ export function useRead<T>(
         try {
           answer = await asking.ask();
         } catch (error) {
-          const failure = failureOf(error);
-          commit(failed(ledgerNow.current, number, asking.key, failure).ledger);
-          latest.current.onFailure(failure, number);
+          commit(failed(ledgerNow.current, number, asking.key, failureOf(error)).ledger);
           return;
         }
         const outcome = answered(
@@ -105,48 +85,41 @@ export function useRead<T>(
           latest.current.order,
         );
         commit(outcome.ledger);
-        if (outcome.apply) land(asking.key, answer, false);
+        if (!outcome.apply) return;
+        if (asking.key === keyNow()) setLastOnScreen(answer);
+        latest.current.onAnswer(answer);
       },
       /**
        * Puts a write's own answer about `key` on record, made on the value there now and numbered
-       * `sent`, the mark taken when the write was sent; without one, now. Returns whether it was
-       * applied.
+       * `sent`, the mark taken when the write was sent; without one, now.
        */
       put: (
         key: string,
         change: (current: T | undefined) => T | undefined,
         sent: number = mark(),
-      ): boolean => {
-        const outcome = written(ledgerNow.current, key, sent, change, latest.current.order);
-        commit(outcome.ledger);
-        if (outcome.apply && outcome.data !== undefined) land(key, outcome.data, true);
-        return outcome.apply;
+      ): void => {
+        commit(written(ledgerNow.current, key, sent, change, latest.current.order).ledger);
       },
       /** A moment every read asked from now on comes after. */
       mark,
-      /**
-       * The number of the newest read of `key` that answered, as it stands this instant rather than
-       * at the last render: for a callback deciding whether to ask at all.
-       */
-      answeredNow: (key: string): number => answeredUpTo(ledgerNow.current, key),
     };
   }, []);
 
   const key = question?.key ?? null;
   const value = valueOn(ledger, key);
+  const failure = failureOn(ledger, key);
   return {
     ...actions,
     /** The answer on record for the question on screen, or null. */
     value,
-    /** That answer, or while there is none yet, the one shown for the question before. */
-    shown: value ?? lastOnScreen,
+    /**
+     * What to draw: that answer, or while there is none yet, the one shown for the question before —
+     * never once this question has failed, since another question's answer does not stand in for it.
+     */
+    drawn: value ?? (failure ? null : lastOnScreen),
     /** The failure of the newest read of the question on screen, once nothing else is on its way. */
-    failure: failureOn(ledger, key),
+    failure,
     /** A read of the question on screen is on its way. */
     pending: pendingOn(ledger, key),
-    /** The number of the newest read of the question on screen on its way, 0 when none, to compare with `mark`. */
-    pendingUpTo: pendingUpTo(ledger, key),
-    /** The number of the newest read of the question on screen that answered, to compare with `mark`. */
-    answeredUpTo: answeredUpTo(ledger, key),
   };
 }

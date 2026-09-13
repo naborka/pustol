@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { Reconciliation, ShiftBooking } from "../api";
+import type { Reconciliation } from "../api";
 import {
   attendanceOutcome,
   closuresToRestore,
@@ -12,6 +12,7 @@ import {
   refusalOf,
   strandedLines,
 } from "../outcomes";
+import { shiftBooking as booking } from "@/components/__tests__/fixtures";
 
 describe("a refused settings save, kept for «Почему»", () => {
   it("names the bookings a change would strand, and why they stand", () => {
@@ -45,28 +46,6 @@ describe("a refused settings save, kept for «Почему»", () => {
     expect(refusalOf({ code: "network", message: "" })).toBeNull();
   });
 });
-
-function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
-  return {
-    id: "b1",
-    table_id: "t1",
-    table_number: 7,
-    table_zone: "Стойка",
-    start_minutes: 1_260,
-    end_minutes: 1_380,
-    released_minutes: null,
-    party_size: 2,
-    guest_name: "Саша",
-    guest_username: null,
-    status: "confirmed",
-    source: "app",
-    note: null,
-    reachable_by_bot: true,
-    started: false,
-    finished: false,
-    ...overrides,
-  };
-}
 
 const reconciliation = (overrides: Partial<Reconciliation> = {}): Reconciliation => ({
   moved: [],

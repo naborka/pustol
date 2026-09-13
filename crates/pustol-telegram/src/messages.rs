@@ -25,7 +25,12 @@ pub fn reminder(bar_name: &str, starts_at: DateTime<Utc>, timezone: Tz, party_si
 
 /// The message that goes out when staff cancel a booking.
 #[must_use]
-pub fn cancellation(bar_name: &str, starts_at: DateTime<Utc>, timezone: Tz, reason: &str) -> String {
+pub fn cancellation(
+    bar_name: &str,
+    starts_at: DateTime<Utc>,
+    timezone: Tz,
+    reason: &str,
+) -> String {
     let local = starts_at.with_timezone(&timezone);
     format!(
         "{bar_name}: бронь на {time} отменена. Причина: {reason}. Извините за неудобство — \
@@ -55,19 +60,23 @@ pub fn moved(
 /// Russian counts the noun after the number, so a bare "3 гость" reads as broken software.
 #[must_use]
 pub fn guests(count: i32) -> String {
-    let hundreds = count % 100;
-    let units = count % 10;
-    let noun = if (11..=19).contains(&hundreds) {
-        "гостей"
-    } else if units == 1 {
-        "гость"
-    } else if (2..=4).contains(&units) {
-        "гостя"
-    } else {
-        "гостей"
+    plural(count, "гость", "гостя", "гостей")
+}
+
+/// `count` followed by the noun form Russian puts after it: `one` after 1, 21, 31…, `few` after 2 to
+/// 4, 22 to 24…, and `many` after everything else, the teens included.
+fn plural(count: i32, one: &str, few: &str, many: &str) -> String {
+    let noun = match (count % 100, count % 10) {
+        (11..=19, _) => many,
+        (_, 1) => one,
+        (_, 2..=4) => few,
+        _ => many,
     };
     format!("{count} {noun}")
 }
+
+/// Where the bot sends a guest for everything it does not do itself.
+const IN_THE_APP: &str = "Забронировать, перенести или отменить стол можно в приложении.";
 
 /// The answer to «Не смогу прийти» when the table went back.
 pub const CANCELLED_FROM_REMINDER: &str =
@@ -77,7 +86,8 @@ pub const CANCELLED_FROM_REMINDER: &str =
 pub const NO_LONGER_ACTIVE: &str = "Эта бронь уже не действует.";
 
 /// The answer when cancelling failed on our side. The button stays, so the guest can try again.
-pub const COULD_NOT_CANCEL: &str = "Не получилось отменить. Попробуйте ещё раз или отмените в приложении.";
+pub const COULD_NOT_CANCEL: &str =
+    "Не получилось отменить. Попробуйте ещё раз или отмените в приложении.";
 
 /// The answer to starting the bot from the app's reminder prompt.
 #[must_use]
@@ -91,10 +101,7 @@ pub fn reminders_on(remind_hours: i32) -> String {
 /// The answer to starting the bot any other way.
 #[must_use]
 pub fn welcome(bar_name: &str, contact: Option<&str>) -> String {
-    format!(
-        "Это бот бара «{bar_name}». Забронировать, перенести или отменить стол можно в приложении.{}",
-        reach(contact)
-    )
+    format!("Это бот бара «{bar_name}». {IN_THE_APP}{}", reach(contact))
 }
 
 /// The answer to a message typed into the bot's chat. Nobody reads it, and saying nothing would
@@ -102,7 +109,7 @@ pub fn welcome(bar_name: &str, contact: Option<&str>) -> String {
 #[must_use]
 pub fn nobody_reads_this(bar_name: &str, contact: Option<&str>) -> String {
     format!(
-        "Это бот бара «{bar_name}», сообщения здесь никто не читает. Забронировать, перенести или отменить стол можно в приложении.{}",
+        "Это бот бара «{bar_name}», сообщения здесь никто не читает. {IN_THE_APP}{}",
         reach(contact)
     )
 }
@@ -114,13 +121,7 @@ fn reach(contact: Option<&str>) -> String {
 }
 
 fn hours(count: i32) -> String {
-    let noun = match (count % 100, count % 10) {
-        (11..=19, _) => "часов",
-        (_, 1) => "час",
-        (_, 2..=4) => "часа",
-        _ => "часов",
-    };
-    format!("{count} {noun}")
+    plural(count, "час", "часа", "часов")
 }
 
 #[cfg(test)]

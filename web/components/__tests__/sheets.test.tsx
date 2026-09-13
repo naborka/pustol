@@ -546,7 +546,14 @@ describe("moving a booking", () => {
         turnMinutes={120}
         maxParty={6}
         partySize={booking.party_size}
-        availability={availability()}
+        // The booking is set aside, so its own time is free at every table.
+        availability={availability({
+          slots: [
+            { start_minutes: 1_260, state: "past", evening: true, free_table_ids: ["t1", "t2", "t3"] },
+            { start_minutes: 1_320, state: "free", evening: true, free_table_ids: ["t1", "t2", "t3"] },
+            { start_minutes: 1_350, state: "free", evening: true, free_table_ids: ["t1", "t2", "t3"] },
+          ],
+        })}
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
         loadFailure={null}
@@ -614,6 +621,101 @@ describe("moving a booking", () => {
     expect(onMove).toHaveBeenCalledWith(1_320, "t2", 2);
   });
 
+  it("offers the tables the times name for the chosen time, not ones free by the wall clock", () => {
+    const onMove = vi.fn();
+    render(
+      <MoveBookingSheet
+        open
+        booking={later}
+        shift={shift({ bookings: [later] })}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability({
+          slots: [{ start_minutes: 1_350, state: "free", evening: true, free_table_ids: ["t3"] }],
+        })}
+        chosenMinutes={1_350}
+        chosenTableId={null}
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={onMove}
+      />,
+    );
+    expect(screen.queryByText("Стол 7 · Стойка")).toBeNull();
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+    expect(screen.getByText("Перенести на 22:30, стол 10")).toBeDefined();
+  });
+
+  it("offers a booking kept at its time the tables free for its own window, not for the slot's", () => {
+    // A walk-in sat down at 21:07, a minute no slot starts at, and holds its table to 23:07.
+    const walkIn = shiftBooking({
+      status: "arrived",
+      started: true,
+      source: "walk",
+      start_minutes: 1_267,
+      end_minutes: 1_387,
+    });
+    render(
+      <MoveBookingSheet
+        open
+        booking={walkIn}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability({ kept_free_table_ids: ["t1", "t3"] })}
+        chosenMinutes={null}
+        chosenTableId="t1"
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={noop}
+      />,
+    );
+    expect(screen.getByText("Стол 10 · Зал")).toBeDefined();
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+  });
+
+  it("offers a started booking the tables free for its own window", () => {
+    const started = shiftBooking({ status: "arrived", started: true });
+    render(
+      <MoveBookingSheet
+        open
+        booking={started}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability({
+          slots: [{ start_minutes: 1_260, state: "past", evening: true, free_table_ids: ["t2"] }],
+          kept_free_table_ids: ["t1", "t3"],
+        })}
+        chosenMinutes={null}
+        chosenTableId="t2"
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={noop}
+      />,
+    );
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+    expect(screen.getByText("Стол 10 · Зал")).toBeDefined();
+    expect(screen.getByText("Ничего не меняли")).toBeDefined();
+  });
+
   it("keeps the time of a booking that has started, and still offers the tables", () => {
     // 21:20, and they sat down at 21:00. The window is history; where they sit is not.
     moveSheet(shiftBooking({ status: "arrived", started: true }), { table: "t2" });
@@ -644,8 +746,12 @@ describe("writing a booking down", () => {
         open
         shift={shift()}
         maxParty={6}
-        turnMinutes={120}
-        availability={availability()}
+        availability={availability({
+          slots: [
+            { start_minutes: 1_290, state: "free", evening: true, free_table_ids: ["t2", "t3"] },
+            { start_minutes: 1_350, state: "free", evening: true, free_table_ids: [] },
+          ],
+        })}
         partySize={2}
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
@@ -669,15 +775,20 @@ describe("writing a booking down", () => {
     expect(screen.getByText("Имя и время").closest("button")?.disabled).toBe(true);
   });
 
-  it("offers the tables free at the chosen time, and books the one staff picked", async () => {
+  it("offers the tables the times name for the chosen time, and books the one staff picked", async () => {
     const onCreate = vi.fn();
     manualSheet({ minutes: 1_290, table: "t3" }, onCreate);
-    // Table 7 is taken from 21:00 to 23:00, so it is not on offer for a 21:30 sitting.
     expect(screen.queryByText("Стол 7 · Стойка")).toBeNull();
     expect(screen.getByText("Стол 8 · Зал")).toBeDefined();
 
     await userEvent.click(screen.getByText("Записать на 21:30, стол 10"));
     expect(onCreate).toHaveBeenCalledWith("t3");
+  });
+
+  it("offers no table at a time the times name none for, whatever the wall clock says", () => {
+    manualSheet({ minutes: 1_350 });
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+    expect(screen.getByText("Имя и время").closest("button")?.disabled).toBe(true);
   });
 
   it("calls a name blank exactly when the server would", () => {

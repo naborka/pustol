@@ -24,20 +24,9 @@ import {
 import { GuestCancelSheet } from "../Sheets";
 import type { GuestBooking } from "@/lib/api";
 import { TAP } from "@/lib/tokens";
-import { availability, bar, booking, dayOffer, noop, rail, seated, session } from "./fixtures";
+import { availability, bar, booking, dayOffer, heldNoShow, noop, rail, seated, session } from "./fixtures";
 
 afterEach(cleanup);
-
-/** A no-show whose table is still held tonight: only a booking tonight replaces it. */
-const heldNoShow: GuestBooking = {
-  ...booking,
-  id: "b9",
-  start_minutes: 1_260,
-  end_minutes: 1_380,
-  status: "no_show",
-  started: true,
-  rebooking_replaces: "same_evening",
-};
 
 const friday: GuestBooking = { ...booking, id: "b2", service_date: "2026-09-12" };
 
@@ -64,8 +53,16 @@ describe("the guest's home screen", () => {
   });
 
   it("says the bar is shut when it is", () => {
-    home({ bar: { ...bar, now_minutes: 600, open_now: false } });
+    home({ bar: { ...bar, now_minutes: 600, open_now: false, opens_at_minutes: 1_080 } });
     expect(screen.getByText("Откроется в 18:00")).toBeDefined();
+  });
+
+  it("says when it opens as the server said, not by comparing wall minutes", () => {
+    home({ bar: { ...bar, now_minutes: 600, open_now: false, opens_at_minutes: 1_110 } });
+    expect(screen.getByText("Откроется в 18:30")).toBeDefined();
+    cleanup();
+    home({ bar: { ...bar, now_minutes: 600, open_now: false, opens_at_minutes: null } });
+    expect(screen.getByText("Закрыт")).toBeDefined();
   });
 
   it("says open or shut as the server decided on its own clock, not by comparing wall minutes", () => {
@@ -371,10 +368,11 @@ describe("the main button", () => {
     });
   });
 
-  it("will not book an evening the guest already holds, and says why", () => {
+  it("will not book an evening the times say the guest already holds, and says why", () => {
     const refused = { label: "На этот вечер у вас уже есть бронь", enabled: false };
-    expect(bookingDecision(4, "2026-09-11", bar, 1_290, [seated], true)).toEqual(refused);
-    expect(bookingDecision(4, "2026-09-11", bar, null, [seated], true)).toEqual(refused);
+    const held = { replacing: [], booked: true };
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290, held)).toEqual(refused);
+    expect(bookingDecision(4, "2026-09-11", bar, null, held)).toEqual(refused);
   });
 });
 
@@ -490,28 +488,20 @@ describe("reaching a person at the bar", () => {
 });
 
 describe("moving a booking the guest already holds", () => {
-  it("says «Перенести» on the button, so nobody wonders whether they are about to hold two", () => {
-    expect(bookingDecision(4, "2026-09-11", bar, 1_290, [booking]).label).toBe(
+  it("says «Перенести» on the button when the times name a booking it replaces, so nobody wonders whether they are about to hold two", () => {
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290, { replacing: [booking.id], booked: false }).label).toBe(
       "Перенести · 4 гостя · сегодня в 21:30",
     );
-    expect(bookingDecision(4, "2026-09-12", bar, 1_290, [booking]).label).toBe(
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290, { replacing: [heldNoShow.id], booked: false }).label).toBe(
       "Перенести · 4 гостя · завтра в 21:30",
     );
   });
 
-  it("says «Забронировать» when no booking the guest holds would be replaced", () => {
-    expect(bookingDecision(4, "2026-09-12", bar, 1_290, [seated]).label).toBe(
+  it("says «Забронировать» when the times name no booking it replaces, whatever the guest holds", () => {
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290, { replacing: [], booked: false }).label).toBe(
       "Забронировать · 4 гостя · завтра в 21:30",
     );
-  });
-
-  it("says «Перенести» for a held no-show only on its own evening", () => {
-    expect(bookingDecision(4, "2026-09-11", bar, 1_290, [heldNoShow]).label).toBe(
-      "Перенести · 4 гостя · сегодня в 21:30",
-    );
-    expect(bookingDecision(4, "2026-09-12", bar, 1_290, [heldNoShow]).label).toBe(
-      "Забронировать · 4 гостя · завтра в 21:30",
-    );
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290).label).toBe("Забронировать · 4 гостя · завтра в 21:30");
   });
 
   it("confirms a move as a move", () => {

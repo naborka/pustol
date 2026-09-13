@@ -55,7 +55,6 @@ describe("Russian noun agreement", () => {
     expect(fmt.tables(2)).toBe("2 стола");
     expect(fmt.seats(1)).toBe("1 место");
     expect(fmt.seats(52)).toBe("52 места");
-    expect(fmt.minutesWord(15)).toBe("15 минут");
     expect(fmt.hoursWord(3)).toBe("3 часа");
     expect(fmt.hoursWord(1)).toBe("1 час");
     expect(fmt.daysWord(4)).toBe("4 дня");

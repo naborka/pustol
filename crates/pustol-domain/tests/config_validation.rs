@@ -8,10 +8,11 @@ use pustol_domain::config::{
     parties_above_cap, schedule_conflicts,
 };
 use pustol_domain::service_day::ServiceDay;
-use pustol_domain::{Booking, BookingStatus, DayHours, Interval, ScheduleConflict};
+use pustol_domain::{DayHours, Interval, ScheduleConflict};
 
 use common::{
-    BELGRADE, DEFAULT_HOURS, booking, default_config, force, numbered, table, thursday, utc, zone,
+    BELGRADE, DEFAULT_HOURS, booking, date, default_config, force, grid, numbered, seated, table,
+    thursday, utc, zone,
 };
 
 #[test]
@@ -74,11 +75,15 @@ fn a_shift_must_be_long_enough_to_hold_one_booking() {
             closed: false,
         },
     );
-    assert!(config.validate().contains(&ConfigError::ShiftShorterThanTurn {
-        weekday: Weekday::Mon,
-        shift_minutes: 180,
-        turn_minutes: 240,
-    }));
+    assert!(
+        config
+            .validate()
+            .contains(&ConfigError::ShiftShorterThanTurn {
+                weekday: Weekday::Mon,
+                shift_minutes: 180,
+                turn_minutes: 240,
+            })
+    );
 }
 
 #[test]
@@ -326,11 +331,9 @@ fn a_table_must_stand_in_a_zone_the_bar_has() {
 fn zones_are_a_non_empty_list_without_repeats() {
     let mut config = default_config();
     config.zones.push(zone("Зал"));
-    assert!(
-        config
-            .validate()
-            .contains(&ConfigError::DuplicateZone { zone: zone("Зал") })
-    );
+    assert!(config.validate().contains(&ConfigError::DuplicateZone {
+        zone: zone("Зал")
+    }));
 
     let mut config = default_config();
     config.zones.clear();
@@ -396,7 +399,10 @@ fn admin_usernames_are_telegram_shaped_and_listed_once() {
 fn telegram_username_shape_follows_the_published_rules() {
     assert!(is_telegram_username("anna_mgr"));
     assert!(is_telegram_username("a1234"));
-    assert!(!is_telegram_username("anna"), "four characters is too short");
+    assert!(
+        !is_telegram_username("anna"),
+        "four characters is too short"
+    );
     assert!(!is_telegram_username(&"a".repeat(33)), "over thirty two");
     assert!(!is_telegram_username("_anna"), "must start with a letter");
     assert!(!is_telegram_username("anna-mgr"), "hyphen is not allowed");
@@ -422,7 +428,8 @@ fn closing_a_day_that_already_has_bookings_is_a_conflict() {
     let config = default_config();
     let tables = config.tables.clone();
     let evening = booking(
-        1,        thursday(),
+        1,
+        thursday(),
         1200,
         2,
         Some(numbered(&tables, 1)),
@@ -440,7 +447,11 @@ fn closing_a_day_that_already_has_bookings_is_a_conflict() {
         next
     };
     assert_eq!(
-        schedule_conflicts(&force(closed), std::slice::from_ref(&evening), utc(2026, 7, 30, 10, 0)),
+        schedule_conflicts(
+            &force(closed),
+            std::slice::from_ref(&evening),
+            utc(2026, 7, 30, 10, 0)
+        ),
         vec![ScheduleConflict::DayBecameClosed {
             booking: evening.id,
             service_day: thursday(),
@@ -454,7 +465,8 @@ fn shortening_the_evening_past_a_live_booking_is_a_conflict() {
     let tables = config.tables.clone();
     // Arrives 23:00, leaves 01:00.
     let late = booking(
-        2,        thursday(),
+        2,
+        thursday(),
         1380,
         2,
         Some(numbered(&tables, 1)),
@@ -472,7 +484,11 @@ fn shortening_the_evening_past_a_live_booking_is_a_conflict() {
         next
     };
     assert_eq!(
-        schedule_conflicts(&force(earlier_close), std::slice::from_ref(&late), utc(2026, 7, 30, 10, 0)),
+        schedule_conflicts(
+            &force(earlier_close),
+            std::slice::from_ref(&late),
+            utc(2026, 7, 30, 10, 0)
+        ),
         vec![ScheduleConflict::OutsideOpeningHours {
             booking: late.id,
             service_day: thursday(),
@@ -489,7 +505,8 @@ fn opening_later_than_a_live_booking_is_a_conflict() {
     let config = default_config();
     let tables = config.tables.clone();
     let lunch = booking(
-        3,        thursday(),
+        3,
+        thursday(),
         660,
         2,
         Some(numbered(&tables, 1)),
@@ -506,7 +523,11 @@ fn opening_later_than_a_live_booking_is_a_conflict() {
         );
         next
     };
-    let conflicts = schedule_conflicts(&force(later_open), std::slice::from_ref(&lunch), utc(2026, 7, 30, 6, 0));
+    let conflicts = schedule_conflicts(
+        &force(later_open),
+        std::slice::from_ref(&lunch),
+        utc(2026, 7, 30, 6, 0),
+    );
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0].booking(), lunch.id);
 }
@@ -518,9 +539,8 @@ fn bookings_that_have_already_finished_never_block_a_settings_change() {
     let config = default_config();
     let tables = config.tables.clone();
     let last_week = booking(
-        4,        ServiceDay::new(
-            chrono::NaiveDate::from_ymd_opt(2026, 7, 23).expect("valid date"),
-        ),
+        4,
+        ServiceDay::new(chrono::NaiveDate::from_ymd_opt(2026, 7, 23).expect("valid date")),
         1200,
         2,
         Some(numbered(&tables, 1)),
@@ -538,7 +558,11 @@ fn bookings_that_have_already_finished_never_block_a_settings_change() {
         next
     };
     assert_eq!(
-        schedule_conflicts(&force(closed), std::slice::from_ref(&last_week), utc(2026, 7, 30, 10, 0)),
+        schedule_conflicts(
+            &force(closed),
+            std::slice::from_ref(&last_week),
+            utc(2026, 7, 30, 10, 0)
+        ),
         Vec::new()
     );
 }
@@ -548,7 +572,8 @@ fn a_cancelled_booking_never_blocks_a_settings_change() {
     let config = default_config();
     let tables = config.tables.clone();
     let mut cancelled = booking(
-        5,        thursday(),
+        5,
+        thursday(),
         1200,
         2,
         Some(numbered(&tables, 1)),
@@ -567,7 +592,11 @@ fn a_cancelled_booking_never_blocks_a_settings_change() {
         next
     };
     assert_eq!(
-        schedule_conflicts(&force(closed), std::slice::from_ref(&cancelled), utc(2026, 7, 30, 10, 0)),
+        schedule_conflicts(
+            &force(closed),
+            std::slice::from_ref(&cancelled),
+            utc(2026, 7, 30, 10, 0)
+        ),
         Vec::new()
     );
 }
@@ -577,7 +606,8 @@ fn a_booking_that_still_fits_the_new_hours_is_not_a_conflict() {
     let config = default_config();
     let tables = config.tables.clone();
     let evening = booking(
-        6,        thursday(),
+        6,
+        thursday(),
         1200,
         2,
         Some(numbered(&tables, 1)),
@@ -595,7 +625,11 @@ fn a_booking_that_still_fits_the_new_hours_is_not_a_conflict() {
         next
     };
     assert_eq!(
-        schedule_conflicts(&force(earlier_close), std::slice::from_ref(&evening), utc(2026, 7, 30, 10, 0)),
+        schedule_conflicts(
+            &force(earlier_close),
+            std::slice::from_ref(&evening),
+            utc(2026, 7, 30, 10, 0)
+        ),
         Vec::new()
     );
 }
@@ -610,14 +644,16 @@ fn changing_the_turn_length_cannot_strand_an_existing_booking() {
     let tables = config.tables.clone();
     let back_to_back = vec![
         booking(
-        7,            thursday(),
+            7,
+            thursday(),
             1200,
             2,
             Some(numbered(&tables, 1)),
             config.turn_minutes,
         ),
         booking(
-        8,            thursday(),
+            8,
+            thursday(),
             1320,
             2,
             Some(numbered(&tables, 1)),
@@ -640,14 +676,16 @@ fn lowering_the_party_cap_reports_the_bookings_it_would_have_refused() {
     let config = default_config();
     let tables = config.tables.clone();
     let large = booking(
-        9,        thursday(),
+        9,
+        thursday(),
         1200,
         6,
         Some(numbered(&tables, 11)),
         config.turn_minutes,
     );
     let small = booking(
-        10,        thursday(),
+        10,
+        thursday(),
         1200,
         2,
         Some(numbered(&tables, 1)),
@@ -671,7 +709,10 @@ fn lowering_the_party_cap_reports_the_bookings_it_would_have_refused() {
 fn the_latest_arrival_is_always_closing_time_minus_one_turn() {
     let mut config = default_config();
     config.turn_minutes = 90;
-    assert_eq!(force(config.clone()).last_arrival_minutes(Weekday::Thu), Some(1470));
+    assert_eq!(
+        force(config.clone()).last_arrival_minutes(Weekday::Thu),
+        Some(1470)
+    );
     config.turn_minutes = 240;
     assert_eq!(force(config).last_arrival_minutes(Weekday::Thu), Some(1320));
 }
@@ -696,7 +737,11 @@ fn a_configuration_cannot_be_put_in_force_until_it_is_legal() {
     let legal = default_config();
     let in_force = ValidConfig::new(legal.clone()).expect("the fixture bar is legal");
     assert_eq!(in_force.name, legal.name, "reading through to the proposal");
-    assert_eq!(in_force.into_inner(), legal, "and back out again for editing");
+    assert_eq!(
+        in_force.into_inner(),
+        legal,
+        "and back out again for editing"
+    );
 }
 
 // ---- which shift is running -------------------------------------------------------------------
@@ -768,32 +813,7 @@ fn a_day_off_yesterday_cannot_be_the_running_shift() {
 
 /// The bar open 10:00 to `close_minutes` every day, with two-hour sittings.
 fn closing_at(close_minutes: i32) -> pustol_domain::config::ValidConfig {
-    closing_with(close_minutes, 120)
-}
-
-/// The bar open 10:00 to `close_minutes` every day, with sittings of `turn_minutes`.
-fn closing_with(close_minutes: i32, turn_minutes: i32) -> pustol_domain::config::ValidConfig {
-    let mut config = default_config();
-    config.turn_minutes = turn_minutes;
-    config.week = WeekSchedule::uniform(DayHours {
-        open_minutes: 600,
-        close_minutes,
-        closed: false,
-    });
-    force(config)
-}
-
-/// A party seated for `window` on `day`, as a walk-in is.
-fn seated(day: ServiceDay, window: Interval) -> Booking {
-    Booking {
-        window,
-        status: BookingStatus::Arrived,
-        ..booking(1, day, 600, 2, None, 60)
-    }
-}
-
-fn date(year: i32, month: u32, day: u32) -> ServiceDay {
-    ServiceDay::new(chrono::NaiveDate::from_ymd_opt(year, month, day).expect("valid date"))
+    force(grid(close_minutes, 120, 30))
 }
 
 #[test]
@@ -860,7 +880,11 @@ fn the_shift_runs_while_its_last_sitting_holds_its_table_and_until_the_wall_last
 
         assert!(last.window.end() <= stops, "{what}");
         assert!(!last.has_finished(last.window.end() - minute), "{what}");
-        assert_eq!(config.current_service_day(last.window.end() - minute), day, "{what}");
+        assert_eq!(
+            config.current_service_day(last.window.end() - minute),
+            day,
+            "{what}"
+        );
         assert_eq!(config.current_service_day(stops - minute), day, "{what}");
         assert_eq!(config.current_service_day(stops), next, "{what}");
     }
@@ -872,12 +896,15 @@ fn on_the_night_the_clocks_skip_the_last_arrival_the_shift_ends_with_the_last_si
     // arrival closing allows, 02:00, never happens: at 01:00Z the clocks jump from 02:00 to 03:00, and
     // the wall reads closing at once. The grid's last sitting arrives at 01:30 and is over at 01:30Z,
     // and the shift runs exactly that long: no sitting runs later, and the wall has read closing.
-    let config = closing_with(1620, 60);
+    let config = force(grid(1620, 60, 30));
     let saturday = date(2026, 3, 28);
     let last = booking(1, saturday, 1530, 2, None, 60);
 
     assert_eq!(last.window.end(), utc(2026, 3, 29, 1, 30));
-    assert_eq!(config.current_service_day(utc(2026, 3, 29, 1, 29)), saturday);
+    assert_eq!(
+        config.current_service_day(utc(2026, 3, 29, 1, 29)),
+        saturday
+    );
     assert_eq!(
         config.current_service_day(utc(2026, 3, 29, 1, 30)),
         date(2026, 3, 29)
@@ -896,7 +923,11 @@ fn a_party_seated_now_holds_its_table_no_later_than_its_shift_runs() {
         .walk_in_window(thursday(), utc(2026, 7, 30, 18, 0))
         .expect("running");
     assert_eq!(evening.start(), utc(2026, 7, 30, 18, 0));
-    assert_eq!(evening.end(), utc(2026, 7, 30, 20, 0), "a whole turn while the shift has one");
+    assert_eq!(
+        evening.end(),
+        utc(2026, 7, 30, 20, 0),
+        "a whole turn while the shift has one"
+    );
 
     let late = config
         .walk_in_window(thursday(), utc(2026, 7, 30, 23, 30))
@@ -906,7 +937,11 @@ fn a_party_seated_now_holds_its_table_no_later_than_its_shift_runs() {
 
     let after = utc(2026, 7, 31, 0, 30);
     assert_eq!(config.current_service_day(after), friday);
-    assert_eq!(config.walk_in_window(thursday(), after), None, "Thursday is over");
+    assert_eq!(
+        config.walk_in_window(thursday(), after),
+        None,
+        "Thursday is over"
+    );
     assert_eq!(
         config.walk_in_window(friday, after),
         None,
@@ -929,7 +964,7 @@ fn on_the_night_the_clocks_go_forward_a_party_seated_now_holds_its_table_until_t
     // Saturday 28 March 2026 closes at 03:30, with one-hour sittings. At 01:00Z the clocks jump from
     // 02:00 to 03:00, and the wall reads 03:30 half an hour later. A party seated at the jump holds its
     // table that half hour, and the hours that seated it do not call it outside them.
-    let config = closing_with(1650, 60);
+    let config = force(grid(1650, 60, 30));
     let saturday = date(2026, 3, 28);
     let jump = utc(2026, 3, 29, 1, 0);
 
@@ -938,7 +973,10 @@ fn on_the_night_the_clocks_go_forward_a_party_seated_now_holds_its_table_until_t
         (window.start(), window.end()),
         (jump, utc(2026, 3, 29, 1, 30))
     );
-    assert_eq!(config.walk_in_window(saturday, utc(2026, 3, 29, 1, 30)), None);
+    assert_eq!(
+        config.walk_in_window(saturday, utc(2026, 3, 29, 1, 30)),
+        None
+    );
     assert_eq!(
         schedule_conflicts(&config, &[seated(saturday, window)], jump),
         Vec::new()
@@ -976,7 +1014,9 @@ fn on_the_night_the_clocks_go_back_a_party_is_seated_until_the_wall_last_reads_c
 
     assert_eq!(config.current_service_day(second_pass), saturday);
     assert_eq!(
-        config.walk_in_window(saturday, second_pass).map(Interval::end),
+        config
+            .walk_in_window(saturday, second_pass)
+            .map(Interval::end),
         Some(utc(2026, 10, 25, 2, 0))
     );
     assert_eq!(config.walk_in_window(sunday, second_pass), None);
@@ -1024,7 +1064,11 @@ fn the_last_arrival_on_the_spring_clock_change_is_not_a_conflict_with_the_hours_
     });
     let last = booking(1, saturday, 1500, 2, Some(table(1, 2, "Бар")).as_ref(), 120);
     assert_eq!(
-        schedule_conflicts(&force(config), std::slice::from_ref(&last), utc(2026, 3, 28, 10, 0)),
+        schedule_conflicts(
+            &force(config),
+            std::slice::from_ref(&last),
+            utc(2026, 3, 28, 10, 0)
+        ),
         Vec::new()
     );
 }
@@ -1039,15 +1083,27 @@ fn texts_the_bar_writes_stay_short_enough_to_send_and_to_show() {
     config.message_templates = vec!["а".repeat(LIMITS.text.message + 1)];
     config.cancel_reasons = vec!["г".repeat(LIMITS.text.reason + 1)];
     let errors = config.validate();
-    assert!(errors.contains(&ConfigError::NameTooLong { limit: LIMITS.text.name }));
-    assert!(errors.contains(&ConfigError::AddressTooLong { limit: LIMITS.text.address }));
-    assert!(errors.contains(&ConfigError::MessageTemplateTooLong { limit: LIMITS.text.message }));
-    assert!(errors.contains(&ConfigError::CancelReasonTooLong { limit: LIMITS.text.reason }));
+    assert!(errors.contains(&ConfigError::NameTooLong {
+        limit: LIMITS.text.name
+    }));
+    assert!(errors.contains(&ConfigError::AddressTooLong {
+        limit: LIMITS.text.address
+    }));
+    assert!(errors.contains(&ConfigError::MessageTemplateTooLong {
+        limit: LIMITS.text.message
+    }));
+    assert!(errors.contains(&ConfigError::CancelReasonTooLong {
+        limit: LIMITS.text.reason
+    }));
 
     let mut at_the_limit = default_config();
     at_the_limit.name = "🍺".repeat(LIMITS.text.name);
     at_the_limit.message_templates = vec!["а".repeat(LIMITS.text.message)];
-    assert_eq!(at_the_limit.validate(), Vec::new(), "counted in characters, not bytes");
+    assert_eq!(
+        at_the_limit.validate(),
+        Vec::new(),
+        "counted in characters, not bytes"
+    );
 }
 
 #[test]
@@ -1110,14 +1166,16 @@ fn every_list_the_bar_keeps_is_bounded_and_retired_tables_do_not_count() {
 fn a_zone_name_stays_short_enough_to_show() {
     let mut config = default_config();
     config.zones.push(zone(&"🍺".repeat(LIMITS.text.zone + 1)));
-    assert!(
-        config
-            .validate()
-            .contains(&ConfigError::ZoneNameTooLong { limit: LIMITS.text.zone })
-    );
+    assert!(config.validate().contains(&ConfigError::ZoneNameTooLong {
+        limit: LIMITS.text.zone
+    }));
     config.zones.pop();
     config.zones.push(zone(&"🍺".repeat(LIMITS.text.zone)));
-    assert_eq!(config.validate(), Vec::new(), "counted in characters, not bytes");
+    assert_eq!(
+        config.validate(),
+        Vec::new(),
+        "counted in characters, not bytes"
+    );
 }
 
 #[test]
@@ -1131,9 +1189,20 @@ fn a_contact_is_a_phone_number_or_a_telegram_username_and_nothing_else() {
     let account = Contact::parse("@podval_bar").expect("a username");
     assert_eq!(account.label(), "@podval_bar");
     assert_eq!(account.url(), "https://t.me/podval_bar");
-    assert_eq!(Contact::parse("podval_bar"), Some(account), "the @ is optional");
+    assert_eq!(
+        Contact::parse("podval_bar"),
+        Some(account),
+        "the @ is optional"
+    );
 
-    for nonsense in ["", "позвоните", "12", "+1+2345678", "https://evil.example", "@ab"] {
+    for nonsense in [
+        "",
+        "позвоните",
+        "12",
+        "+1+2345678",
+        "https://evil.example",
+        "@ab",
+    ] {
         assert_eq!(Contact::parse(nonsense), None, "{nonsense:?}");
     }
 }

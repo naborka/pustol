@@ -10,14 +10,12 @@ use crate::error::ApiError;
 
 /// A JSON request body, taken by every handler that reads one instead of `axum::Json`.
 ///
-/// `PostgreSQL` text cannot hold U+0000. A string carrying one reached the database from whichever
-/// handler took it and came back as a server fault. Refused here, for every string and every key of
-/// every body, no handler has a text field to remember it for.
+/// `PostgreSQL` text cannot hold U+0000, so a body holding it in any string or key is refused here,
+/// before any handler reads a field of it.
 ///
-/// A body not said to be JSON, one that is not JSON, one of the wrong shape, and one larger than the
-/// API reads are refused with the status `axum::Json` gives each, as `body_invalid` in the shape of
-/// every other refusal: the app reads a code out of a JSON body, and a line of plain text reached it as
-/// a failure to parse.
+/// A body not said to be JSON, one that is not JSON, one of the wrong shape, one naming a field twice,
+/// and one larger than the API reads are refused with the status `axum::Json` gives each, as
+/// `body_invalid` in the shape of every other refusal: the app reads a code out of a JSON body.
 #[derive(Debug)]
 pub struct JsonBody<T>(pub T);
 
@@ -32,6 +30,7 @@ where
         let axum::Json(raw) = axum::Json::<Box<RawValue>>::from_request(request, state).await?;
         let axum::Json(value) = axum::Json::<Value>::from_bytes(raw.get().as_bytes())?;
         refuse_nul(&value, "a string in the body")?;
+        // Read from the text, not from `value`: a map keeps only the last of a repeated key.
         let axum::Json(body) = axum::Json::<T>::from_bytes(raw.get().as_bytes())?;
         Ok(Self(body))
     }
@@ -48,12 +47,17 @@ impl From<JsonRejection> for ApiError {
 /// `what` held it.
 pub(crate) fn refuse_nul(value: &Value, what: &str) -> Result<(), ApiError> {
     if holds_nul(value) {
-        return Err(ApiError::bad_request(
-            "text_invalid",
-            format!("{what} holds a NUL character, which no text can be stored with"),
-        ));
+        return Err(nul_refused(what));
     }
     Ok(())
+}
+
+/// The refusal of text holding U+0000, saying `what` held it.
+pub(crate) fn nul_refused(what: &str) -> ApiError {
+    ApiError::bad_request(
+        "text_invalid",
+        format!("{what} holds a NUL character, which no text can be stored with"),
+    )
 }
 
 fn holds_nul(value: &Value) -> bool {

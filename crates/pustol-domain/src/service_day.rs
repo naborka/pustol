@@ -110,6 +110,12 @@ impl Interval {
     pub fn overlaps(self, other: Self) -> bool {
         self.start < other.end && other.start < self.end
     }
+
+    /// `true` when `instant` is inside: at the start or after it, and before the end.
+    #[must_use]
+    pub fn contains(self, instant: DateTime<Utc>) -> bool {
+        self.start <= instant && instant < self.end
+    }
 }
 
 /// Failures of the business-time to absolute-time mapping.
@@ -181,7 +187,12 @@ enum Pass {
     Last,
 }
 
-fn resolve_on(pass: Pass, day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
+fn resolve_on(
+    pass: Pass,
+    day: ServiceDay,
+    minutes: i32,
+    tz: Tz,
+) -> Result<DateTime<Utc>, TimeError> {
     if !(0..=MAX_SERVICE_MINUTE).contains(&minutes) {
         return Err(TimeError::MinutesOutOfRange(minutes));
     }
@@ -207,7 +218,12 @@ fn resolve_on(pass: Pass, day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateT
 }
 
 /// [`resolve_on`], with a minute the spring clock change skips passing when the clocks jump over it.
-fn passed_on(pass: Pass, day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
+fn passed_on(
+    pass: Pass,
+    day: ServiceDay,
+    minutes: i32,
+    tz: Tz,
+) -> Result<DateTime<Utc>, TimeError> {
     match resolve_on(pass, day, minutes, tz) {
         Err(skipped @ TimeError::LocalTimeSkipped { .. }) => (1..=24 * 60)
             .find_map(|later| resolve_on(pass, day, minutes + later, tz).ok())
@@ -335,7 +351,8 @@ mod tests {
     }
 
     #[test]
-    fn an_end_at_the_first_minute_the_autumn_clock_change_repeats_passes_when_the_wall_first_reaches_it() {
+    fn an_end_at_the_first_minute_the_autumn_clock_change_repeats_passes_when_the_wall_first_reaches_it()
+     {
         // Belgrade repeats 02:00..03:00 on 2026-10-25. The wall reaches 02:00 from 01:59 at 00:00Z; at
         // 01:00Z it falls back to 02:00 from 02:59, and never comes up to 02:00 from before it again.
         assert_eq!(
@@ -396,10 +413,18 @@ mod tests {
     #[test]
     fn intervals_sharing_any_instant_overlap_in_both_directions() {
         let first = Interval::new(utc(2026, 7, 30, 18, 0), utc(2026, 7, 30, 20, 0)).unwrap();
-        let straddling =
-            Interval::new(utc(2026, 7, 30, 19, 59), utc(2026, 7, 30, 21, 0)).unwrap();
+        let straddling = Interval::new(utc(2026, 7, 30, 19, 59), utc(2026, 7, 30, 21, 0)).unwrap();
         assert!(first.overlaps(straddling));
         assert!(straddling.overlaps(first));
+    }
+
+    #[test]
+    fn an_interval_contains_its_start_and_not_its_end() {
+        let evening = Interval::new(utc(2026, 7, 30, 18, 0), utc(2026, 7, 30, 20, 0)).unwrap();
+        assert!(!evening.contains(utc(2026, 7, 30, 17, 59)));
+        assert!(evening.contains(utc(2026, 7, 30, 18, 0)));
+        assert!(evening.contains(utc(2026, 7, 30, 19, 59)));
+        assert!(!evening.contains(utc(2026, 7, 30, 20, 0)));
     }
 
     #[test]
@@ -426,7 +451,10 @@ mod tests {
         let start = resolve(day(2026, 3, 29), 90, BELGRADE).expect("01:30 exists");
         let window = Interval::from_duration(start, 120).expect("positive duration");
         assert_eq!(window.minutes(), 120);
-        assert_eq!(minutes_within(day(2026, 3, 29), window.end(), BELGRADE), 270);
+        assert_eq!(
+            minutes_within(day(2026, 3, 29), window.end(), BELGRADE),
+            270
+        );
     }
 
     #[test]

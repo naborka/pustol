@@ -17,9 +17,10 @@ use crate::allocator::{Booking, BookingId};
 use crate::schedule::{BarTable, Zone};
 use crate::service_day::{Interval, ServiceDay, minutes_within, resolve_boundary, resolve_end};
 use crate::slots::last_sitting;
+use crate::text::longer_than;
 
 /// An inclusive integer range a setting must fall in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 pub struct Bounds {
     pub min: i32,
     pub max: i32,
@@ -57,7 +58,7 @@ pub struct Limits {
 ///
 /// A guest message longer than Telegram carries is refused on every send; a name, reason or zone
 /// that long breaks every screen and message it is drawn into.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct TextLimits {
     pub name: usize,
     pub address: usize,
@@ -70,7 +71,7 @@ pub struct TextLimits {
 ///
 /// Every list travels whole in one settings save. Unbounded, a legal configuration could outgrow any
 /// request the API reads, and could then never be saved again.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct ListLimits {
     pub message_templates: usize,
     pub cancel_reasons: usize,
@@ -83,7 +84,10 @@ pub struct ListLimits {
 
 /// The limits this deployment runs under.
 pub const LIMITS: Limits = Limits {
-    open_minutes: Bounds { min: 480, max: 1080 },
+    open_minutes: Bounds {
+        min: 480,
+        max: 1080,
+    },
     close_minutes: Bounds {
         min: 1200,
         max: 1680,
@@ -232,7 +236,17 @@ impl BarConfig {
     /// Seats at the largest live table, or zero for an empty room.
     #[must_use]
     pub fn largest_table_seats(&self) -> i32 {
-        self.active_tables().map(|table| table.seats).max().unwrap_or(0)
+        self.active_tables()
+            .map(|table| table.seats)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The contact guests are given, or `None` when the bar gives none or what it gives is neither
+    /// kind [`Contact::parse`] reads.
+    #[must_use]
+    pub fn contact(&self) -> Option<Contact> {
+        self.contact.as_deref().and_then(Contact::parse)
     }
 
     /// Every reason this configuration is illegal. Empty means legal.
@@ -265,21 +279,17 @@ impl BarConfig {
         if self.address.trim().is_empty() {
             errors.push(ConfigError::BlankAddress);
         }
-        if self.name.chars().count() > LIMITS.text.name {
+        if longer_than(&self.name, LIMITS.text.name) {
             errors.push(ConfigError::NameTooLong {
                 limit: LIMITS.text.name,
             });
         }
-        if self.address.chars().count() > LIMITS.text.address {
+        if longer_than(&self.address, LIMITS.text.address) {
             errors.push(ConfigError::AddressTooLong {
                 limit: LIMITS.text.address,
             });
         }
-        if self
-            .contact
-            .as_deref()
-            .is_some_and(|contact| Contact::parse(contact).is_none())
-        {
+        if self.contact.is_some() && self.contact().is_none() {
             errors.push(ConfigError::MalformedContact);
         }
     }
@@ -321,7 +331,11 @@ impl BarConfig {
             (self.max_party, LIMITS.max_party, Setting::MaxParty),
             (self.horizon_days, LIMITS.horizon_days, Setting::HorizonDays),
             (self.remind_hours, LIMITS.remind_hours, Setting::RemindHours),
-            (self.grace_minutes, LIMITS.grace_minutes, Setting::GraceMinutes),
+            (
+                self.grace_minutes,
+                LIMITS.grace_minutes,
+                Setting::GraceMinutes,
+            ),
         ] {
             if !bounds.contains(value) {
                 errors.push(ConfigError::SettingOutOfRange {
@@ -331,10 +345,7 @@ impl BarConfig {
                 });
             }
         }
-        if !LIMITS
-            .slot_step_minutes
-            .contains(&self.slot_step_minutes)
-        {
+        if !LIMITS.slot_step_minutes.contains(&self.slot_step_minutes) {
             errors.push(ConfigError::SlotStepNotOffered {
                 minutes: self.slot_step_minutes,
             });
@@ -353,7 +364,7 @@ impl BarConfig {
         if self
             .zones
             .iter()
-            .any(|zone| zone.as_str().chars().count() > LIMITS.text.zone)
+            .any(|zone| longer_than(zone.as_str(), LIMITS.text.zone))
         {
             errors.push(ConfigError::ZoneNameTooLong {
                 limit: LIMITS.text.zone,
@@ -364,7 +375,10 @@ impl BarConfig {
             errors.push(ConfigError::NoTables);
         }
         for (index, table) in self.tables.iter().enumerate() {
-            if self.tables[..index].iter().any(|other| other.number == table.number) {
+            if self.tables[..index]
+                .iter()
+                .any(|other| other.number == table.number)
+            {
                 errors.push(ConfigError::DuplicateTableNumber {
                     number: table.number,
                 });
@@ -411,13 +425,17 @@ impl BarConfig {
         if self.cancel_reasons.is_empty() {
             errors.push(ConfigError::NoCancelReasons);
         }
-        if self.cancel_reasons.iter().any(|text| text.trim().is_empty()) {
+        if self
+            .cancel_reasons
+            .iter()
+            .any(|text| text.trim().is_empty())
+        {
             errors.push(ConfigError::BlankCancelReason);
         }
         if self
             .message_templates
             .iter()
-            .any(|text| text.chars().count() > LIMITS.text.message)
+            .any(|text| longer_than(text, LIMITS.text.message))
         {
             errors.push(ConfigError::MessageTemplateTooLong {
                 limit: LIMITS.text.message,
@@ -426,7 +444,7 @@ impl BarConfig {
         if self
             .cancel_reasons
             .iter()
-            .any(|text| text.chars().count() > LIMITS.text.reason)
+            .any(|text| longer_than(text, LIMITS.text.reason))
         {
             errors.push(ConfigError::CancelReasonTooLong {
                 limit: LIMITS.text.reason,
@@ -548,11 +566,9 @@ impl ValidConfig {
     /// The window a party sitting down at `now` holds on `day`, or `None` when `day` seats nobody
     /// now: a day off, a shift that has not opened, or one that has closed.
     ///
-    /// One turn, cut short at closing. Held past closing, the party sat on after the hours that
-    /// seated it: on the night the clocks go forward that was an hour past closing on the wall, and
-    /// every settings save after it was refused for stranding the party. Closing is never later than
-    /// [`Self::shift_end`], so the party is gone before the next shift runs; its screen reads only its
-    /// own bookings and would call the table free.
+    /// One turn, cut short at closing, so a party never sits past the hours that seated it, on the wall
+    /// or in real time. Closing is never later than [`Self::shift_end`], so the party is gone before
+    /// the next shift runs.
     ///
     /// Seated only while `day` [is open](Self::is_open).
     #[must_use]
@@ -563,6 +579,12 @@ impl ValidConfig {
         let closes = self.closing(day)?;
         let turn = Interval::from_duration(now, self.turn_minutes).ok()?;
         Interval::new(now, turn.end().min(closes)).ok()
+    }
+
+    /// The moment `day` opens, while `now` is before it; `None` once it has opened, and on a day off.
+    #[must_use]
+    pub fn opening_ahead(&self, day: ServiceDay, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.opening(day).filter(|opens| now < *opens)
     }
 
     /// Whether `day` is open at `now`: it has opened, and closing has not come.
@@ -618,9 +640,13 @@ impl ValidConfig {
     fn latest_end(&self, day: ServiceDay, minutes: i32) -> Option<DateTime<Utc>> {
         let hours = self.week.for_service_day(day);
         let closes = self.closing(day)?;
-        let sitting = resolve_boundary(day, hours.close_minutes.saturating_sub(minutes), self.timezone)
-            .and_then(|arrives| Interval::from_duration(arrives, minutes))
-            .ok();
+        let sitting = resolve_boundary(
+            day,
+            hours.close_minutes.saturating_sub(minutes),
+            self.timezone,
+        )
+        .and_then(|arrives| Interval::from_duration(arrives, minutes))
+        .ok();
         Some(sitting.map_or(closes, |sitting| sitting.end().max(closes)))
     }
 }

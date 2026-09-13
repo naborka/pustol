@@ -16,6 +16,7 @@ import Page from "../page";
 import {
   availability,
   booking,
+  heldNoShow,
   rail,
   seated,
   session,
@@ -170,12 +171,7 @@ const timur = shiftBooking({
  */
 function settingsServer() {
   let stored = settingsView();
-  let saves = 0;
-  const nextVersion = () => {
-    saves += 1;
-    return `2026-09-13T${String(8 + saves).padStart(2, "0")}:00:00Z`;
-  };
-  const read = (date: string | null) => ({ ...stored, service_date: date ?? stored.service_date });
+  const read = () => stored;
   return {
     get current() {
       return stored;
@@ -183,10 +179,10 @@ function settingsServer() {
     read,
     /** Somebody else's save. */
     change(overrides: Partial<SettingsView>) {
-      stored = { ...stored, ...overrides, version: nextVersion() };
+      stored = { ...stored, ...overrides, version: stored.version + 1 };
     },
     /** A save, answered with what it stored, listed as a read lists it. */
-    save(draft: SettingsDraft, date: string | null): Answer {
+    save(draft: SettingsDraft): Answer {
       if (draft.version !== stored.version) {
         return { status: 409, body: { error: { code: "settings_changed", message: "changed" } } };
       }
@@ -199,7 +195,6 @@ function settingsServer() {
             number: known?.number ?? number++,
             seats: table.seats,
             zone: table.zone,
-            bookings_today: known?.bookings_today ?? 0,
           };
         })
         .sort((left, right) => left.number - right.number);
@@ -229,9 +224,9 @@ function settingsServer() {
         cancel_reasons: draft.cancel_reasons.map((text) => text.trim()),
         staff,
         next_table_number: number,
-        version: nextVersion(),
+        version: stored.version + 1,
       };
-      return { body: { settings: read(date), reconciliation: nothingMoved, above_cap: 0 } };
+      return { body: { settings: read(), reconciliation: nothingMoved, above_cap: 0 } };
     },
   };
 }
@@ -1656,7 +1651,7 @@ describe("a shift left open on the bar", () => {
         return {
           body: availability({
             service_date: date,
-            slots: [{ start_minutes: 1_140, state: "free", evening: true }],
+            slots: [{ start_minutes: 1_140, state: "free", evening: true, free_table_ids: ["t1", "t2", "t3"] }],
             free_count: 1,
           }),
         };
@@ -1720,6 +1715,35 @@ describe("a shift left open on the bar", () => {
     expect(screen.queryByText("Не удалось прочитать свободные окна.")).toBeNull();
     await four.open();
     expect(await screen.findByRole("button", { name: "21:30" })).toBeDefined();
+  });
+  it("offers a booking under way the tables the server names free from its start, asking with it set aside", async () => {
+    fakeTelegram();
+    const ignoring: (string | null)[] = [];
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => ({
+        body: shift({ bookings: [shiftBooking({ status: "arrived", started: true })] }),
+      }),
+      "GET /api/admin/availability": ({ url }) => {
+        ignoring.push(url.searchParams.get("ignoring"));
+        return {
+          body: availability({
+            slots: [{ start_minutes: 1_260, state: "past", evening: true, free_table_ids: ["t1", "t3"] }],
+          }),
+        };
+      },
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Смена"));
+    await user.click(await screen.findByText("Саша"));
+    await user.click(within(await screen.findByRole("dialog")).getByText("Перенести"));
+    const sheet = await screen.findByRole("dialog");
+    expect(await within(sheet).findByText("Стол 10 · Зал")).toBeDefined();
+    expect(within(sheet).queryByText("Стол 8 · Зал")).toBeNull();
+    expect(ignoring.length).toBeGreaterThan(0);
+    expect(ignoring.every((id) => id === "b1")).toBe(true);
   });
 });
 
@@ -1798,7 +1822,7 @@ describe("booking", () => {
           return {
             body: availability({
               service_date: date,
-              slots: [{ start_minutes: 1_140, state: "free", evening: true }],
+              slots: [{ start_minutes: 1_140, state: "free", evening: true, free_table_ids: ["t1", "t2", "t3"] }],
               free_count: 1,
             }),
           };
@@ -1940,17 +1964,18 @@ describe("a guest changing their mind", () => {
   it("sends what the button promised to replace, and when the bookings changed says so, reads them again and keeps the picker", async () => {
     fakeTelegram();
     let sessions = 0;
+    let changed = false;
     const server = fakeServer({
       "GET /api/session": () => {
         sessions += 1;
         return { body: session({ bookings: sessions === 1 ? [booking] : [] }) };
       },
       "GET /api/days": () => ({ body: { party_size: 4, days: rail(2) } }),
-      "GET /api/availability": () => ({ body: availability() }),
-      "POST /api/booking": () => ({
-        status: 409,
-        body: { error: { code: "booking_changed", message: "changed" } },
-      }),
+      "GET /api/availability": () => ({ body: availability({ replacing: changed ? [] : ["b1"] }) }),
+      "POST /api/booking": () => {
+        changed = true;
+        return { status: 409, body: { error: { code: "booking_changed", message: "changed" } } };
+      },
     });
     const user = userEvent.setup();
     render(<Page />);
@@ -1973,7 +1998,7 @@ describe("a guest changing their mind", () => {
     const server = fakeServer({
       "GET /api/session": () => ({ body: session({ bookings: [booking] }) }),
       "GET /api/days": () => ({ body: { party_size: 4, days: rail(2) } }),
-      "GET /api/availability": () => ({ body: availability() }),
+      "GET /api/availability": () => ({ body: availability({ replacing: ["b1"] }) }),
       "POST /api/booking": () => ({
         status: 409,
         body: { error: { code: "already_booked_tonight", message: "held" } },
@@ -2002,12 +2027,12 @@ describe("a guest changing their mind", () => {
         body: refused
           ? availability({
               slots: [
-                { start_minutes: 1_290, state: "past", evening: true },
-                { start_minutes: 1_350, state: "free", evening: true },
+                { start_minutes: 1_290, state: "past", evening: true, free_table_ids: [] },
+                { start_minutes: 1_350, state: "free", evening: true, free_table_ids: [] },
               ],
               free_count: 1,
             })
-          : availability(),
+          : availability({ replacing: ["b1"] }),
       }),
       "POST /api/booking": () => {
         refused = true;
@@ -2132,22 +2157,13 @@ describe("a guest changing their mind", () => {
 
   it("moves a no-show whose table is still held to another time tonight, and says it moved", async () => {
     fakeTelegram();
-    const noShow: GuestBooking = {
-      ...booking,
-      id: "b9",
-      start_minutes: 1_260,
-      end_minutes: 1_380,
-      status: "no_show",
-      started: true,
-      rebooking_replaces: "same_evening",
-    };
     const asked: string[] = [];
     const server = fakeServer({
-      "GET /api/session": () => ({ body: session({ bookings: [noShow] }) }),
+      "GET /api/session": () => ({ body: session({ bookings: [heldNoShow] }) }),
       "GET /api/days": () => ({ body: { party_size: 4, days: rail(2) } }),
       "GET /api/availability": ({ url }) => {
         asked.push(url.searchParams.get("service_date") ?? "");
-        return { body: availability() };
+        return { body: availability({ replacing: [heldNoShow.id] }) };
       },
       "POST /api/booking": () => ({ body: { booking: { ...booking, id: "b3" }, replaced: ["b9"] } }),
     });
@@ -2165,16 +2181,7 @@ describe("a guest changing their mind", () => {
   it("never says tonight is already the guest's for a booking the server says does not hold it, before the rail is read", async () => {
     fakeTelegram();
     const railRead = gate();
-    const noShow: GuestBooking = {
-      ...booking,
-      id: "b9",
-      start_minutes: 1_260,
-      end_minutes: 1_380,
-      status: "no_show",
-      started: true,
-      rebooking_replaces: null,
-      holds_evening: false,
-    };
+    const noShow: GuestBooking = { ...heldNoShow, rebooking_replaces: null, holds_evening: false };
     fakeServer({
       "GET /api/session": () => ({ body: session({ bookings: [noShow], bookable_days: ["2026-09-11"] }) }),
       "GET /api/days": async () => {
@@ -2199,7 +2206,7 @@ describe("a guest changing their mind", () => {
       "GET /api/session": () =>
         ({ body: session({ bookings: [seated], bookable_days: ["2026-09-11"] }) }),
       "GET /api/days": () => ({ body: { party_size: 2, days: [{ ...rail(1)[0], booked: true }] } }),
-      "GET /api/availability": () => ({ body: availability() }),
+      "GET /api/availability": () => ({ body: availability({ booked: true }) }),
     });
     const user = userEvent.setup();
     render(<Page />);
@@ -2210,6 +2217,34 @@ describe("a guest changing their mind", () => {
     await user.click(await screen.findByText("На этот вечер у вас уже есть бронь"));
     await settle();
     expect(server.count("POST", "/api/booking")).toBe(0);
+  });
+  it("takes the button's word and what it sends from the times the server answered, not from the bookings on the home screen", async () => {
+    fakeTelegram();
+    const server = fakeServer({
+      "GET /api/session": () => ({ body: session({ bookings: [booking] }) }),
+      "GET /api/days": () => ({ body: { party_size: 4, days: rail(2) } }),
+      "GET /api/availability": ({ url }) => {
+        const date = url.searchParams.get("service_date") ?? "";
+        return { body: availability({ service_date: date, replacing: date === "2026-09-12" ? ["b1"] : [] }) };
+      },
+      "POST /api/booking": () => ({
+        body: { booking: { ...booking, id: "b3", service_date: "2026-09-12" }, replaced: ["b1"] },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Перенести"));
+    await user.click(await screen.findByRole("button", { name: "21:30" }));
+    expect(await screen.findByText("Забронировать · 4 гостя · сегодня в 21:30")).toBeDefined();
+
+    await user.click(screen.getByText("Завтра"));
+    await user.click(await screen.findByRole("button", { name: "21:30" }));
+    await user.click(await screen.findByText("Перенести · 4 гостя · завтра в 21:30"));
+    expect(await screen.findByText("Бронь перенесена")).toBeDefined();
+    expect(server.bodies("POST", "/api/booking")).toEqual([
+      { service_date: "2026-09-12", start_minutes: 1_290, party_size: 4, replacing: ["b1"] },
+    ]);
   });
 });
 
@@ -2301,7 +2336,7 @@ describe("settings", () => {
         reads += 1;
         if (reads === 1) return { body: settingsView() };
         await reread.opened;
-        return { body: settingsView({ name: "Чердак", version: "2026-09-13T09:00:00Z" }) };
+        return { body: settingsView({ name: "Чердак", version: 2 }) };
       },
     });
     const user = userEvent.setup();
@@ -2336,7 +2371,7 @@ describe("settings", () => {
         return { body: answer };
       },
       "PUT /api/admin/settings": () => {
-        stored = settingsView({ name: "Чердак", version: "2026-09-13T09:00:00Z" });
+        stored = settingsView({ name: "Чердак", version: 2 });
         return { body: { settings: stored, reconciliation: nothingMoved, above_cap: 0 } };
       },
     });
@@ -2368,7 +2403,7 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": () => ({ body: settingsView({ version: "v1" }) }),
+      "GET /api/admin/settings": () => ({ body: settingsView({ version: 1 }) }),
       "PUT /api/admin/settings": async ({ body }) => {
         const draft = body as SettingsDraft;
         sent.push(draft);
@@ -2378,7 +2413,7 @@ describe("settings", () => {
             settings: settingsView({
               name: draft.name,
               address: draft.address,
-              version: `v${sent.length + 1}`,
+              version: sent.length + 1,
             }),
             reconciliation: nothingMoved,
             above_cap: 0,
@@ -2408,8 +2443,8 @@ describe("settings", () => {
 
     await user.click(screen.getByText("Сохранить"));
     await waitFor(() => expect(sent).toHaveLength(2));
-    expect(sent[0]).toMatchObject({ name: "Чердак", address: "ул. Рубинштейна, 24", version: "v1" });
-    expect(sent[1]).toMatchObject({ name: "Чердак", address: "Невский, 1", version: "v2" });
+    expect(sent[0]).toMatchObject({ name: "Чердак", address: "ул. Рубинштейна, 24", version: 1 });
+    expect(sent[1]).toMatchObject({ name: "Чердак", address: "Невский, 1", version: 2 });
   });
 
   it("carry a change to a table added in the save over to the table the save created, not a second one", async () => {
@@ -2419,7 +2454,7 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": () => ({ body: settingsView({ version: "v1" }) }),
+      "GET /api/admin/settings": () => ({ body: settingsView({ version: 1 }) }),
       "PUT /api/admin/settings": async ({ body }) => {
         const draft = body as SettingsDraft;
         sent.push(draft);
@@ -2432,10 +2467,10 @@ describe("settings", () => {
                 const known = stored.tables.find((each) => each.id === table.id);
                 return known
                   ? { ...known, seats: table.seats }
-                  : { id: table.id, number: 9, seats: table.seats, zone: table.zone, bookings_today: 0 };
+                  : { id: table.id, number: 9, seats: table.seats, zone: table.zone };
               }),
               next_table_number: 10,
-              version: `v${sent.length + 1}`,
+              version: sent.length + 1,
             }),
             reconciliation: nothingMoved,
             above_cap: 0,
@@ -2478,8 +2513,8 @@ describe("settings", () => {
         return {
           body:
             reads === 1
-              ? settingsView({ version: "2026-09-13T08:00:00Z" })
-              : settingsView({ address: "Невский, 1", version: "2026-09-13T09:00:00Z" }),
+              ? settingsView({ version: 1 })
+              : settingsView({ address: "Невский, 1", version: 2 }),
         };
       },
       "PUT /api/admin/settings": ({ body }) => {
@@ -2490,7 +2525,7 @@ describe("settings", () => {
         }
         return {
           body: {
-            settings: settingsView({ name: draft.name, address: draft.address, version: "2026-09-13T10:00:00Z" }),
+            settings: settingsView({ name: draft.name, address: draft.address, version: 3 }),
             reconciliation: nothingMoved,
             above_cap: 0,
           },
@@ -2520,7 +2555,7 @@ describe("settings", () => {
     expect(sent[1]).toMatchObject({
       name: "Чердак",
       address: "Невский, 1",
-      version: "2026-09-13T09:00:00Z",
+      version: 2,
     });
   });
 
@@ -2534,9 +2569,9 @@ describe("settings", () => {
       "GET /api/admin/shift": () => ({ body: shift() }),
       "GET /api/admin/settings": async () => {
         reads += 1;
-        if (reads === 1) return { body: settingsView({ version: "2026-09-13T08:00:00Z" }) };
+        if (reads === 1) return { body: settingsView({ version: 1 }) };
         await reread.opened;
-        return { body: settingsView({ name: "Подвал", version: "2026-09-13T09:00:00Z" }) };
+        return { body: settingsView({ name: "Подвал", version: 2 }) };
       },
       "PUT /api/admin/settings": ({ body }) => {
         sent.push(body as SettingsDraft);
@@ -2544,7 +2579,7 @@ describe("settings", () => {
           ? { status: 409, body: { error: { code: "settings_changed", message: "changed" } } }
           : {
               body: {
-                settings: settingsView({ name: "Мансарда", version: "2026-09-13T10:00:00Z" }),
+                settings: settingsView({ name: "Мансарда", version: 3 }),
                 reconciliation: nothingMoved,
                 above_cap: 0,
               },
@@ -2574,7 +2609,7 @@ describe("settings", () => {
 
     await user.click(screen.getByText("Сохранить"));
     await waitFor(() => expect(sent).toHaveLength(2));
-    expect(sent[1]).toMatchObject({ name: "Мансарда", version: "2026-09-13T09:00:00Z" });
+    expect(sent[1]).toMatchObject({ name: "Мансарда", version: 2 });
   });
 
   it("read the settings again only once a save has answered, and take the newest", async () => {
@@ -2589,15 +2624,15 @@ describe("settings", () => {
         return {
           body:
             reads === 1
-              ? settingsView({ version: "2026-09-13T08:00:00Z" })
-              : settingsView({ name: "Подвал", version: "2026-09-13T10:00:00Z" }),
+              ? settingsView({ version: 1 })
+              : settingsView({ name: "Подвал", version: 3 }),
         };
       },
       "PUT /api/admin/settings": async () => {
         await saving.opened;
         return {
           body: {
-            settings: settingsView({ name: "Чердак", version: "2026-09-13T09:00:00Z" }),
+            settings: settingsView({ name: "Чердак", version: 2 }),
             reconciliation: nothingMoved,
             above_cap: 0,
           },
@@ -2629,59 +2664,39 @@ describe("settings", () => {
     expect(screen.queryByText("Сохранить")).toBeNull();
   });
 
-  it("count a table's bookings only for the evening on screen, once a save made on another evening has answered", async () => {
+  it("count a table's bookings from the evening on screen, read for them without a look at the shift, and none until it is read", async () => {
     fakeTelegram();
-    const saving = gate();
-    let version = "2026-09-13T08:00:00Z";
-    let seats = 2;
-    const view = (date: string | null) =>
-      settingsView({
-        version,
-        service_date: date ?? "",
-        tables: [
-          { id: "t1", number: 7, seats, zone: "Стойка", bookings_today: date === "2026-09-12" ? 3 : 0 },
-          { id: "t2", number: 8, seats: 6, zone: "Зал", bookings_today: 0 },
-        ],
-      });
-    fakeServer({
+    const tomorrow = gate();
+    const server = fakeServer({
       "GET /api/session": staffSession,
-      "GET /api/admin/shift": ({ url }) => ({
-        body: shift({ service_date: url.searchParams.get("service_date") ?? "" }),
-      }),
-      "GET /api/admin/settings": ({ url }) => ({ body: view(url.searchParams.get("service_date")) }),
-      "PUT /api/admin/settings": async ({ body, url }) => {
-        await saving.opened;
-        seats = (body as SettingsDraft).tables[0]?.seats ?? seats;
-        version = "2026-09-13T09:00:00Z";
-        return {
-          body: {
-            settings: view(url.searchParams.get("service_date")),
-            reconciliation: nothingMoved,
-            above_cap: 0,
-          },
-        };
+      "GET /api/admin/shift": async ({ url }) => {
+        const date = url.searchParams.get("service_date") ?? "";
+        if (date === "2026-09-11") {
+          return { body: shift({ bookings: [shiftBooking(), shiftBooking({ id: "b2" })] }) };
+        }
+        await tomorrow.opened;
+        const three = ["b3", "b4", "b5"].map((id) => shiftBooking({ id }));
+        return { body: shift({ service_date: date, bookings: three }) };
       },
+      "GET /api/admin/settings": () => ({ body: settingsView() }),
     });
     const user = userEvent.setup();
     render(<Page />);
 
     await user.click(await screen.findByText("Настройки"));
     await user.click(await screen.findByText("Зал"));
-    await user.click(await screen.findByRole("button", { name: "Стол 7: больше мест" }));
-    await user.click(await screen.findByText("Сохранить"));
+    expect(await screen.findByText("2 брони")).toBeDefined();
+    expect(server.count("GET", "/api/admin/shift")).toBe(1);
 
     await user.click(screen.getByText("Смена"));
     await user.click(await screen.findByRole("button", { name: "Следующий день" }));
-    await screen.findByText("сб, 12 сен");
     await user.click(screen.getByText("Настройки"));
     await settle();
     expect(screen.getByText("Стол 7")).toBeDefined();
-    expect(screen.queryByText("3 брони")).toBeNull();
+    expect(screen.queryByText("2 брони")).toBeNull();
 
-    await saving.open();
-    await screen.findByText("Настройки сохранены.");
+    await tomorrow.open();
     expect(await screen.findByText("3 брони")).toBeDefined();
-    expect(screen.queryByText("Сохранить")).toBeNull();
   });
 
   it("take a save made on one evening as saved when it answers after a switch to another, with no second table", async () => {
@@ -2693,9 +2708,9 @@ describe("settings", () => {
       "GET /api/admin/shift": ({ url }) => ({
         body: shift({ service_date: url.searchParams.get("service_date") ?? "" }),
       }),
-      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
-      "PUT /api/admin/settings": async ({ body, url }) => {
-        const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+      "GET /api/admin/settings": () => ({ body: bar.read() }),
+      "PUT /api/admin/settings": async ({ body }) => {
+        const answer = bar.save(body as SettingsDraft);
         await saving.opened;
         return answer;
       },
@@ -2731,14 +2746,14 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": async ({ url }) => {
+      "GET /api/admin/settings": async () => {
         reads += 1;
         if (reads === 2) await reread.opened;
-        return { body: bar.read(url.searchParams.get("service_date")) };
+        return { body: bar.read() };
       },
-      "PUT /api/admin/settings": async ({ body, url }) => {
+      "PUT /api/admin/settings": async ({ body }) => {
         saves += 1;
-        const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+        const answer = bar.save(body as SettingsDraft);
         await saving.opened;
         return answer;
       },
@@ -2776,13 +2791,13 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": async ({ url }) => {
+      "GET /api/admin/settings": async () => {
         reads += 1;
         if (reads === 2) await later.opened;
-        return { body: bar.read(url.searchParams.get("service_date")) };
+        return { body: bar.read() };
       },
-      "PUT /api/admin/settings": ({ body, url }) =>
-        bar.save(body as SettingsDraft, url.searchParams.get("service_date")),
+      "PUT /api/admin/settings": ({ body }) =>
+        bar.save(body as SettingsDraft),
     });
     const user = userEvent.setup();
     render(<Page />);
@@ -2822,10 +2837,10 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
-      "PUT /api/admin/settings": ({ body, url }) => {
+      "GET /api/admin/settings": () => ({ body: bar.read() }),
+      "PUT /api/admin/settings": ({ body }) => {
         puts += 1;
-        const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+        const answer = bar.save(body as SettingsDraft);
         if (puts === 1) throw new TypeError("the answer never came back");
         return answer;
       },
@@ -2865,10 +2880,10 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": async ({ url }) => {
+      "GET /api/admin/settings": async () => {
         reads += 1;
         if (reads === 2) await later.opened;
-        return { body: bar.read(url.searchParams.get("service_date")) };
+        return { body: bar.read() };
       },
     });
     const user = userEvent.setup();
@@ -2946,7 +2961,7 @@ describe("settings", () => {
         reads += 1;
         if (reads === 2) return failed;
         return {
-          body: reads === 1 ? settingsView() : settingsView({ name: "Чердак", version: "2026-09-13T09:00:00Z" }),
+          body: reads === 1 ? settingsView() : settingsView({ name: "Чердак", version: 2 }),
         };
       },
     });
@@ -2972,10 +2987,10 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
-      "PUT /api/admin/settings": ({ body, url }) => {
+      "GET /api/admin/settings": () => ({ body: bar.read() }),
+      "PUT /api/admin/settings": ({ body }) => {
         const draft = body as SettingsDraft;
-        const answer = bar.save(draft, url.searchParams.get("service_date"));
+        const answer = bar.save(draft);
         if (answer.status) return answer;
         // In the order the save was sent, where every read lists the staff sorted.
         const saved = answer.body as { settings: SettingsView };
@@ -3034,10 +3049,10 @@ describe("settings", () => {
       fakeServer({
         "GET /api/session": staffSession,
         "GET /api/admin/shift": () => ({ body: shift() }),
-        "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
-        "PUT /api/admin/settings": ({ body, url }) => {
+        "GET /api/admin/settings": () => ({ body: bar.read() }),
+        "PUT /api/admin/settings": ({ body }) => {
           puts += 1;
-          const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+          const answer = bar.save(body as SettingsDraft);
           if (puts === 1) throw new TypeError("the answer never came back");
           return answer;
         },
@@ -3127,12 +3142,12 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": ({ url }) => {
+      "GET /api/admin/settings": () => {
         reads += 1;
-        return reads === 2 ? failed : { body: bar.read(url.searchParams.get("service_date")) };
+        return reads === 2 ? failed : { body: bar.read() };
       },
-      "PUT /api/admin/settings": ({ body, url }) =>
-        bar.save(body as SettingsDraft, url.searchParams.get("service_date")),
+      "PUT /api/admin/settings": ({ body }) =>
+        bar.save(body as SettingsDraft),
     });
     const user = userEvent.setup();
     render(<Page />);
@@ -3160,7 +3175,7 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
+      "GET /api/admin/settings": () => ({ body: bar.read() }),
     });
     const user = userEvent.setup();
     render(<Page />);
@@ -3185,7 +3200,7 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
+      "GET /api/admin/settings": () => ({ body: bar.read() }),
     });
     const user = userEvent.setup();
     render(<Page />);
@@ -3216,9 +3231,9 @@ describe("settings", () => {
       fakeServer({
         "GET /api/session": staffSession,
         "GET /api/admin/shift": () => ({ body: shift() }),
-        "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
-        "PUT /api/admin/settings": async ({ body, url }) => {
-          const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+        "GET /api/admin/settings": () => ({ body: bar.read() }),
+        "PUT /api/admin/settings": async ({ body }) => {
+          const answer = bar.save(body as SettingsDraft);
           await saving.opened;
           return answer;
         },
@@ -3253,9 +3268,9 @@ describe("settings", () => {
     fakeServer({
       "GET /api/session": staffSession,
       "GET /api/admin/shift": () => ({ body: shift() }),
-      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
-      "PUT /api/admin/settings": async ({ body, url }) => {
-        const answer = bar.save(body as SettingsDraft, url.searchParams.get("service_date"));
+      "GET /api/admin/settings": () => ({ body: bar.read() }),
+      "PUT /api/admin/settings": async ({ body }) => {
+        const answer = bar.save(body as SettingsDraft);
         await saving.opened;
         return answer;
       },

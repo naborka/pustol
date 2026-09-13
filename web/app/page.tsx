@@ -25,16 +25,18 @@ import {
   client as makeClient,
   draftOf,
   type Attendance,
-  type Availability,
   type DayOffer,
+  type GuestAvailability,
   type GuestBooking,
   type Reconciliation,
   type Session,
+  type SessionEnd,
   type SettingsView,
   type ShiftBooking,
   type ShiftView,
+  type StaffAvailability,
 } from "@/lib/api";
-import { canRetry, messageFor, needsRelaunch, readFailureText, type ApiFailure } from "@/lib/errors";
+import { failureOf, messageFor, needsRelaunch, type Audience } from "@/lib/errors";
 import * as fmt from "@/lib/format";
 import {
   attendanceOutcome,
@@ -44,7 +46,7 @@ import {
   type Closure,
   type Refusal,
 } from "@/lib/outcomes";
-import { edited, firstReason, type Edit } from "@/lib/settingsRules";
+import { edited, firstReason, same, type Edit } from "@/lib/settingsRules";
 import type { Order } from "@/lib/reads";
 import { isDirty, received, savedInto, type SettingsPair } from "@/lib/settingsSync";
 import {
@@ -57,7 +59,7 @@ import {
 } from "@/lib/sheet";
 import { credentials, haptics, openBotChat, openContact, webApp } from "@/lib/telegram";
 import { SPACE, TIMING } from "@/lib/tokens";
-import { failureOf, useRead } from "@/lib/useRead";
+import { useRead } from "@/lib/useRead";
 import { ShiftActions, ShiftScreen, type ShiftPane } from "@/components/AdminShift";
 import { AppShell, InsetFrame, type StaffTab } from "@/components/AppChrome";
 import {
@@ -67,9 +69,7 @@ import {
   bookingDecision,
   chosenTime,
   heldAfter,
-  heldOn,
   pickerStart,
-  replacedBy,
 } from "@/components/GuestScreens";
 import { SaveBar, SettingsScreen, type Section } from "@/components/Settings";
 import { useInsets } from "@/components/ThemeProvider";
@@ -90,8 +90,8 @@ import {
   Failure,
   MainButton,
   Note,
+  ReadView,
   Spinner,
-  StaleNotice,
   Toast,
   type ToastMessage,
 } from "@/components/ui";
@@ -122,10 +122,7 @@ const HOME_REFRESH_MS = 60_000;
 /** The session is one question, whoever asks it. */
 const SESSION = "session";
 
-/**
- * So are the settings: they are the bar's, whichever evening is on screen. Only the per-table counts
- * belong to an evening, and the answer names which.
- */
+/** So are the settings: they are the bar's, whichever evening is on screen. */
 const SETTINGS = "settings";
 
 /**
@@ -135,18 +132,11 @@ const SETTINGS = "settings";
  */
 const roomOrder: Order<ShiftView> = (next, shown) => next.version - shown.version;
 
+/** Settings are ordered by the bar's count of saves, so an older reread never lands over a save. */
+const settingsOrder: Order<SettingsView> = (next, shown) => next.version - shown.version;
+
 /** A read whose answers are only drawn, never folded into anything. */
 const nothing = () => {};
-
-/** A staff read with nothing to show failed: why, and a retry only where one can help. */
-function unreadScreen(failure: ApiFailure, generic: string, retry: () => void) {
-  return (
-    <Failure
-      message={readFailureText(failure, "staff", generic)}
-      {...(canRetry(failure) ? { actionLabel: "Попробовать снова", onAction: retry } : {})}
-    />
-  );
-}
 
 const EMPTY_MANUAL = {
   name: "",
@@ -195,12 +185,16 @@ function useSynced<T>(initial: T): [T, (change: (current: T) => T) => void, { re
 }
 
 export default function Page() {
-  // Read after mounting, never while rendering. The page is prerendered where there is no Telegram
-  // at all, and a first render that decided "no payload" wrote «Откройте приложение из Telegram»
-  // into the HTML every guest saw until the scripts had loaded.
+  // Read after mounting, never while rendering: the page is prerendered where there is no Telegram,
+  // and that HTML is what a guest sees until the scripts have loaded.
   const [token, setToken] = useState<string | null | undefined>(undefined);
   useEffect(() => setToken(credentials()), []);
-  const api = useMemo(() => (token ? makeClient(token) : null), [token]);
+  // Whether the client found the session ended, as it last said.
+  const [sessionEnd, changeSessionEnd, sessionEndNow] = useSynced<SessionEnd>(null);
+  const api = useMemo(
+    () => (token ? makeClient(token, (end) => changeSessionEnd(() => end)) : null),
+    [token, changeSessionEnd],
+  );
 
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const toastNow = useRef<ToastMessage | null>(null);
@@ -216,12 +210,6 @@ export default function Page() {
 
   const [shiftDate, setShiftDate] = useState<string | null>(null);
   const [pane, setPane] = useState<ShiftPane>("now");
-
-  // When the session was found ended, and the newest word on it since. Only a session read asked
-  // after that, and answered, brings the app back: a guest write answering meanwhile proves nothing.
-  const [ended, changeEnded, endedNow] = useSynced<{ at: number; failure: ApiFailure } | null>(
-    null,
-  );
 
   const [pair, changePair, pairNow] = useSynced<SettingsPair | null>(null);
   // The edits made while a save is on its way, to be made again on top of what it stored.
@@ -275,78 +263,45 @@ export default function Page() {
 
   const tell = useCallback((text: string) => say({ text }), [say]);
 
-  // ---- reads ------------------------------------------------------------------------------------
-
-  /**
-   * Whether a failure ended the session, which is then recorded however it came: the screen says so
-   * until a session read asked after it answers.
-   */
-  const endsSessionRef = useRef<(failure: ApiFailure) => boolean>(() => false);
-  const endsSession = useCallback((failure: ApiFailure) => endsSessionRef.current(failure), []);
-
-  /**
-   * A failed read says nothing of its own. Its question, if still on screen, shows it where its
-   * answer is drawn — a failure card, or a notice over the answer before — and only an ended session
-   * has a screen of its own.
-   */
-  const readFailed = (failure: ApiFailure) => {
-    endsSession(failure);
-  };
-
-  /** Turns a failed action into words for whoever took it. */
+  /** Turns a failed action into words for whoever took it. An ended session has a screen of its own. */
   const report = useCallback(
-    (failure: ApiFailure, audience: "guest" | "staff") => {
-      if (endsSession(failure)) return;
+    (error: unknown, audience: Audience) => {
+      const failure = failureOf(error);
+      if (needsRelaunch(failure)) return;
       haptics.error();
       tell(messageFor(failure, audience));
     },
-    [endsSession, tell],
+    [tell],
+  );
+
+  // ---- reads ------------------------------------------------------------------------------------
+
+  /**
+   * Asks by itself — a refresh, a reread after a write — only while the session stands. Once it has
+   * ended only a retry somebody taps asks: anything else spun over the screen that says to reopen
+   * the app, and met the same refusal.
+   */
+  const refresh = useCallback(
+    (load: () => Promise<void> | void) => {
+      if (sessionEndNow.current === null) void load();
+    },
+    [sessionEndNow],
   );
 
   const sessionRead = useRead<Session>(
     api ? { key: SESSION, ask: () => api.session() } : null,
     (next) => {
-      setSheet((current) => refreshedGuestSheet(current, next.bookings));
       setServiceDate((current) => current ?? next.bookable_days[0] ?? next.bar.today);
       setShiftDate((current) => current ?? next.bar.today);
     },
-    (failure, number) => {
-      if (endsSession(failure)) return;
-      changeEnded((current) =>
-        current && number > current.at ? { ...current, failure } : current,
-      );
-    },
   );
-  const {
-    load: loadSession,
-    put: putSession,
-    mark: markSession,
-    answeredNow: sessionAnsweredNow,
-  } = sessionRead;
+  const { load: loadSession, put: putSession } = sessionRead;
   const session = sessionRead.value;
 
+  // The guest's cancel sheet follows the bookings on screen, whether a read or a write brought them.
   useEffect(() => {
-    endsSessionRef.current = (failure) => {
-      if (!needsRelaunch(failure)) return false;
-      const at = markSession();
-      changeEnded(() => ({ at, failure }));
-      return true;
-    };
-  }, [markSession, changeEnded]);
-
-  /**
-   * Asks by itself — a refresh, a reread after a write — unless the session has ended and no read of
-   * it asked since has answered. Then only a retry somebody taps may ask: anything else only spun
-   * over the screen that says to reopen the app, and met the same refusal.
-   */
-  const unprompted = useCallback(
-    (ask: () => unknown) => {
-      const end = endedNow.current;
-      if (end !== null && sessionAnsweredNow(SESSION) < end.at) return;
-      void ask();
-    },
-    [endedNow, sessionAnsweredNow],
-  );
+    if (session) setSheet((current) => refreshedGuestSheet(current, session.bookings));
+  }, [session]);
 
   /** Puts what a guest write answered on screen at once; a reread afterwards only freshens it. */
   const amendSession = (change: (current: Session) => Session) =>
@@ -362,7 +317,6 @@ export default function Page() {
   const daysRead = useRead<DayOffer[]>(
     api ? { key: String(partySize), ask: async () => (await api.days(partySize)).days } : null,
     nothing,
-    readFailed,
   );
   const loadDays = daysRead.load;
 
@@ -372,8 +326,9 @@ export default function Page() {
   }, [screen, partySize, api, loadDays]);
 
   // The time grid recomputes whenever the question changes. Every answer comes from the server,
-  // which has run the real allocator: a time shown as free is a time with a table behind it.
-  const timesRead = useRead<Availability>(
+  // which has run the real allocator: a time shown as free is a time with a table behind it, and
+  // what a booking then would replace is the server's word too.
+  const timesRead = useRead<GuestAvailability>(
     api && serviceDate !== null
       ? {
           key: `${serviceDate}|${partySize}`,
@@ -381,7 +336,6 @@ export default function Page() {
         }
       : null,
     nothing,
-    readFailed,
   );
   const loadTimes = timesRead.load;
 
@@ -390,33 +344,38 @@ export default function Page() {
     void loadTimes();
   }, [screen, serviceDate, partySize, api, loadTimes]);
 
-  // Every sheet open on the evening on screen is brought up to date with the room it now has.
   const shiftRead = useRead<ShiftView>(
     api && shiftDate !== null ? { key: shiftDate, ask: () => api.shift(shiftDate) } : null,
-    (room, { onScreen }) => {
-      if (onScreen) setSheet((current) => refreshedSheet(current, room));
-    },
-    readFailed,
+    nothing,
     roomOrder,
   );
   const { load: loadShift, put: putShift, mark: markShift } = shiftRead;
+  // Only the evening asked for is shown: another evening is not a refresh of this one.
+  const shiftOnScreen = shiftRead.value;
 
+  // Every sheet open on the evening on screen follows the room it now has, whether a read or a write
+  // brought it.
   useEffect(() => {
-    if (tab !== "shift" || shiftDate === null) return;
+    if (shiftOnScreen) setSheet((current) => refreshedSheet(current, shiftOnScreen));
+  }, [shiftOnScreen]);
+
+  // The settings count each table's bookings from this evening too.
+  useEffect(() => {
+    if ((tab !== "shift" && tab !== "settings") || shiftDate === null) return;
     void loadShift();
   }, [tab, shiftDate, api, loadShift]);
 
   useWhileVisible(
     useMemo(
-      () => (tab === "shift" && shiftDate !== null ? () => unprompted(loadShift) : null),
-      [tab, shiftDate, loadShift, unprompted],
+      () => (tab === "shift" && shiftDate !== null ? () => refresh(loadShift) : null),
+      [tab, shiftDate, loadShift, refresh],
     ),
     SHIFT_REFRESH_MS,
   );
   useWhileVisible(
     useMemo(
-      () => (tab === "client" && screen === "home" ? () => unprompted(loadSession) : null),
-      [tab, screen, loadSession, unprompted],
+      () => (tab === "client" && screen === "home" ? () => refresh(loadSession) : null),
+      [tab, screen, loadSession, refresh],
     ),
     HOME_REFRESH_MS,
   );
@@ -426,10 +385,8 @@ export default function Page() {
   // asked again once the save has answered. What it did to the edit waits on the settings screen:
   // it may land while the shift is on screen, where a toast would be gone before anybody came back.
   const settingsRead = useRead<SettingsView>(
-    api && shiftDate !== null ? { key: SETTINGS, ask: () => api.settings(shiftDate) } : null,
-    (next, { written }) => {
-      // A save's own answer is folded by the save, which knows the edits made while it was away.
-      if (written) return;
+    api ? { key: SETTINGS, ask: () => api.settings() } : null,
+    (next) => {
       if (savingNow.current) {
         settingsWanted.current = true;
         return;
@@ -438,7 +395,7 @@ export default function Page() {
       changePair(() => outcome.pair);
       if (outcome.notice) setFolded(outcome.notice);
     },
-    readFailed,
+    settingsOrder,
   );
   const { load: readSettings, put: putSettings, mark: markSettings } = settingsRead;
 
@@ -451,12 +408,12 @@ export default function Page() {
     settingsWanted.current = true;
   }, [readSettings, savingNow]);
 
-  const settingsDirty = pair !== null && isDirty(pair);
+  const settingsDirty = useMemo(() => pair !== null && isDirty(pair), [pair]);
 
   useEffect(() => {
-    if (tab !== "settings" || shiftDate === null) return;
+    if (tab !== "settings") return;
     loadSettings();
-  }, [tab, shiftDate, api, loadSettings]);
+  }, [tab, api, loadSettings]);
 
   // Closing Telegram with unsaved settings asks first, the way switching tabs no longer loses them.
   useEffect(() => {
@@ -484,16 +441,15 @@ export default function Page() {
 
   // Writing a booking down and moving one ask the same question, so there is one of it. A move
   // sets its own booking aside — shifting it half an hour must not mean giving up its table first
-  // and hoping — and a booking already under way is not asking at all: its time cannot change.
+  // and hoping — and asks even once the booking is under way, when only its tables can change.
   const moving = sheet.kind === "move" ? sheet.booking : null;
-  const movingTime = moving !== null && !moving.started;
-  const asksTimes = sheet.kind === "manual" || movingTime;
+  const asksTimes = sheet.kind === "manual" || moving !== null;
   const askParty = moving ? (move.party ?? moving.party_size) : manual.partySize;
-  const askIgnoring = movingTime && moving ? moving.id : undefined;
+  const askIgnoring = moving?.id;
   const staffTimesKey =
     shiftDate !== null && asksTimes ? `${shiftDate}|${askParty}|${askIgnoring ?? ""}` : null;
 
-  const staffTimesRead = useRead<Availability>(
+  const staffTimesRead = useRead<StaffAvailability>(
     api && shiftDate !== null && staffTimesKey !== null
       ? {
           key: staffTimesKey,
@@ -501,7 +457,6 @@ export default function Page() {
         }
       : null,
     nothing,
-    readFailed,
   );
   const loadStaffTimes = staffTimesRead.load;
 
@@ -568,13 +523,12 @@ export default function Page() {
       </InsetFrame>
     );
   }
-  const dead = ended !== null && sessionRead.answeredUpTo < ended.at ? ended : null;
-  // Only a session read asked after the end can bring the app back, so only such a read may spin
-  // over the screen that says so.
-  const blocking = dead
-    ? sessionRead.pendingUpTo > dead.at
+  // Only a read of the session asked after it ended can bring the app back, so only that read may
+  // spin over the screen that says so.
+  const blocking = sessionEnd
+    ? sessionEnd.retrying
       ? null
-      : dead.failure
+      : sessionEnd.failure
     : session === null
       ? sessionRead.failure
       : null;
@@ -593,7 +547,7 @@ export default function Page() {
       </InsetFrame>
     );
   }
-  if (dead || !session || !api || serviceDate === null || shiftDate === null) {
+  if (sessionEnd || !session || !api || serviceDate === null || shiftDate === null) {
     return (
       <InsetFrame insets={insets}>
         <Spinner label="Открываем" />
@@ -605,18 +559,14 @@ export default function Page() {
   const closeSheet = () => setSheet(NO_SHEET);
   /** Closes the sheet an action was started from, and no sheet opened since. */
   const closeIfStill = (from: OpenSheet) => setSheet((current) => closedIfStill(current, from));
-  // Only the evening asked for is shown: another evening is not a refresh of this one.
-  const shiftOnScreen = shiftRead.value;
   // The server's day, not the one this phone read when it opened: a shift left open overnight.
   const today = shiftOnScreen?.today ?? bar.today;
   // ISO dates compare as strings. An evening that is over is read, not written into.
   const isPast = shiftDate < today;
-  // An answer to another question must not stand in for one that failed; this question's own
-  // answer before still can, with a word that it could not be read again.
-  const days = daysRead.failure ? daysRead.value : daysRead.shown;
-  const times = timesRead.failure ? timesRead.value : timesRead.shown;
-  const chosen = chosenTime(times, chosenMinutes);
-  const shownStaffTimes = staffTimesRead.failure ? null : staffTimesRead.shown;
+  // The time chosen, and what booking it does, come from the answer to the question on screen: the
+  // answer drawn while another loads was for another evening or party.
+  const timesOnScreen = timesRead.value;
+  const chosen = chosenTime(timesOnScreen, chosenMinutes);
 
   // ---- guest actions --------------------------------------------------------------------------
 
@@ -629,13 +579,10 @@ export default function Page() {
   };
 
   const book = exclusive(async () => {
-    if (chosen === null) return;
-    // What the button said this booking replaces. The server refuses rather than replace otherwise.
-    const replacing = session.bookings
-      .filter((held) => replacedBy(held, serviceDate))
-      .map((held) => held.id);
+    if (chosen === null || timesOnScreen === null) return;
     try {
-      const answer = await api.book(serviceDate, chosen, partySize, replacing);
+      // What the button said this booking replaces. The server refuses rather than replace otherwise.
+      const answer = await api.book(serviceDate, chosen, partySize, timesOnScreen.replacing);
       haptics.success();
       setTaken({ booking: answer.booking, moved: answer.replaced.length > 0 });
       // The answer already says what was booked. Showing it does not wait on rereading the home
@@ -645,26 +592,25 @@ export default function Page() {
         bookings: heldAfter(current.bookings, answer.replaced, answer.booking),
       }));
       setScreen("done");
-      unprompted(loadSession);
+      refresh(loadSession);
     } catch (error) {
-      const failure = failureOf(error);
-      report(failure, "guest");
-      if (failure.code === "booking_changed") {
+      report(error, "guest");
+      const { code } = failureOf(error);
+      if (code === "booking_changed") {
         // What the guest holds changed since the button was drawn. The picker stays as it is; the
-        // button redraws from what they hold now and the times as they stand now, for them to look
-        // at and press again.
-        unprompted(loadSession);
-        unprompted(loadDays);
-        unprompted(loadTimes);
+        // button redraws from the times as they stand now, for them to look at and press again.
+        refresh(loadSession);
+        refresh(loadDays);
+        refresh(loadTimes);
         return;
       }
       // Refused for what the guest already holds: the labels were drawn from bookings that changed.
-      if (failure.code === "already_booked_tonight") unprompted(loadSession);
+      if (code === "already_booked_tonight") refresh(loadSession);
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
       // showing a time that no longer exists.
       setChosenMinutes(null);
-      unprompted(loadTimes);
-      unprompted(loadDays);
+      refresh(loadTimes);
+      refresh(loadDays);
     }
   });
 
@@ -680,9 +626,9 @@ export default function Page() {
         bookings: heldAfter(current.bookings, [was.id], null),
       }));
       tell("Бронь отменена. Стол снова свободен.");
-      unprompted(loadSession);
+      refresh(loadSession);
     } catch (error) {
-      report(failureOf(error), "guest");
+      report(error, "guest");
     }
   });
 
@@ -690,11 +636,11 @@ export default function Page() {
     try {
       const reminders = await api.optInToReminders();
       amendSession((current) => ({ ...current, reminders }));
-      unprompted(loadSession);
+      refresh(loadSession);
       openBotChat(process.env.NEXT_PUBLIC_BOT_USERNAME ?? "");
       tell(`Напомним за ${fmt.hoursWord(bar.remind_hours)} до брони.`);
     } catch (error) {
-      report(failureOf(error), "guest");
+      report(error, "guest");
     }
   });
 
@@ -702,21 +648,13 @@ export default function Page() {
     try {
       const reminders = await api.dismissReminderPrompt();
       amendSession((current) => ({ ...current, reminders }));
-      unprompted(loadSession);
+      refresh(loadSession);
     } catch (error) {
-      report(failureOf(error), "guest");
+      report(error, "guest");
     }
   });
 
-  const offer = daysRead.shown?.find((day) => day.service_date === serviceDate);
-  const decision = bookingDecision(
-    partySize,
-    serviceDate,
-    bar,
-    chosen,
-    session.bookings,
-    offer ? offer.booked : heldOn(session.bookings, serviceDate),
-  );
+  const decision = bookingDecision(partySize, serviceDate, bar, chosen, timesOnScreen);
   // A guest holding a plan moves it from its card; one holding only a table tonight, or nothing,
   // books another evening from here.
   const holdsPlan = session.bookings.some((held) => held.rebooking_replaces === "any_evening");
@@ -769,7 +707,7 @@ export default function Page() {
             : {}),
         });
       } catch (error) {
-        report(failureOf(error), "staff");
+        report(error, "staff");
       }
     },
   );
@@ -781,7 +719,7 @@ export default function Page() {
     try {
       await writeShift(() => api.setNote(booking.id, note));
     } catch (error) {
-      report(failureOf(error), "staff");
+      report(error, "staff");
     }
   });
 
@@ -799,7 +737,7 @@ export default function Page() {
             .join(" "),
         });
       } catch (error) {
-        report(failureOf(error), "staff");
+        report(error, "staff");
       }
     },
   );
@@ -810,10 +748,9 @@ export default function Page() {
       closeIfStill(from);
       tell(`Отправлено ${booking.guest_name}: «${text}»`);
     } catch (error) {
-      const failure = failureOf(error);
-      report(failure, "staff");
+      report(error, "staff");
       // The room on screen said the bot could reach the guest. Read again, it says it cannot.
-      if (failure.code === "no_bot_chat") unprompted(loadShift);
+      if (failureOf(error).code === "no_bot_chat") refresh(loadShift);
     }
   });
 
@@ -846,7 +783,7 @@ export default function Page() {
         moved.orphaned.push(...answer.reconciliation.orphaned);
       }
     } catch (error) {
-      report(failureOf(error), "staff");
+      report(error, "staff");
       return;
     }
     const text = rearranged(
@@ -879,7 +816,7 @@ export default function Page() {
           : { text },
       );
     } catch (error) {
-      report(failureOf(error), "staff");
+      report(error, "staff");
     }
   });
 
@@ -895,7 +832,7 @@ export default function Page() {
         ),
       );
     } catch (error) {
-      report(failureOf(error), "staff");
+      report(error, "staff");
     }
   });
 
@@ -906,9 +843,9 @@ export default function Page() {
       closeIfStill(from);
       tell(`Посадили за стол ${answer.booking.table_number}.`);
     } catch (error) {
-      report(failureOf(error), "staff");
+      report(error, "staff");
       // A refusal carries no room, and it usually means the room on screen is behind.
-      unprompted(loadShift);
+      refresh(loadShift);
     }
   });
 
@@ -921,17 +858,15 @@ export default function Page() {
         api.createStaffBooking(shiftDate, minutes, sent.partySize, sent.name, tableId),
       );
       // A form already holding the next guest is not this one's to clear.
-      setManual((current) =>
-        JSON.stringify(current) === JSON.stringify(sent) ? EMPTY_MANUAL : current,
-      );
+      setManual((current) => (same(current, sent) ? EMPTY_MANUAL : current));
       closeIfStill(from);
       const created = answer.booking;
       tell(
         `${created.guest_name} записан на ${fmt.time(created.start_minutes)}, стол ${created.table_number}.`,
       );
     } catch (error) {
-      report(failureOf(error), "staff");
-      unprompted(loadStaffTimes);
+      report(error, "staff");
+      refresh(loadStaffTimes);
     }
   });
 
@@ -963,8 +898,8 @@ export default function Page() {
           text: [told, reconciliationReport(answer.reconciliation)].filter(Boolean).join(" "),
         });
       } catch (error) {
-        report(failureOf(error), "staff");
-        unprompted(loadShift);
+        report(error, "staff");
+        refresh(loadShift);
       }
     },
   );
@@ -979,7 +914,7 @@ export default function Page() {
     editsDuringSave.current = [];
     const asked = markSettings();
     try {
-      const saved = await api.saveSettings(shiftDate, sent);
+      const saved = await api.saveSettings(sent);
       const meanwhile = editsDuringSave.current ?? [];
       changePair((current) => savedInto(current, saved.settings, meanwhile));
       // On record as an answer too: a reread that failed before this save is no longer news.
@@ -989,10 +924,10 @@ export default function Page() {
         parts.push(`${fmt.bookings(saved.above_cap)} больше нового лимита — они остаются в силе.`);
       }
       tell(parts.filter(Boolean).join(" "));
-      unprompted(loadSession);
+      refresh(loadSession);
     } catch (error) {
+      report(error, "staff");
       const failure = failureOf(error);
-      report(failure, "staff");
       const refused = refusalOf(failure);
       if (refused) {
         // Kept on the save bar. A sheet opened while the save was on its way is somebody's next
@@ -1000,14 +935,14 @@ export default function Page() {
         setRefusal(refused);
         if (openings.current === openedBefore) openSheet({ kind: "conflict", refusal: refused });
       } else if (failure.code === "settings_changed") {
-        unprompted(loadSettings);
+        refresh(loadSettings);
       }
     } finally {
       editsDuringSave.current = null;
       changeSaving(() => false);
       const wanted = settingsWanted.current;
       settingsWanted.current = false;
-      if (wanted) unprompted(readSettings);
+      if (wanted) refresh(readSettings);
     }
   });
 
@@ -1139,8 +1074,7 @@ export default function Page() {
             open={sheet.kind === "manual"}
             shift={shiftOnScreen}
             maxParty={bar.max_party}
-            turnMinutes={bar.turn_minutes}
-            availability={shownStaffTimes}
+            availability={staffTimesRead.drawn}
             partySize={manual.partySize}
             chosenMinutes={manual.minutes}
             chosenTableId={manual.table}
@@ -1166,7 +1100,7 @@ export default function Page() {
             turnMinutes={bar.turn_minutes}
             maxParty={bar.max_party}
             partySize={move.party ?? moving?.party_size ?? DEFAULT_PARTY}
-            availability={shownStaffTimes}
+            availability={staffTimesRead.drawn}
             chosenMinutes={move.minutes}
             chosenTableId={move.table}
             loadFailure={staffTimesRead.failure}
@@ -1216,8 +1150,8 @@ export default function Page() {
       {tab === "client" && screen === "book" ? (
         <BookScreen
           bar={bar}
-          days={days}
-          availability={times}
+          days={daysRead.drawn}
+          availability={timesRead.drawn}
           partySize={partySize}
           serviceDate={serviceDate}
           chosenMinutes={chosen}
@@ -1247,20 +1181,19 @@ export default function Page() {
       ) : null}
 
       {tab === "shift" ? (
-        shiftOnScreen ? (
-          <>
-            {shiftRead.failure ? (
-              <div style={{ padding: `${SPACE[3]}px ${SPACE[3]}px 0` }}>
-                <StaleNotice
-                  failure={shiftRead.failure}
-                  audience="staff"
-                  onRetry={() => void loadShift()}
-                />
-              </div>
-            ) : null}
+        <ReadView
+          value={shiftOnScreen}
+          failure={shiftRead.failure}
+          audience="staff"
+          generic="Не удалось прочитать смену."
+          loading="Читаем смену"
+          onRetry={() => void loadShift()}
+          padding={`${SPACE[3]}px ${SPACE[3]}px 0`}
+        >
+          {(room) => (
             <ShiftScreen
-              shift={shiftOnScreen}
-              today={shiftOnScreen.today}
+              shift={room}
+              today={room.today}
               graceMinutes={bar.grace_minutes}
               pane={pane}
               onPane={setPane}
@@ -1274,49 +1207,42 @@ export default function Page() {
                 onFindTable: () => void findTables(NO_SHEET),
               }}
             />
-          </>
-        ) : shiftRead.failure ? (
-          unreadScreen(shiftRead.failure, "Не удалось прочитать смену.", () => void loadShift())
-        ) : (
-          <Spinner label="Читаем смену" />
-        )
+          )}
+        </ReadView>
       ) : null}
 
       {tab === "settings" ? (
-        pair ? (
-          <>
-            {folded !== null && settingsDirty ? (
-              <div style={{ padding: `${SPACE[3]}px ${SPACE[4]}px 0` }}>
-                <Card gap={SPACE[2]}>
-                  <Note tone="warn">{folded}</Note>
-                </Card>
-              </div>
-            ) : null}
-            {settingsRead.failure ? (
-              <div style={{ padding: `${SPACE[3]}px ${SPACE[4]}px 0` }}>
-                <StaleNotice
-                  failure={settingsRead.failure}
-                  audience="staff"
-                  onRetry={() => loadSettings()}
-                />
-              </div>
-            ) : null}
-            <SettingsScreen
-              settings={pair.settings}
-              draft={pair.draft}
-              serviceDate={shiftDate}
-              editedWeekday={editedWeekday}
-              onEdit={editDraft}
-              onEditWeekday={setEditedWeekday}
-              section={settingsSection}
-              onSection={setSettingsSection}
-            />
-          </>
-        ) : settingsRead.failure ? (
-          unreadScreen(settingsRead.failure, "Не удалось прочитать настройки.", () => loadSettings())
-        ) : (
-          <Spinner label="Читаем настройки" />
-        )
+        <ReadView
+          value={pair}
+          failure={settingsRead.failure}
+          audience="staff"
+          generic="Не удалось прочитать настройки."
+          loading="Читаем настройки"
+          onRetry={() => loadSettings()}
+          padding={`${SPACE[3]}px ${SPACE[4]}px 0`}
+        >
+          {(shown) => (
+            <>
+              {folded !== null && settingsDirty ? (
+                <div style={{ padding: `${SPACE[3]}px ${SPACE[4]}px 0` }}>
+                  <Card gap={SPACE[2]}>
+                    <Note tone="warn">{folded}</Note>
+                  </Card>
+                </div>
+              ) : null}
+              <SettingsScreen
+                settings={shown.settings}
+                draft={shown.draft}
+                room={shiftOnScreen}
+                editedWeekday={editedWeekday}
+                onEdit={editDraft}
+                onEditWeekday={setEditedWeekday}
+                section={settingsSection}
+                onSection={setSettingsSection}
+              />
+            </>
+          )}
+        </ReadView>
       ) : null}
     </AppShell>
   );

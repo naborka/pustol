@@ -3,8 +3,7 @@
  *
  * Every read names its question — the evening, the party and the date, the session — and gets a
  * number. Each question keeps its own last value and its own last failure, so an answer about
- * tomorrow never decides whether an answer about tonight is news: one number shared by every
- * question dropped a good answer whenever another question had answered in between.
+ * tomorrow never decides whether an answer about tonight is news.
  *
  * An answer replaces the value on record when the server orders it after that value (a room carries
  * a version), or, when the server cannot tell the two apart or orders nothing, when it was asked
@@ -32,8 +31,6 @@ export interface Entry<T> {
    */
   readonly heard: number;
   readonly failure?: { readonly number: number; readonly failure: ApiFailure };
-  /** The newest read of this question that answered, applied or not; 0 before any. */
-  readonly answered: number;
 }
 
 export interface Ledger<T> {
@@ -45,7 +42,7 @@ export interface Ledger<T> {
 
 export const EMPTY_LEDGER: Ledger<never> = { asked: 0, inFlight: [], entries: {} };
 
-const NOTHING: Entry<never> = { heard: 0, answered: 0 };
+const NOTHING: Entry<never> = { heard: 0 };
 
 function entryOf<T>(ledger: Ledger<T>, key: string): Entry<T> {
   return ledger.entries[key] ?? NOTHING;
@@ -105,9 +102,8 @@ export function answered<T>(
   const next = landed(ledger, number);
   const entry = entryOf(next, key);
   const apply = replaces(entry, number, data, order);
-  const answeredUpTo = Math.max(entry.answered, number);
   const kept = apply ? applied(entry, number, data) : heardAt(entry, number);
-  return { ledger: withEntry(next, key, { ...kept, answered: answeredUpTo }), apply };
+  return { ledger: withEntry(next, key, kept), apply };
 }
 
 /** A read of `key` failed: recorded only when it was asked after every answer heard. */
@@ -151,14 +147,6 @@ export function pendingOn<T>(ledger: Ledger<T>, key: string | null): boolean {
   return ledger.inFlight.some((read) => read.key === key);
 }
 
-/** The number of the newest read of `key` on its way; 0 when none is. */
-export function pendingUpTo<T>(ledger: Ledger<T>, key: string | null): number {
-  return ledger.inFlight.reduce(
-    (newest, read) => (read.key === key ? Math.max(newest, read.number) : newest),
-    0,
-  );
-}
-
 /** The value on record for `key`, or null. */
 export function valueOn<T>(ledger: Ledger<T>, key: string | null): T | null {
   if (key === null) return null;
@@ -171,7 +159,27 @@ export function failureOn<T>(ledger: Ledger<T>, key: string | null): ApiFailure 
   return entryOf(ledger, key).failure?.failure ?? null;
 }
 
-/** The number of the newest read of `key` that answered; 0 before any. */
-export function answeredUpTo<T>(ledger: Ledger<T>, key: string | null): number {
-  return key === null ? 0 : entryOf(ledger, key).answered;
+function lastHeard<T>(entry: Entry<T>): number {
+  return Math.max(entry.heard, entry.failure?.number ?? 0);
+}
+
+/**
+ * The ledger without every question but the one on screen, the ones on their way, and the `keep`
+ * heard from last of the rest.
+ */
+export function pruned<T>(ledger: Ledger<T>, onScreen: string | null, keep: number): Ledger<T> {
+  const idle = Object.entries(ledger.entries).filter(
+    ([key]) => key !== onScreen && !pendingOn(ledger, key),
+  );
+  if (idle.length <= keep) return ledger;
+  const dropped = new Set(
+    idle
+      .sort(([, left], [, right]) => lastHeard(right) - lastHeard(left))
+      .slice(keep)
+      .map(([key]) => key),
+  );
+  return {
+    ...ledger,
+    entries: Object.fromEntries(Object.entries(ledger.entries).filter(([key]) => !dropped.has(key))),
+  };
 }

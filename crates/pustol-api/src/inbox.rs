@@ -4,10 +4,11 @@
 //! needs no public address, no secret and no registration with Telegram, so it runs the same on a
 //! laptop as in production, and the one process stays the only thing that has to be running.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
+use chrono::{DateTime, TimeDelta, Utc};
 use pustol_db::{BarId, Store, TelegramUserId};
 use pustol_telegram::updates::{CallbackQuery, Message, UPDATE_RETENTION};
 use pustol_telegram::{Bot, SendError, Update, messages};
@@ -33,7 +34,10 @@ const AFTER_REFUSAL: Duration = Duration::from_mins(1);
 ///
 /// An update is answered in order, so one whose answer fails every time would hold back every update
 /// behind it for as long as the fault lasts. Enough retries to ride out a moment's fault, and no more.
-pub const ANSWER_RETRIES: u32 = 5;
+pub const ANSWER_RETRIES: i32 = 5;
+
+/// The longest claims that no longer count are left in place.
+const SWEEP_EVERY: TimeDelta = TimeDelta::hours(1);
 
 #[derive(Clone, Debug)]
 pub struct Inbox {
@@ -46,9 +50,9 @@ pub struct Inbox {
     /// Drawn afresh for every inbox, so a process that starts again is somebody else and never takes
     /// back a claim it may already have answered. Clones share it: they are the same process.
     owner: Uuid,
-    /// How often answering each update still in hand has failed, by update id. Shared by clones, as
-    /// the owner is.
-    failures: Arc<Mutex<HashMap<i64, u32>>>,
+    /// When claims that no longer count were last cleared away, as a unix timestamp in seconds.
+    /// Shared by clones, as the owner is.
+    last_sweep: Arc<AtomicI64>,
 }
 
 impl Inbox {
@@ -59,7 +63,7 @@ impl Inbox {
             bar,
             clock,
             owner: Uuid::new_v4(),
-            failures: Arc::default(),
+            last_sweep: Arc::new(AtomicI64::new(i64::MIN)),
         }
     }
 }
@@ -71,8 +75,15 @@ pub enum HandleError {
     NoBot,
     #[error("could not take an update in hand: {0}")]
     Claim(pustol_db::Error),
-    #[error("could not read what the answer to an update needs: {0}")]
-    Answer(pustol_db::Error),
+    #[error(
+        "could not read what the answer to update {update_id} needs, on attempt {attempt}: {error}"
+    )]
+    Answer {
+        update_id: i64,
+        /// How many times this inbox has now taken the update in hand, this time included.
+        attempt: i32,
+        error: pustol_db::Error,
+    },
 }
 
 /// Why one poll of the inbox did not finish.
@@ -140,7 +151,10 @@ impl Inbox {
     ///
     /// What comes back is dropped: it has not been answered, so it is left for the next poll.
     pub async fn confirm(&self, offset: i64) -> Result<(), SendError> {
-        self.bot.get_updates(Some(offset), Duration::ZERO).await.map(drop)
+        self.bot
+            .get_updates(Some(offset), Duration::ZERO)
+            .await
+            .map(drop)
     }
 
     /// Fetches once from `offset`, settles everything fetched, and gives the offset past it.
@@ -155,10 +169,10 @@ impl Inbox {
     ///
     /// An update is settled once it is claimed and answered, found claimed by somebody else, or let
     /// go once its answer has failed on the first try and on every one of [`ANSWER_RETRIES`] retries,
-    /// and the offset moves past it every way: an update whose answer fails every time must not be
-    /// fetched again for ever. The first update that cannot be settled stops the batch before it,
-    /// with the error. One that cannot be claimed is never let go: the database is out of reach, and
-    /// letting it go would drop every update behind it too.
+    /// counted by its claim, and the offset moves past it every way: an update whose answer fails
+    /// every time must not be fetched again for ever. The first update that cannot be settled stops
+    /// the batch before it, with the error. One that cannot be claimed is never let go: the database
+    /// is out of reach, and letting it go would drop every update behind it too.
     ///
     /// Past the last one settled, not past the highest id ever seen: after a quiet week Telegram counts
     /// ids afresh from a random number, and an offset held at an old, higher id confirms nothing it
@@ -168,22 +182,19 @@ impl Inbox {
         updates: Vec<Update>,
         mut offset: Option<i64>,
     ) -> (Option<i64>, Result<(), HandleError>) {
-        // An update that failed comes back at the front of every fetch until it is settled. One this
-        // fetch does not bring back is gone from Telegram, and counting on for it would cut short a
-        // later update that reuses its id.
-        let fetched: HashSet<i64> = updates.iter().map(|update| update.update_id).collect();
-        self.failures().retain(|id, _| fetched.contains(id));
-
+        let fetched = !updates.is_empty();
         for update in updates {
             let id = update.update_id;
             match self.handle(update).await {
-                Ok(_) => {
-                    self.failures().remove(&id);
-                }
-                Err(HandleError::Answer(error)) if self.out_of_retries(id) => {
+                Ok(_) => {}
+                Err(HandleError::Answer {
+                    update_id,
+                    attempt,
+                    error,
+                }) if attempt > ANSWER_RETRIES => {
                     tracing::error!(
                         %error,
-                        update_id = id,
+                        update_id,
                         retries = ANSWER_RETRIES,
                         "could not answer an update, and let it go"
                     );
@@ -192,28 +203,10 @@ impl Inbox {
             }
             offset = Some(id + 1);
         }
-        if !fetched.is_empty() {
+        if fetched {
             self.forget_old_claims().await;
         }
         (offset, Ok(()))
-    }
-
-    /// Counts one more failure to answer update `id`, and says whether its retries are spent. One
-    /// whose retries are spent is let go, so its count is forgotten with it.
-    fn out_of_retries(&self, id: i64) -> bool {
-        let mut failures = self.failures();
-        let failed = failures.entry(id).or_insert(0);
-        *failed += 1;
-        let spent = *failed > ANSWER_RETRIES;
-        if spent {
-            failures.remove(&id);
-        }
-        spent
-    }
-
-    fn failures(&self) -> MutexGuard<'_, HashMap<i64, u32>> {
-        // A count is only ever incremented or removed whole, so one left by a panic is still a count.
-        self.failures.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Answers one update if this process is the one that claims it, and says whether it was.
@@ -225,44 +218,69 @@ impl Inbox {
     /// instead would cancel twice and say so twice, which nobody can take back.
     ///
     /// A failure to read what the answer needs, before anything has been said, is
-    /// [`HandleError::Answer`]: the update is fetched again, and this inbox, which owns the claim,
-    /// takes it again and answers, as often as its retries allow. A claim that was written while the
-    /// reply saying so was lost is [`HandleError::Claim`], and comes back the same way however often
-    /// it happens. Failures once something has been sent are logged; there is nobody else to tell.
+    /// [`HandleError::Answer`], carrying the attempt its claim counted: the update is fetched again,
+    /// and this inbox, which owns the claim, takes it again and answers, as often as its retries allow.
+    /// A claim that was written while the reply saying so was lost is [`HandleError::Claim`], and comes
+    /// back the same way however often it happens. Failures once something has been sent are logged;
+    /// there is nobody else to tell.
     pub async fn handle(&self, update: Update) -> Result<bool, HandleError> {
         let bot = self.bot.id().ok_or(HandleError::NoBot)?;
         let now = self.clock.now();
-        if !self
+        let Some(attempt) = self
             .store
-            .claim_update(bot, update.update_id, self.owner, now, now - UPDATE_RETENTION)
+            .claim_update(
+                bot,
+                update.update_id,
+                self.owner,
+                now,
+                now - UPDATE_RETENTION,
+            )
             .await
             .map_err(HandleError::Claim)?
-        {
+        else {
             return Ok(false);
-        }
+        };
         if let Some(query) = update.callback_query {
             self.answer_tap(query).await;
         } else if let Some(message) = update.message {
             self.answer_message(message)
                 .await
-                .map_err(HandleError::Answer)?;
+                .map_err(|error| HandleError::Answer {
+                    update_id: update.update_id,
+                    attempt,
+                    error,
+                })?;
         }
         Ok(true)
     }
 
-    /// Clears away claims too old to mean anything. A claim that stays behind costs a row and
-    /// silences nothing, since claiming takes an old claim over.
+    /// Clears away claims too old to mean anything, at most once every [`SWEEP_EVERY`]. A claim that
+    /// stays behind costs a row and silences nothing, since claiming takes an old claim over.
     async fn forget_old_claims(&self) {
         let Some(bot) = self.bot.id() else {
             return;
         };
+        let now = self.clock.now();
+        if !self.sweep_due(now) {
+            return;
+        }
         if let Err(error) = self
             .store
-            .forget_update_claims(bot, self.clock.now() - UPDATE_RETENTION)
+            .forget_update_claims(bot, now - UPDATE_RETENTION)
             .await
         {
             tracing::warn!(%error, "could not clear away old update claims");
         }
+    }
+
+    /// Whether a sweep is due at `now`, recording it as made when it is.
+    fn sweep_due(&self, now: DateTime<Utc>) -> bool {
+        let now = now.timestamp();
+        self.last_sweep
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                (now.saturating_sub(last) >= SWEEP_EVERY.num_seconds()).then_some(now)
+            })
+            .is_ok()
     }
 
     async fn answer_tap(&self, query: CallbackQuery) {
@@ -310,17 +328,16 @@ impl Inbox {
             return Ok(());
         }
         let config = self.store.config(self.bar).await?;
-        let contact = config
-            .contact
-            .as_deref()
-            .and_then(pustol_domain::config::Contact::parse)
-            .map(|contact| contact.label());
+        let contact = config.contact().map(|contact| contact.label());
         let reply = match message.text.as_deref().and_then(start_payload) {
             Some(payload) => {
                 // Starting the bot is the one thing that makes a guest reachable again after they
                 // blocked it, and it is evidence in exactly the way a delivery is.
                 if let Some(from) = &message.from
-                    && let Err(error) = self.store.set_reachable(TelegramUserId(from.id), true).await
+                    && let Err(error) = self
+                        .store
+                        .set_reachable(TelegramUserId(from.id), true)
+                        .await
                 {
                     tracing::warn!(%error, "could not record that a guest started the bot");
                 }

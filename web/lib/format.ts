@@ -141,10 +141,6 @@ export function seats(count: number): string {
   return `${count} ${plural(count, "место", "места", "мест")}`;
 }
 
-export function minutesWord(count: number): string {
-  return `${count} ${plural(count, "минута", "минуты", "минут")}`;
-}
-
 /** "Держим стол 21 минуту": minutes as the object of a verb, which Russian inflects. */
 export function minutesAccusative(count: number): string {
   return `${count} ${plural(count, "минуту", "минуты", "минут")}`;
@@ -211,16 +207,16 @@ export function dayStamp(date: IsoDate): string {
 }
 
 /**
- * "Открыт до 02:00", "Откроется в 18:00" or "Закрыт". Whether the bar is open is the server's word,
- * decided on instants; the bar's clock only tells a bar not yet open from one already shut.
+ * "Открыт до 02:00", "Откроется в 18:00" or "Закрыт". Whether the bar is open, and whether it still
+ * opens today, is the server's word, decided on instants.
  */
-export function openLabel(
-  hours: { open_minutes: number; close_minutes: number; closed: boolean },
-  nowMinutes: number,
-  openNow: boolean,
-): string {
-  if (openNow) return `Открыт до ${time(hours.close_minutes)}`;
-  if (!hours.closed && nowMinutes < hours.open_minutes) return `Откроется в ${time(hours.open_minutes)}`;
+export function openLabel(bar: {
+  today_hours: { close_minutes: number };
+  open_now: boolean;
+  opens_at_minutes: number | null;
+}): string {
+  if (bar.open_now) return `Открыт до ${time(bar.today_hours.close_minutes)}`;
+  if (bar.opens_at_minutes !== null) return `Откроется в ${time(bar.opens_at_minutes)}`;
   return "Закрыт";
 }
 

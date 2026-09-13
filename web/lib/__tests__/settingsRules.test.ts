@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Limits, SettingsDraft } from "../api";
+import type { SettingsDraft } from "../api";
 import {
   copyDraft,
   differs,
@@ -13,20 +13,7 @@ import {
   trimmed,
   wouldBeLegal,
 } from "../settingsRules";
-
-const LIMITS: Limits = {
-  open_minutes: { min: 480, max: 1_080 },
-  close_minutes: { min: 1_200, max: 1_680 },
-  turn_minutes: { min: 60, max: 240 },
-  max_party: { min: 2, max: 10 },
-  horizon_days: { min: 1, max: 30 },
-  remind_hours: { min: 1, max: 12 },
-  grace_minutes: { min: 5, max: 60 },
-  seats: { min: 1, max: 12 },
-  slot_step_minutes: [15, 30, 60],
-  text: { name: 100, address: 200, message: 1_000, reason: 200 },
-  lists: { zones: 12, tables: 60, message_templates: 20, cancel_reasons: 20, staff: 30 },
-};
+import { LIMITS } from "@/components/__tests__/fixtures";
 
 function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
   return {
@@ -54,7 +41,7 @@ function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
     cancel_reasons: ["Частное мероприятие"],
     staff: [{ username: "anna_mgr" }],
     contact: "",
-    version: "2026-09-13T08:00:00Z",
+    version: 1,
     ...overrides,
   };
 }

@@ -12,6 +12,24 @@ export interface ApiFailure {
   detail?: Record<string, unknown>;
 }
 
+/** A failure that carries the API's own code, so callers can decide what to say. */
+export class ApiError extends Error {
+  readonly failure: ApiFailure;
+  readonly status: number;
+
+  constructor(status: number, failure: ApiFailure) {
+    super(failure.message);
+    this.name = "ApiError";
+    this.status = status;
+    this.failure = failure;
+  }
+}
+
+/** A failure as the API described it, or as close as the app can get. */
+export function failureOf(error: unknown): ApiFailure {
+  return error instanceof ApiError ? error.failure : { code: "internal", message: String(error) };
+}
+
 /** What each code means to a guest. */
 const GUEST: Record<string, string> = {
   no_credentials: "Откройте приложение из Telegram — так мы поймём, чья это бронь.",

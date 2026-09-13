@@ -12,7 +12,7 @@ use pustol_db::bookings::Reseated;
 use pustol_db::evening::Evening;
 use pustol_db::identity::{ReminderStanding, Viewer};
 use pustol_db::records::{BookingRecord, BookingSource, blocks_of, bookings_of};
-use pustol_domain::config::{DayHours, LIMITS, ValidConfig};
+use pustol_domain::config::{Bounds, DayHours, LIMITS, ListLimits, TextLimits, ValidConfig};
 use pustol_domain::slots::{PartOfDay, Slot, SlotAvailability};
 use pustol_domain::{Booking, BookingStatus, Rebooking, ServiceDay, TableId, minutes_within};
 use serde::{Deserialize, Serialize};
@@ -186,6 +186,9 @@ pub struct BarView {
     /// back the wall repeats an hour, and comparing wall minutes called the bar shut while its door still
     /// seated parties.
     pub open_now: bool,
+    /// When today's shift opens, in wall-clock minutes into it, while that moment is still ahead;
+    /// absent once it has come, and on a day off. What «Откроется в …» reads.
+    pub opens_at_minutes: Option<i32>,
     /// Where a person at the bar answers, absent when the bar has given nowhere.
     pub contact: Option<ContactView>,
 }
@@ -199,14 +202,10 @@ pub struct ContactView {
 
 impl ContactView {
     pub fn of(config: &ValidConfig) -> Option<Self> {
-        config
-            .contact
-            .as_deref()
-            .and_then(pustol_domain::config::Contact::parse)
-            .map(|contact| Self {
-                label: contact.label(),
-                url: contact.url(),
-            })
+        config.contact().map(|contact| Self {
+            label: contact.label(),
+            url: contact.url(),
+        })
     }
 }
 
@@ -227,6 +226,9 @@ impl BarView {
             last_arrival_minutes: config.last_arrival_minutes(today.weekday()),
             now_minutes: minutes_within(today, now, config.timezone),
             open_now: config.is_open(today, now),
+            opens_at_minutes: config
+                .opening_ahead(today, now)
+                .map(|opens| minutes_within(today, opens, config.timezone)),
             contact: ContactView::of(config),
         }
     }
@@ -309,14 +311,45 @@ pub struct SlotView {
     pub evening: bool,
 }
 
+/// Arrival times on one shift for one party, each slot drawn as `S`.
 #[derive(Debug, Serialize)]
-pub struct Availability {
+pub struct Availability<S = SlotView> {
     pub service_date: NaiveDate,
     pub party_size: i32,
     pub turn_minutes: i32,
-    pub slots: Vec<SlotView>,
+    pub slots: Vec<S>,
     /// How many of them can actually be taken — the picker's "free windows" line.
     pub free_count: usize,
+}
+
+/// The arrival times a guest is offered, and what booking on that shift would do to what they hold.
+#[derive(Debug, Serialize)]
+pub struct GuestAvailability {
+    #[serde(flatten)]
+    pub offer: Availability,
+    /// The bookings of theirs a booking on this shift would replace, soonest first: what the picker's
+    /// button promises, and what the booking sends back as `replacing`.
+    pub replacing: Vec<Uuid>,
+    /// Whether a booking on this shift is refused, because a booking of theirs holds the evening.
+    pub booked: bool,
+}
+
+/// A slot as staff see it: with every table free for its window whatever the party, smallest first,
+/// so a sheet can draw the ones too small for the party as well.
+#[derive(Debug, Serialize)]
+pub struct StaffSlotView {
+    #[serde(flatten)]
+    pub slot: SlotView,
+    pub free_table_ids: Vec<Uuid>,
+}
+
+/// The arrival times staff are offered, and with a booking set aside, the tables free for its own
+/// stored window: where keeping its time can seat it, whether or not that time is on the grid.
+#[derive(Debug, Serialize)]
+pub struct StaffAvailability {
+    #[serde(flatten)]
+    pub offer: Availability<StaffSlotView>,
+    pub kept_free_table_ids: Option<Vec<Uuid>>,
 }
 
 /// One chip on the guest's day rail.
@@ -342,39 +375,49 @@ pub struct DayRail {
     pub days: Vec<DayOffer>,
 }
 
-impl Availability {
-    pub fn of(
+impl<S> Availability<S> {
+    /// The slots a client is shown, each drawn by `draw` from the slot and its plain view.
+    pub fn drawn(
         day: ServiceDay,
         party_size: i32,
         config: &ValidConfig,
         slots: &[Slot],
+        draw: impl Fn(&Slot, SlotView) -> S,
     ) -> Self {
-        let offered: Vec<SlotView> = slots
-            .iter()
-            .filter(|slot| slot.availability.is_offerable())
-            .map(|slot| SlotView {
-                start_minutes: slot.start_minutes,
-                state: match slot.availability {
-                    SlotAvailability::Free => SlotState::Free,
-                    // A time the clock change jumped over is filtered out above and never reaches a
-                    // client. It is matched rather than left to a catch-all so that adding a
-                    // variant to the domain is a compile error here rather than a silent default.
-                    SlotAvailability::Taken | SlotAvailability::Nonexistent => SlotState::Taken,
-                    SlotAvailability::Past => SlotState::Past,
-                },
-                evening: slot.part_of_day == PartOfDay::Evening,
-            })
-            .collect();
+        let offered = slots.iter().filter(|slot| slot.availability.is_offerable());
         let free_count = offered
-            .iter()
-            .filter(|slot| slot.state == SlotState::Free)
+            .clone()
+            .filter(|slot| slot.availability.is_free())
             .count();
         Self {
             service_date: day.date(),
             party_size,
             turn_minutes: config.turn_minutes,
-            slots: offered,
+            slots: offered.map(|slot| draw(slot, SlotView::of(slot))).collect(),
             free_count,
+        }
+    }
+}
+
+impl Availability {
+    pub fn of(day: ServiceDay, party_size: i32, config: &ValidConfig, slots: &[Slot]) -> Self {
+        Self::drawn(day, party_size, config, slots, |_, view| view)
+    }
+}
+
+impl SlotView {
+    fn of(slot: &Slot) -> Self {
+        Self {
+            start_minutes: slot.start_minutes,
+            state: match slot.availability {
+                SlotAvailability::Free => SlotState::Free,
+                // A time the clock change jumped over is filtered out before it is drawn and never
+                // reaches a client. It is matched rather than left to a catch-all so that adding a
+                // variant to the domain is a compile error here rather than a silent default.
+                SlotAvailability::Taken | SlotAvailability::Nonexistent => SlotState::Taken,
+                SlotAvailability::Past => SlotState::Past,
+            },
+            evening: slot.part_of_day == PartOfDay::Evening,
         }
     }
 }
@@ -543,6 +586,15 @@ pub struct ShiftView {
     pub message_templates: Vec<String>,
 }
 
+/// Whether `record` holds its table at `now`, by the one occupancy rule: a party that has left or
+/// never came does not hold a table staff can see standing empty.
+fn holds_table_at(record: &BookingRecord, now: DateTime<Utc>) -> bool {
+    record
+        .booking
+        .occupancy()
+        .is_some_and(|held| held.contains(now))
+}
+
 impl ShiftView {
     /// The evening as the shift screen draws it: for `GET /shift` and for the answer to every write,
     /// from one reading of the room, so the two can never be drawn by different rules.
@@ -568,7 +620,9 @@ impl ShiftView {
                 zone: table.zone.as_str().to_owned(),
                 blocked_because: blocks
                     .iter()
-                    .find(|block| block.block.table_id == table.id && block.block.service_day == day)
+                    .find(|block| {
+                        block.block.table_id == table.id && block.block.service_day == day
+                    })
                     .map(|block| block.reason.clone()),
             })
             .collect();
@@ -581,14 +635,9 @@ impl ShiftView {
                 .iter()
                 .filter(|table| table.blocked_because.is_none())
                 .filter(|table| {
-                    // The one occupancy rule, asked of the one function: a party that has left or
-                    // never came does not hold a table staff can see standing empty.
                     !bookings.iter().any(|record| {
-                        record.booking.occupancy().is_some_and(|held| {
-                            record.booking.table_id == Some(TableId(table.id))
-                                && held.start() <= now
-                                && now < held.end()
-                        })
+                        record.booking.table_id == Some(TableId(table.id))
+                            && holds_table_at(record, now)
                     })
                 })
                 .count()
@@ -597,11 +646,10 @@ impl ShiftView {
             bookings
                 .iter()
                 .filter(|record| {
-                    matches!(record.booking.status, BookingStatus::Arrived | BookingStatus::Left)
-                        && record
-                            .booking
-                            .occupancy()
-                            .is_some_and(|held| held.start() <= now && now < held.end())
+                    matches!(
+                        record.booking.status,
+                        BookingStatus::Arrived | BookingStatus::Left
+                    ) && holds_table_at(record, now)
                 })
                 .map(|record| record.booking.party_size)
                 .sum()
@@ -612,9 +660,9 @@ impl ShiftView {
         let walk_in_until_minutes = walk_in
             .as_ref()
             .map(|offer| minutes_within(day, offer.window.end(), config.timezone));
-        let largest_party_seatable_now = walk_in.as_ref().and_then(|offer| {
-            pustol_domain::largest_party_seatable(config, day, offer.window, &live, &closed)
-        });
+        let largest_party_seatable_now = walk_in
+            .as_ref()
+            .and_then(|offer| offer.largest_party(config.max_party));
         let walk_in_free_table_ids = walk_in.map_or_else(Vec::new, |offer| {
             offer.tables.iter().map(|table| table.id.0).collect()
         });
@@ -631,7 +679,10 @@ impl ShiftView {
                 .collect(),
             stats: ShiftStats {
                 bookings: bookings.len(),
-                guests: bookings.iter().map(|record| record.booking.party_size).sum(),
+                guests: bookings
+                    .iter()
+                    .map(|record| record.booking.party_size)
+                    .sum(),
                 free_now,
                 seated_now,
             },
@@ -830,8 +881,9 @@ pub struct ReconcileRequest {
 /// and so widening a limit needs no change here.
 #[derive(Debug, Serialize)]
 pub struct SettingsView {
-    /// Which settings these are. A save sends it back and is refused if they have changed since.
-    pub version: DateTime<Utc>,
+    /// Which settings these are: one more on every write. A save sends it back and is refused if they
+    /// have changed since.
+    pub version: i64,
     pub name: String,
     pub address: String,
     /// As the manager typed it; empty when there is none.
@@ -851,8 +903,6 @@ pub struct SettingsView {
     pub cancel_reasons: Vec<String>,
     pub staff: Vec<StaffView>,
     pub next_table_number: i32,
-    /// The evening each table's `bookings_today` counts.
-    pub service_date: NaiveDate,
     pub limits: LimitsView,
 }
 
@@ -862,9 +912,6 @@ pub struct SettingsTable {
     pub number: i32,
     pub seats: i32,
     pub zone: String,
-    /// How many bookings sit at this table on the shift being viewed — the badge that stops staff
-    /// deleting a table somebody is about to sit at.
-    pub bookings_today: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -875,76 +922,35 @@ pub struct StaffView {
 }
 
 #[derive(Debug, Serialize)]
-pub struct BoundsView {
-    pub min: i32,
-    pub max: i32,
-}
-
-#[derive(Debug, Serialize)]
 pub struct LimitsView {
-    pub open_minutes: BoundsView,
-    pub close_minutes: BoundsView,
-    pub turn_minutes: BoundsView,
-    pub max_party: BoundsView,
-    pub horizon_days: BoundsView,
-    pub remind_hours: BoundsView,
-    pub grace_minutes: BoundsView,
-    pub seats: BoundsView,
-    pub slot_step_minutes: Vec<i32>,
-    pub text: TextLimitsView,
+    pub open_minutes: Bounds,
+    pub close_minutes: Bounds,
+    pub turn_minutes: Bounds,
+    pub max_party: Bounds,
+    pub horizon_days: Bounds,
+    pub remind_hours: Bounds,
+    pub grace_minutes: Bounds,
+    pub seats: Bounds,
+    pub slot_step_minutes: &'static [i32],
+    pub text: TextLimits,
     /// The most entries each list may hold, so the screen stops offering «Добавить» at the bound.
-    pub lists: ListLimitsView,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TextLimitsView {
-    pub name: usize,
-    pub address: usize,
-    pub message: usize,
-    pub reason: usize,
-    pub zone: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ListLimitsView {
-    pub message_templates: usize,
-    pub cancel_reasons: usize,
-    pub zones: usize,
-    pub staff: usize,
-    /// Tables in the live room; retired ones never count.
-    pub tables: usize,
+    pub lists: ListLimits,
 }
 
 impl LimitsView {
-    pub fn current() -> Self {
-        let bounds = |bounds: pustol_domain::Bounds| BoundsView {
-            min: bounds.min,
-            max: bounds.max,
-        };
+    pub const fn current() -> Self {
         Self {
-            open_minutes: bounds(LIMITS.open_minutes),
-            close_minutes: bounds(LIMITS.close_minutes),
-            turn_minutes: bounds(LIMITS.turn_minutes),
-            max_party: bounds(LIMITS.max_party),
-            horizon_days: bounds(LIMITS.horizon_days),
-            remind_hours: bounds(LIMITS.remind_hours),
-            grace_minutes: bounds(LIMITS.grace_minutes),
-            seats: bounds(LIMITS.seats),
-            slot_step_minutes: LIMITS.slot_step_minutes.to_vec(),
-            text: TextLimitsView {
-                name: LIMITS.text.name,
-                address: LIMITS.text.address,
-                message: LIMITS.text.message,
-                reason: LIMITS.text.reason,
-                zone: LIMITS.text.zone,
-            },
-            lists: ListLimitsView {
-                message_templates: LIMITS.lists.message_templates,
-                cancel_reasons: LIMITS.lists.cancel_reasons,
-                zones: LIMITS.lists.zones,
-                staff: LIMITS.lists.staff,
-                tables: LIMITS.lists.tables,
-            },
+            open_minutes: LIMITS.open_minutes,
+            close_minutes: LIMITS.close_minutes,
+            turn_minutes: LIMITS.turn_minutes,
+            max_party: LIMITS.max_party,
+            horizon_days: LIMITS.horizon_days,
+            remind_hours: LIMITS.remind_hours,
+            grace_minutes: LIMITS.grace_minutes,
+            seats: LIMITS.seats,
+            slot_step_minutes: LIMITS.slot_step_minutes,
+            text: LIMITS.text,
+            lists: LIMITS.lists,
         }
     }
 }

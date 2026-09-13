@@ -18,7 +18,9 @@ use crate::schedule::{BarTable, TableId};
 use crate::service_day::{Interval, ServiceDay};
 
 /// Stable identity of a booking.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct BookingId(pub Uuid);
 
@@ -114,9 +116,7 @@ impl Booking {
     #[must_use]
     pub fn holds(&self, table_id: TableId, window: Interval) -> bool {
         self.table_id == Some(table_id)
-            && self
-                .occupancy()
-                .is_some_and(|held| held.overlaps(window))
+            && self.occupancy().is_some_and(|held| held.overlaps(window))
     }
 }
 
@@ -173,6 +173,16 @@ pub struct Request<'a> {
 /// screen offers cannot disagree about what is free.
 #[must_use]
 pub fn free_tables<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
+    open_tables_for(request)
+        .into_iter()
+        .filter(|table| table.seats_party(request.party_size))
+        .collect()
+}
+
+/// Every table free for the request's window whatever the party: [`free_tables`] before the seats are
+/// asked. What a sheet draws, the tables too small for the party among them.
+#[must_use]
+pub fn open_tables_for<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
     open_tables(
         request.tables,
         request.service_day,
@@ -181,9 +191,6 @@ pub fn free_tables<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
         request.blocks,
         request.ignoring,
     )
-    .into_iter()
-    .filter(|table| table.seats_party(request.party_size))
-    .collect()
 }
 
 /// Every table the room could put a party of any size at for `window` on `service_day`: live, open
@@ -225,7 +232,11 @@ fn is_blocked(table_id: TableId, service_day: ServiceDay, blocks: &[TableBlock])
         .any(|block| block.table_id == table_id && block.service_day == service_day)
 }
 
-fn free_during(
+/// Whether no booking outside `ignoring` holds `table_id` at any moment of `window`.
+///
+/// The one test of "this table is free then", which every list of free tables is filtered by.
+#[must_use]
+pub fn free_during(
     table_id: TableId,
     window: Interval,
     bookings: &[Booking],
@@ -234,37 +245,6 @@ fn free_during(
     !bookings
         .iter()
         .any(|booking| !ignoring.contains(&booking.id) && booking.holds(table_id, window))
-}
-
-/// The largest party the room could seat right now, or `None` when nothing fits.
-///
-/// The second line of the shift's pulse, and the same run the walk-in sheet makes. Counting free
-/// tables does not answer the question a bartender is actually being asked at the door — four
-/// people fit or they do not — and two separate implementations of "who fits" would eventually
-/// offer a table the walk-in endpoint then refused.
-///
-/// Searched downwards from the bar's own cap because a table that seats a party of `n` seats every
-/// smaller party too: the first size that fits is therefore the largest one that does.
-#[must_use]
-pub fn largest_party_seatable(
-    config: &ValidConfig,
-    service_day: ServiceDay,
-    window: Interval,
-    bookings: &[Booking],
-    blocks: &[TableBlock],
-) -> Option<i32> {
-    (1..=config.max_party).rev().find(|party_size| {
-        assign(&Request {
-            party_size: *party_size,
-            window,
-            service_day,
-            tables: &config.tables,
-            bookings,
-            blocks,
-            ignoring: &[],
-        })
-        .is_some()
-    })
 }
 
 /// What the room offers a party walking in.
@@ -286,6 +266,19 @@ impl<'a> WalkIn<'a> {
             .copied()
             .filter(|table| table.seats_party(party_size))
             .collect()
+    }
+
+    /// The largest party of at most `max_party` a table on offer seats, or `None` when none is on
+    /// offer.
+    ///
+    /// The shift's "who fits" line. A table that seats a party seats every smaller one, so the
+    /// largest party that fits is the most seats on offer.
+    #[must_use]
+    pub fn largest_party(&self, max_party: i32) -> Option<i32> {
+        self.tables
+            .iter()
+            .map(|table| table.seats.min(max_party))
+            .max()
     }
 }
 
@@ -337,7 +330,6 @@ mod tests {
     use chrono::{NaiveDate, TimeZone};
 
     use super::*;
-    use crate::config::{BarConfig, DayHours, StaffMember, WeekSchedule};
     use crate::schedule::Zone;
 
     /// Identifiers derive from the printed number so that no assertion here can pass or fail by
@@ -410,6 +402,27 @@ mod tests {
                 blocks: &self.blocks,
                 ignoring: &[],
             }
+        }
+
+        /// The largest party of at most `max_party` the walk-in offer for `window` seats, held to the
+        /// allocator's own answer: the largest size from the cap down it assigns a table to.
+        fn largest_party(&self, window: Interval, max_party: i32) -> Option<i32> {
+            let offer = WalkIn {
+                window,
+                tables: open_tables(
+                    &self.tables,
+                    day(),
+                    window,
+                    &self.bookings,
+                    &self.blocks,
+                    &[],
+                ),
+            };
+            let assigned = (1..=max_party)
+                .rev()
+                .find(|party_size| assign(&self.request(*party_size, window)).is_some());
+            assert_eq!(offer.largest_party(max_party), assigned);
+            assigned
         }
     }
 
@@ -575,17 +588,8 @@ mod tests {
     #[test]
     fn the_largest_party_that_fits_is_the_largest_one_a_table_can_take() {
         let room = Room::new(vec![table(1, 2), table(2, 4), table(3, 8)]);
-        let config = config_of(room.tables.clone(), 8);
-        assert_eq!(
-            largest_party_seatable(
-                &config,
-                day(),
-                window((18, 0), (20, 0)),
-                &room.bookings,
-                &room.blocks
-            ),
-            Some(8)
-        );
+        assert_eq!(room.largest_party(window((18, 0), (20, 0)), 8), Some(8));
+        assert_eq!(room.largest_party(window((18, 0), (20, 0)), 3), Some(3));
     }
 
     #[test]
@@ -593,17 +597,7 @@ mod tests {
         // A ten-top in the room and a cap of six: the answer staff read is the answer they may act
         // on, so it is bounded by the bar's own rule rather than by the furniture.
         let room = Room::new(vec![table(1, 10)]);
-        let config = config_of(room.tables.clone(), 6);
-        assert_eq!(
-            largest_party_seatable(
-                &config,
-                day(),
-                window((18, 0), (20, 0)),
-                &room.bookings,
-                &room.blocks
-            ),
-            Some(6)
-        );
+        assert_eq!(room.largest_party(window((18, 0), (20, 0)), 6), Some(6));
     }
 
     #[test]
@@ -612,61 +606,47 @@ mod tests {
         let held = window((18, 0), (20, 0));
         room.bookings.push(booking(Some(&room.tables[0]), held, 2));
         room.bookings.push(booking(Some(&room.tables[1]), held, 4));
-        let config = config_of(room.tables.clone(), 4);
-        assert_eq!(
-            largest_party_seatable(&config, day(), held, &room.bookings, &room.blocks),
-            None
-        );
+        assert_eq!(room.largest_party(held, 4), None);
     }
 
     #[test]
     fn a_party_leaving_early_grows_the_largest_party_that_fits() {
         let mut room = Room::new(vec![table(1, 2), table(2, 6)]);
         let evening = window((18, 0), (22, 0));
-        room.bookings.push(booking(Some(&room.tables[1]), evening, 2));
-        let config = config_of(room.tables.clone(), 6);
+        room.bookings
+            .push(booking(Some(&room.tables[1]), evening, 2));
         let later = window((20, 0), (22, 0));
         assert_eq!(
-            largest_party_seatable(&config, day(), later, &room.bookings, &room.blocks),
+            room.largest_party(later, 6),
             Some(2),
             "only the two-top is free while the six-top is sat at"
         );
 
         room.bookings[0].status = BookingStatus::Left;
         room.bookings[0].released_at = Some(at(20, 0));
-        assert_eq!(
-            largest_party_seatable(&config, day(), later, &room.bookings, &room.blocks),
-            Some(6)
-        );
+        assert_eq!(room.largest_party(later, 6), Some(6));
     }
 
-    fn config_of(tables: Vec<BarTable>, max_party: i32) -> ValidConfig {
-        ValidConfig::new(BarConfig {
-            name: "Пустол".to_owned(),
-            address: "ул. Рубинштейна, 24".to_owned(),
-            timezone: chrono_tz::Europe::Belgrade,
-            week: WeekSchedule::uniform(DayHours {
-                open_minutes: 18 * 60,
-                close_minutes: 26 * 60,
-                closed: false,
-            }),
-            zones: vec![Zone::new("Зал").expect("non blank")],
-            tables,
-            turn_minutes: 120,
-            slot_step_minutes: 30,
-            max_party,
-            horizon_days: 4,
-            remind_hours: 3,
-            grace_minutes: 15,
-            message_templates: vec!["Ваш стол готов".to_owned()],
-            cancel_reasons: vec!["Дождь".to_owned()],
-            staff: vec![StaffMember {
-                username: "anna_mgr".to_owned(),
-                telegram_user_id: None,
-            }],
-            contact: None,
-        })
-        .expect("a legal bar")
+    #[test]
+    fn the_largest_party_on_offer_is_the_allocators_answer_in_rooms_closed_retired_and_busy() {
+        let mut room = Room::new(vec![
+            table(1, 2),
+            retired(2, 8),
+            table(3, 4),
+            table(4, 6),
+            table(5, 6),
+        ]);
+        room.blocks.push(TableBlock {
+            table_id: room.tables[3].id,
+            service_day: day(),
+        });
+        room.bookings
+            .push(booking(Some(&room.tables[4]), window((19, 0), (21, 0)), 6));
+        for (from, to) in [((17, 0), (18, 0)), ((18, 0), (20, 0)), ((21, 0), (23, 0))] {
+            for max_party in [2, 4, 6, 10] {
+                room.largest_party(window(from, to), max_party);
+            }
+        }
     }
 
     #[test]
@@ -687,8 +667,10 @@ mod tests {
     fn reports_no_table_when_every_table_that_fits_is_taken() {
         let mut room = Room::new(vec![table(1, 2), table(2, 2)]);
         let window = window((18, 0), (20, 0));
-        room.bookings.push(booking(Some(&room.tables[0]), window, 2));
-        room.bookings.push(booking(Some(&room.tables[1]), window, 2));
+        room.bookings
+            .push(booking(Some(&room.tables[0]), window, 2));
+        room.bookings
+            .push(booking(Some(&room.tables[1]), window, 2));
         assert!(assign(&room.request(2, window)).is_none());
     }
 
@@ -753,7 +735,10 @@ mod tests {
         room.bookings.push(existing);
 
         let mut request = room.request(2, window((18, 0), (20, 0)));
-        assert!(assign(&request).is_none(), "without ignoring, it blocks itself");
+        assert!(
+            assign(&request).is_none(),
+            "without ignoring, it blocks itself"
+        );
         let moving = [existing_id];
         request.ignoring = &moving;
         assert!(assign(&request).is_some());
@@ -772,8 +757,12 @@ mod tests {
         room.bookings.push(booking(Some(&room.tables[0]), late, 2));
 
         let next_shift = Interval::new(
-            Utc.with_ymd_and_hms(2026, 7, 31, 0, 30, 0).single().unwrap(),
-            Utc.with_ymd_and_hms(2026, 7, 31, 2, 30, 0).single().unwrap(),
+            Utc.with_ymd_and_hms(2026, 7, 31, 0, 30, 0)
+                .single()
+                .unwrap(),
+            Utc.with_ymd_and_hms(2026, 7, 31, 2, 30, 0)
+                .single()
+                .unwrap(),
         )
         .expect("non empty");
         let request = Request {
@@ -793,13 +782,21 @@ mod tests {
         let four_top = table(1, 4);
         let seated = booking(Some(&four_top), window((18, 0), (20, 0)), 4);
 
-        assert!(seating_is_sound(&seated, std::slice::from_ref(&four_top), &[]));
+        assert!(seating_is_sound(
+            &seated,
+            std::slice::from_ref(&four_top),
+            &[]
+        ));
 
         let shrunk = BarTable {
             seats: 2,
             ..four_top.clone()
         };
-        assert!(!seating_is_sound(&seated, std::slice::from_ref(&shrunk), &[]));
+        assert!(!seating_is_sound(
+            &seated,
+            std::slice::from_ref(&shrunk),
+            &[]
+        ));
 
         let gone = BarTable {
             retired: true,

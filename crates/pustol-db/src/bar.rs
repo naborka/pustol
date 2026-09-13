@@ -5,7 +5,6 @@ use chrono_tz::Tz;
 use pustol_domain::config::{BarConfig, DayHours, StaffMember, ValidConfig, WeekSchedule};
 use pustol_domain::draft::Draft;
 use pustol_domain::schedule::{BarTable, TableId, Zone, next_table_number};
-use pustol_domain::service_day::ServiceDay;
 use pustol_domain::{parties_above_cap, schedule_conflicts};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
@@ -27,7 +26,9 @@ fn stranded(
                 .find(|record| record.booking.id == conflict.booking());
             StrandedBooking {
                 conflict: *conflict,
-                guest_name: record.map(|record| record.guest_name.clone()).unwrap_or_default(),
+                guest_name: record
+                    .map(|record| record.guest_name.clone())
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -40,45 +41,28 @@ pub struct StrandedBooking {
     pub guest_name: String,
 }
 
+/// The settings in force, as the settings screen draws them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Settings {
+    pub config: ValidConfig,
+    /// Which settings these are: one more on every write of the bar's row. A proposal made from any
+    /// other version is refused.
+    pub version: i64,
+    /// The number a table added next would be given, so the settings screen can label a row it has
+    /// only just created.
+    pub next_table_number: i32,
+}
+
 /// What a settings save actually did.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SavedSettings {
-    /// The configuration as storage holds it once saved, read back before the save committed.
-    pub config: ValidConfig,
-    /// The version the settings are now, which the next proposal has to be made from.
-    pub version: DateTime<Utc>,
+    /// The settings as storage holds them once saved, read back before the save committed.
+    pub settings: Settings,
     /// Bookings the change forced to move, and any it could not place.
     pub reconciliation: crate::bookings::Reseated,
     /// Live bookings for parties above the new cap. Not a refusal — they already have a table and
     /// will be served — but staff are told, so a cap lowered by accident is visible at once.
     pub above_cap: usize,
-    /// The number a table added next would be given, so the settings screen can label a row it
-    /// has only just created.
-    pub next_table_number: i32,
-    /// The evening the settings screen is showing.
-    pub day: ServiceDay,
-    /// That evening's bookings as the save left them, read before it committed: what each table's
-    /// count on the screen is made from.
-    pub bookings: Vec<crate::records::BookingRecord>,
-}
-
-/// The settings in force and the bookings of the evening the settings screen is showing, read on one
-/// snapshot.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct SettingsOn {
-    pub config: ValidConfig,
-    pub version: DateTime<Utc>,
-    pub next_table_number: i32,
-    pub day: ServiceDay,
-    pub bookings: Vec<crate::records::BookingRecord>,
-}
-
-/// The configuration in force, and the version a proposal made from it carries.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Settings {
-    pub config: ValidConfig,
-    /// When the bar's settings were last written.
-    pub version: DateTime<Utc>,
 }
 
 impl Store {
@@ -88,27 +72,10 @@ impl Store {
         load_config(&mut connection, bar).await
     }
 
-    /// The configuration in force at one bar, with its version, for a screen that edits it.
+    /// The settings in force at one bar, for the screen that edits them.
     pub async fn settings(&self, bar: BarId) -> Result<Settings> {
         let mut connection = self.pool().acquire().await?;
         load_settings(&mut connection, bar).await
-    }
-
-    /// The settings in force, with the bookings of `day` each table's count is made from.
-    ///
-    /// On one snapshot, so a count never describes a room other than the one listed beside it.
-    pub async fn settings_on(&self, bar: BarId, day: ServiceDay) -> Result<SettingsOn> {
-        let mut snapshot = self.snapshot().await?;
-        let settings = load_settings(&mut snapshot, bar).await?;
-        let bookings = bookings::load_shift(&mut snapshot, bar, day).await?;
-        snapshot.commit().await?;
-        Ok(SettingsOn {
-            next_table_number: next_table_number(&settings.config.tables),
-            config: settings.config,
-            version: settings.version,
-            day,
-            bookings,
-        })
     }
 
     /// The number a newly added table would be given.
@@ -131,14 +98,10 @@ impl Store {
     /// Inventory changes are applied and the bookings reconciled rather than refused: the screen
     /// describes the room as it now physically is, and a system that will not record that just
     /// gets worked around.
-    ///
-    /// `day` is the evening the settings screen is showing; its bookings come back as the save left
-    /// them, read before it commits.
     pub async fn save_settings(
         &self,
         bar: BarId,
         draft: &Draft,
-        day: ServiceDay,
         now: DateTime<Utc>,
     ) -> Result<SavedSettings> {
         let mut transaction = self.pool().begin().await?;
@@ -158,7 +121,10 @@ impl Store {
         let conflicts = schedule_conflicts(&proposed, &live, now);
         if !conflicts.is_empty() {
             // Named, so the screen can say which bookings and not merely that some exist.
-            return Err(Error::WouldStrandBookings(stranded(&conflicts, &unfinished)));
+            return Err(Error::WouldStrandBookings(stranded(
+                &conflicts,
+                &unfinished,
+            )));
         }
         let above_cap = parties_above_cap(&proposed, &live, now).len();
 
@@ -177,18 +143,12 @@ impl Store {
         let reconciliation =
             bookings::reconcile_from(&mut transaction, bar, &saved.config, now).await?;
 
-        let next_table_number = next_table_number(&saved.config.tables);
-        let bookings = bookings::load_shift(&mut transaction, bar, day).await?;
         transaction.commit().await?;
 
         Ok(SavedSettings {
-            config: saved.config,
-            version: saved.version,
+            settings: saved,
             reconciliation,
             above_cap,
-            next_table_number,
-            day,
-            bookings,
         })
     }
 }
@@ -198,14 +158,11 @@ impl Store {
 /// A stored row that fails validation means either that somebody wrote around the API or that a
 /// limit was tightened without a data migration. Both deserve a loud failure rather than a bar
 /// that quietly runs on rules the rest of the system does not believe in.
-pub(crate) async fn load_config(
-    connection: &mut PgConnection,
-    bar: BarId,
-) -> Result<ValidConfig> {
+pub(crate) async fn load_config(connection: &mut PgConnection, bar: BarId) -> Result<ValidConfig> {
     Ok(load_settings(connection, bar).await?.config)
 }
 
-/// The configuration in force and its version.
+/// The configuration in force, its version, and the number a new table would take.
 ///
 /// The version is read with the bar's own row, before the week, the room and the roster. A save
 /// landing in between can only leave the version older than what is read after it, which gets a
@@ -214,7 +171,7 @@ async fn load_settings(connection: &mut PgConnection, bar: BarId) -> Result<Sett
     let row = sqlx::query(
         "select name, address, timezone, turn_minutes, slot_step_minutes, max_party,
                 horizon_days, remind_hours, grace_minutes, zones, message_templates, cancel_reasons,
-                contact, updated_at
+                contact, settings_version
          from bar where id = $1",
     )
     .bind(bar)
@@ -260,8 +217,9 @@ async fn load_settings(connection: &mut PgConnection, bar: BarId) -> Result<Sett
         contact: row.try_get("contact")?,
     };
     Ok(Settings {
+        next_table_number: next_table_number(&config.tables),
         config: ValidConfig::new(config).map_err(Error::StoredConfigInvalid)?,
-        version: row.try_get("updated_at")?,
+        version: row.try_get("settings_version")?,
     })
 }
 
@@ -384,11 +342,7 @@ async fn write_bar(connection: &mut PgConnection, bar: BarId, config: &ValidConf
     Ok(())
 }
 
-async fn write_week(
-    connection: &mut PgConnection,
-    bar: BarId,
-    config: &ValidConfig,
-) -> Result<()> {
+async fn write_week(connection: &mut PgConnection, bar: BarId, config: &ValidConfig) -> Result<()> {
     // Upserted rather than replaced, so the deferred "a week has seven days" trigger is never
     // presented with a bar that momentarily has none.
     let days = config.week.all();

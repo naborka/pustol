@@ -1,8 +1,7 @@
 //! The data behind the bot's buttons.
 //!
 //! Written and read in one place. The worker draws the button and the inbox answers it, and two
-//! spellings of one string are a button that does nothing — which is what the reminder's button
-//! was until something read it.
+//! spellings of one string are a button that does nothing.
 
 use pustol_domain::BookingId;
 use uuid::Uuid;

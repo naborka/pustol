@@ -8,6 +8,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use pustol_db::Error as DbError;
+use pustol_domain::{BlankGuestName, MissingBlockReason};
 use pustol_telegram::VerifyError;
 use serde::Serialize;
 
@@ -62,7 +63,11 @@ impl ApiError {
     }
 
     pub fn not_found(entity: &'static str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "not_found", format!("no such {entity}"))
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("no such {entity}"),
+        )
     }
 }
 
@@ -132,7 +137,6 @@ impl From<DbError> for ApiError {
                 serde_json::json!({ "party_size": party_size, "max_party": max_party }),
             ),
             DbError::ShiftNotBookable { .. } => conflict("shift_not_bookable"),
-            DbError::MissingBlockReason => refused("missing_block_reason"),
             DbError::NoteTooLong { limit } => {
                 refused("note_too_long").with_detail(serde_json::json!({ "limit": limit }))
             }
@@ -176,6 +180,18 @@ impl From<DbError> for ApiError {
                 error.to_string(),
             ),
         }
+    }
+}
+
+impl From<BlankGuestName> for ApiError {
+    fn from(error: BlankGuestName) -> Self {
+        Self::bad_request("blank_guest_name", error.to_string())
+    }
+}
+
+impl From<MissingBlockReason> for ApiError {
+    fn from(error: MissingBlockReason) -> Self {
+        Self::bad_request("missing_block_reason", error.to_string())
     }
 }
 

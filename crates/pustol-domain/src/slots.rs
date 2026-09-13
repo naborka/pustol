@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 
 use crate::allocator::{self, Booking, TableBlock};
 use crate::config::{EVENING_FROM_MINUTES, ValidConfig};
+use crate::schedule::BarTable;
 use crate::service_day::{Interval, ServiceDay, resolve};
 
 /// Why a slot can or cannot be taken.
@@ -111,6 +112,15 @@ pub fn slot_at(query: &Query<'_>, start_minutes: i32) -> Option<Slot> {
     arrival_minutes(query.config, query.service_day)
         .find(|minutes| *minutes == start_minutes)
         .map(|minutes| evaluate(query, minutes))
+}
+
+/// Every table free for `slot`'s window whatever the party, as [`allocator::open_tables_for`] answers
+/// this query about it, whatever the slot's state; empty for a slot the clocks jump over.
+#[must_use]
+pub fn open_tables_at<'a>(query: &Query<'a>, slot: &Slot) -> Vec<&'a BarTable> {
+    slot.window.map_or_else(Vec::new, |window| {
+        allocator::open_tables_for(&query.request(window))
+    })
 }
 
 /// Whether `day`'s grid still has an arrival time after `now`: one that happens, and that the grid
