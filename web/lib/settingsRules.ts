@@ -70,8 +70,15 @@ function within(value: number, bounds: Bounds): boolean {
  * `String.prototype.trim` strips a different set — it takes a byte-order mark and leaves U+0085.
  */
 export function trimmed(text: string): string {
-  return text.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+  let start = 0;
+  let end = text.length;
+  // Every White_Space character is one UTF-16 unit, so stepping by units steps by characters.
+  while (start < end && WHITE_SPACE.test(text.charAt(start))) start += 1;
+  while (end > start && WHITE_SPACE.test(text.charAt(end - 1))) end -= 1;
+  return text.slice(start, end);
 }
+
+const WHITE_SPACE = /^\p{White_Space}$/u;
 
 /** Telegram's published rule: five to thirty-two characters, starting with a letter. */
 export function isTelegramUsername(candidate: string): boolean {
@@ -231,9 +238,20 @@ export function wouldBeLegal(
   change: Edit,
   limits: Limits,
 ): boolean {
+  return isLegal(edited(draft, change), limits);
+}
+
+/**
+ * The proposal with `change` made, on a copy.
+ *
+ * Changes rather than finished proposals are what the screen hands up, so an edit typed while a
+ * save is on its way can be made again on top of what the save stored — including tables the save
+ * has just given ids to, which a copy of the old proposal would add a second time.
+ */
+export function edited(draft: SettingsDraft, change: Edit): SettingsDraft {
   const next = copyDraft(draft);
   change(next);
-  return isLegal(next, limits);
+  return next;
 }
 
 /** A change to a proposal, made in place on a copy. */

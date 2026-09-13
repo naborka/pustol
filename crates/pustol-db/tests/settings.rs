@@ -5,14 +5,14 @@ mod common;
 use pustol_db::Error;
 use pustol_domain::draft::{StaffDraft, TableDraft};
 
-use common::{bar_with, config_with, default_bar, draft_of, fresh_account, guest_booking, morning, numbered, staff_booking, store, table, thursday, utc};
+use common::{bar_with, config_with, signed, default_bar, draft_of, fresh_account, guest_booking, morning, numbered, staff_booking, store, table, thursday, utc};
 
 #[tokio::test]
 async fn saving_a_proposal_that_changes_nothing_leaves_everything_alone() {
     let store = store().await;
     let (bar, config) = default_bar(&store).await;
     let saved = store
-        .save_settings(bar, &draft_of(&config), morning())
+        .save_settings(bar, &draft_of(&store, bar).await, morning())
         .await
         .expect("saved");
     assert!(saved.reconciliation.is_empty());
@@ -24,8 +24,8 @@ async fn saving_a_proposal_that_changes_nothing_leaves_everything_alone() {
 #[tokio::test]
 async fn renaming_the_bar_takes_effect_and_survives_a_reload() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     draft.name = "Бар «Чердак»".to_owned();
     draft.address = "Кнез Михаилова 1, Белград".to_owned();
     store
@@ -41,8 +41,8 @@ async fn renaming_the_bar_takes_effect_and_survives_a_reload() {
 #[tokio::test]
 async fn adding_a_table_gives_it_the_next_number_and_makes_it_bookable() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     draft.tables.push(TableDraft::New {
         seats: 4,
         zone: "Зал".to_owned(),
@@ -68,7 +68,7 @@ async fn a_removed_table_is_retired_and_keeps_its_number_for_good() {
     let (bar, config) = default_bar(&store).await;
     let last = numbered(&config.tables, 15).clone();
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     draft
         .tables
         .retain(|entry| !matches!(entry, TableDraft::Existing { id, .. } if *id == last.id.0));
@@ -83,7 +83,7 @@ async fn a_removed_table_is_retired_and_keeps_its_number_for_good() {
     );
 
     // Add a table: it must be sixteen, never a second fifteen.
-    let mut draft = draft_of(&saved.config);
+    let mut draft = draft_of(&store, bar).await;
     draft.tables.push(TableDraft::New {
         seats: 2,
         zone: "Бар".to_owned(),
@@ -102,14 +102,14 @@ async fn retiring_a_table_moves_the_party_sitting_at_it() {
     let store = store().await;
     let (bar, config) = default_bar(&store).await;
     let account = fresh_account("Ксения");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     let seated = store
         .create_booking(&guest_booking(bar, &account, 1200, 6), morning())
         .await
         .expect("free");
     assert_eq!(seated.record.table_number, Some(11));
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     draft.tables.retain(
         |entry| !matches!(entry, TableDraft::Existing { id, .. } if *id == numbered(&config.tables, 11).id.0),
     );
@@ -123,11 +123,11 @@ async fn retiring_a_table_moves_the_party_sitting_at_it() {
     assert_eq!(saved.reconciliation.outcome.moved[0].to_number, 12);
 
     let after = store
-        .booking_of_guest(bar, account.id, morning())
+        .bookings_of_guest(bar, account.id, morning())
         .await
-        .expect("reads")
-        .expect("still booked");
-    assert_eq!(after.table_number, Some(12));
+        .expect("reads");
+    assert_eq!(after.len(), 1, "still booked");
+    assert_eq!(after[0].table_number, Some(12));
 }
 
 #[tokio::test]
@@ -152,7 +152,7 @@ async fn shrinking_the_room_until_a_party_no_longer_fits_leaves_them_without_a_t
         .expect("free");
 
     // Shrink one of them: its party has nowhere to go.
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     for entry in &mut draft.tables {
         if let TableDraft::Existing { id, seats, .. } = entry
             && *id == numbered(&config.tables, 12).id.0
@@ -203,7 +203,7 @@ async fn a_party_left_without_a_table_is_seated_the_moment_the_room_can_take_the
         .await
         .expect("free");
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     for entry in &mut draft.tables {
         if let TableDraft::Existing { id, seats, .. } = entry
             && *id == numbered(&config.tables, 12).id.0
@@ -227,7 +227,7 @@ async fn a_party_left_without_a_table_is_seated_the_moment_the_room_can_take_the
 
     // Give the room a six-top back. Nobody has to remember to press anything: the party the bar
     // still owes a table is seated as part of applying the change.
-    let mut draft = draft_of(&store.config(bar).await.expect("loads"));
+    let mut draft = draft_of(&store, bar).await;
     draft.tables.push(TableDraft::New {
         seats: 6,
         zone: "Зал".to_owned(),
@@ -285,7 +285,7 @@ async fn cancelling_a_booking_hands_the_freed_table_to_a_party_that_was_owed_one
         .await
         .expect("free");
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     for entry in &mut draft.tables {
         if let TableDraft::Existing { id, seats, .. } = entry
             && *id == numbered(&config.tables, 12).id.0
@@ -323,13 +323,13 @@ async fn cancelling_a_booking_hands_the_freed_table_to_a_party_that_was_owed_one
 #[tokio::test]
 async fn closing_a_day_that_has_bookings_on_it_is_refused_with_the_bookings_named() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
+    let (bar, _) = default_bar(&store).await;
     store
         .create_booking(&staff_booking(bar, "Олег", 1200, 4), morning())
         .await
         .expect("free");
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     // Thursday, index 4 counting from Sunday.
     draft.week[4].closed = true;
     let refused = store
@@ -348,8 +348,8 @@ async fn closing_a_day_that_has_bookings_on_it_is_refused_with_the_bookings_name
 #[tokio::test]
 async fn a_day_with_no_bookings_left_on_it_can_be_closed() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     draft.week[4].closed = true;
     store
         .save_settings(bar, &draft, morning())
@@ -361,7 +361,7 @@ async fn a_day_with_no_bookings_left_on_it_can_be_closed() {
 #[tokio::test]
 async fn a_booking_that_has_already_finished_never_blocks_a_settings_change() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
+    let (bar, _) = default_bar(&store).await;
     store
         .create_booking(&staff_booking(bar, "Вадим", 1200, 4), morning())
         .await
@@ -369,7 +369,7 @@ async fn a_booking_that_has_already_finished_never_blocks_a_settings_change() {
 
     // The following afternoon: Thursday's evening is over and cannot be moved.
     let later = utc(2026, 7, 31, 12, 0);
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     draft.week[4].closed = true;
     store
         .save_settings(bar, &draft, later)
@@ -380,14 +380,14 @@ async fn a_booking_that_has_already_finished_never_blocks_a_settings_change() {
 #[tokio::test]
 async fn moving_opening_hours_past_a_live_booking_is_refused() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
+    let (bar, _) = default_bar(&store).await;
     // Arrives at 11:00, so an opening at 17:00 would shut them out.
     store
         .create_booking(&staff_booking(bar, "Никита", 660, 4), morning())
         .await
         .expect("free");
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     draft.week[4].open_minutes = 1020;
     let refused = store
         .save_settings(bar, &draft, morning())
@@ -402,7 +402,7 @@ async fn moving_opening_hours_past_a_live_booking_is_refused() {
 #[tokio::test]
 async fn lengthening_the_turn_does_not_retroactively_extend_anyones_table() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
+    let (bar, _) = default_bar(&store).await;
     // Two parties back to back on what will be the same table.
     let first = store
         .create_booking(&staff_booking(bar, "Саша", 1200, 2), morning())
@@ -415,7 +415,7 @@ async fn lengthening_the_turn_does_not_retroactively_extend_anyones_table() {
     assert_eq!(first.record.table_number, Some(1));
     assert_eq!(second.record.table_number, Some(1));
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     draft.turn_minutes = 240;
     let saved = store
         .save_settings(bar, &draft, morning())
@@ -442,7 +442,7 @@ async fn lengthening_the_turn_does_not_retroactively_extend_anyones_table() {
 #[tokio::test]
 async fn lowering_the_party_cap_reports_the_bookings_above_it_without_refusing() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
+    let (bar, _) = default_bar(&store).await;
     store
         .create_booking(&staff_booking(bar, "Артур", 1200, 6), morning())
         .await
@@ -452,7 +452,7 @@ async fn lowering_the_party_cap_reports_the_bookings_above_it_without_refusing()
         .await
         .expect("free");
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     draft.max_party = 4;
     let saved = store
         .save_settings(bar, &draft, morning())
@@ -468,8 +468,8 @@ async fn lowering_the_party_cap_reports_the_bookings_above_it_without_refusing()
 #[tokio::test]
 async fn a_party_cap_no_table_can_seat_is_refused_as_illegal() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     draft.max_party = 10;
     let refused = store
         .save_settings(bar, &draft, morning())
@@ -487,10 +487,10 @@ async fn a_party_cap_no_table_can_seat_is_refused_as_illegal() {
 #[tokio::test]
 async fn a_proposal_naming_a_table_from_another_bar_cannot_even_be_interpreted() {
     let store = store().await;
-    let (first_bar, first_config) = default_bar(&store).await;
+    let (first_bar, _) = default_bar(&store).await;
     let (_, other_config) = default_bar(&store).await;
 
-    let mut draft = draft_of(&first_config);
+    let mut draft = draft_of(&store, first_bar).await;
     draft.tables.push(TableDraft::Existing {
         id: other_config.tables[0].id.0,
         seats: 4,
@@ -509,8 +509,8 @@ async fn a_proposal_naming_a_table_from_another_bar_cannot_even_be_interpreted()
 #[tokio::test]
 async fn the_last_admin_cannot_be_removed() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     draft.staff.clear();
     let refused = store
         .save_settings(bar, &draft, morning())
@@ -531,13 +531,13 @@ async fn a_bound_admin_keeps_their_seat_through_a_settings_save() {
     let mut anna = fresh_account("Анна");
     anna.username = Some("anna_mgr".to_owned());
     let viewer = store
-        .identify(bar, &anna, morning())
+        .identify(bar, &anna, signed(morning()), morning())
         .await
         .expect("identified");
     assert!(viewer.is_staff, "the invited username claims its seat");
 
     // A save that only adds somebody else must not clear the binding already made.
-    let mut draft = draft_of(&store.config(bar).await.expect("loads"));
+    let mut draft = draft_of(&store, bar).await;
     draft.staff.push(StaffDraft {
         username: "pavel_bar".to_owned(),
     });
@@ -547,7 +547,7 @@ async fn a_bound_admin_keeps_their_seat_through_a_settings_save() {
         .expect("saved");
 
     let after = store
-        .identify(bar, &anna, morning())
+        .identify(bar, &anna, signed(morning()), morning())
         .await
         .expect("identified");
     assert!(after.is_staff);
@@ -572,7 +572,7 @@ async fn a_stranger_who_takes_over_an_invited_username_gets_nothing() {
     anna.username = Some("anna_mgr".to_owned());
     assert!(
         store
-            .identify(bar, &anna, morning())
+            .identify(bar, &anna, signed(morning()), morning())
             .await
             .expect("identified")
             .is_staff
@@ -581,7 +581,7 @@ async fn a_stranger_who_takes_over_an_invited_username_gets_nothing() {
     let mut squatter = fresh_account("Не Анна");
     squatter.username = Some("anna_mgr".to_owned());
     let viewer = store
-        .identify(bar, &squatter, morning())
+        .identify(bar, &squatter, signed(morning()), morning())
         .await
         .expect("identified");
     assert!(
@@ -597,7 +597,7 @@ async fn somebody_never_invited_is_not_staff() {
     let stranger = fresh_account("Прохожий");
     assert!(
         !store
-            .identify(bar, &stranger, morning())
+            .identify(bar, &stranger, signed(morning()), morning())
             .await
             .expect("identified")
             .is_staff
@@ -609,7 +609,7 @@ async fn an_account_remembered_from_a_session_claims_no_seat_and_rewrites_nothin
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let known = fresh_account("Анна");
-    store.identify(bar, &known, morning()).await.expect("identified");
+    store.identify(bar, &known, signed(morning()), morning()).await.expect("identified");
 
     let mut remembered = known.clone();
     remembered.username = Some("anna_mgr".to_owned());
@@ -650,7 +650,7 @@ async fn choosing_reminders_does_not_rewrite_a_known_account() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let known = fresh_account("Анна");
-    store.identify(bar, &known, morning()).await.expect("identified");
+    store.identify(bar, &known, signed(morning()), morning()).await.expect("identified");
 
     let mut stale = known.clone();
     stale.username = Some("old_name".to_owned());
@@ -670,8 +670,8 @@ async fn choosing_reminders_does_not_rewrite_a_known_account() {
 #[tokio::test]
 async fn editing_the_guest_messages_and_cancellation_reasons_replaces_the_lists() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     draft.message_templates = vec!["Стол готов".to_owned(), "Держим ещё 15 минут".to_owned()];
     draft.cancel_reasons = vec!["Дождь".to_owned()];
     store
@@ -687,8 +687,8 @@ async fn editing_the_guest_messages_and_cancellation_reasons_replaces_the_lists(
 #[tokio::test]
 async fn a_blank_guest_message_is_refused() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     draft.message_templates = vec!["   ".to_owned()];
     let refused = store
         .save_settings(bar, &draft, morning())
@@ -703,8 +703,8 @@ async fn a_blank_guest_message_is_refused() {
 #[tokio::test]
 async fn applying_one_days_hours_to_the_whole_week_is_just_a_proposal_like_any_other() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
-    let mut draft = draft_of(&config);
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
     for day in &mut draft.week {
         day.open_minutes = 1020;
         day.close_minutes = 1440;
@@ -726,18 +726,210 @@ async fn applying_one_days_hours_to_the_whole_week_is_just_a_proposal_like_any_o
 #[tokio::test]
 async fn a_contact_for_guests_is_saved_cleared_and_checked() {
     let store = store().await;
-    let (bar, config) = default_bar(&store).await;
+    let (bar, _) = default_bar(&store).await;
 
-    let mut draft = draft_of(&config);
+    let mut draft = draft_of(&store, bar).await;
     draft.contact = "  @podval_bar ".to_owned();
     store.save_settings(bar, &draft, morning()).await.expect("saved");
     assert_eq!(store.config(bar).await.expect("loads").contact.as_deref(), Some("@podval_bar"));
 
+    draft.version = store.settings(bar).await.expect("reads").version;
     draft.contact = String::new();
     store.save_settings(bar, &draft, morning()).await.expect("saved");
     assert_eq!(store.config(bar).await.expect("loads").contact, None, "blank means none");
 
+    draft.version = store.settings(bar).await.expect("reads").version;
     draft.contact = "звоните".to_owned();
     let refused = store.save_settings(bar, &draft, morning()).await;
     assert!(matches!(refused, Err(Error::ProposedConfigInvalid(_))), "{refused:?}");
+}
+
+/// Offers seats under these usernames at `at`, keeping everybody already on the roster.
+async fn invite(
+    store: &pustol_db::Store,
+    bar: pustol_db::BarId,
+    usernames: &[&str],
+    at: chrono::DateTime<chrono::Utc>,
+) {
+    let mut draft = draft_of(store, bar).await;
+    for username in usernames {
+        draft.staff.push(StaffDraft {
+            username: (*username).to_owned(),
+        });
+    }
+    store.save_settings(bar, &draft, at).await.expect("saved");
+}
+
+async fn holder_of(store: &pustol_db::Store, bar: pustol_db::BarId, username: &str) -> Option<i64> {
+    store
+        .config(bar)
+        .await
+        .expect("loads")
+        .staff
+        .iter()
+        .find(|member| member.username == username)
+        .and_then(|member| member.telegram_user_id)
+}
+
+#[tokio::test]
+async fn a_payload_stamped_within_the_clock_skew_after_an_invitation_claims_nothing() {
+    // Telegram stamps a payload by its own clock. One stamped thirty seconds after the seat was
+    // offered, by a clock that may be a minute ahead, may have been signed before the offer, under a
+    // name that was somebody else's then.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let offered = morning() + chrono::TimeDelta::hours(1);
+    invite(&store, bar, &["pavel_bar"], offered).await;
+    let mut pavel = fresh_account("Павел");
+    pavel.username = Some("pavel_bar".to_owned());
+    let skew = chrono::TimeDelta::minutes(1);
+
+    let close = offered + chrono::TimeDelta::seconds(30);
+    let viewer = store
+        .identify(
+            bar,
+            &pavel,
+            pustol_db::identity::Signature {
+                stamped_at: close,
+                clock_skew: skew,
+            },
+            close,
+        )
+        .await
+        .expect("identified");
+    assert!(!viewer.is_staff);
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, None);
+
+    let clear = offered + chrono::TimeDelta::seconds(61);
+    let viewer = store
+        .identify(
+            bar,
+            &pavel,
+            pustol_db::identity::Signature {
+                stamped_at: clear,
+                clock_skew: skew,
+            },
+            clear,
+        )
+        .await
+        .expect("identified");
+    assert!(
+        viewer.is_staff,
+        "signed after the offer on any clock within the skew"
+    );
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, Some(pavel.id.0));
+}
+
+#[tokio::test]
+async fn an_older_payload_claims_nothing_under_a_name_the_account_has_moved_on_from() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    invite(&store, bar, &["pavel_bar"], morning()).await;
+    let mut renamed = fresh_account("Павел");
+    renamed.username = Some("renamed_since".to_owned());
+    store
+        .identify(
+            bar,
+            &renamed,
+            signed(morning() + chrono::TimeDelta::minutes(10)),
+            morning() + chrono::TimeDelta::minutes(10),
+        )
+        .await
+        .expect("identified");
+
+    let mut before = renamed.clone();
+    before.username = Some("pavel_bar".to_owned());
+    let viewer = store
+        .identify(
+            bar,
+            &before,
+            signed(morning() + chrono::TimeDelta::minutes(5)),
+            morning() + chrono::TimeDelta::minutes(10),
+        )
+        .await
+        .expect("identified");
+
+    assert!(
+        !viewer.is_staff,
+        "the server already knows the account is not called that any more"
+    );
+    assert_eq!(viewer.account.username.as_deref(), Some("renamed_since"));
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, None);
+}
+
+#[tokio::test]
+async fn an_account_that_holds_a_seat_claims_no_second_one() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let mut anna = fresh_account("Анна");
+    anna.username = Some("anna_mgr".to_owned());
+    store
+        .identify(bar, &anna, signed(morning()), morning())
+        .await
+        .expect("identified");
+    invite(&store, bar, &["pavel_bar"], morning()).await;
+
+    anna.username = Some("pavel_bar".to_owned());
+    let later = morning() + chrono::TimeDelta::minutes(10);
+    let viewer = store
+        .identify(bar, &anna, signed(later), later)
+        .await
+        .expect("a second name is not an error");
+
+    assert!(viewer.is_staff);
+    assert_eq!(holder_of(&store, bar, "anna_mgr").await, Some(anna.id.0));
+    assert_eq!(
+        holder_of(&store, bar, "pavel_bar").await,
+        None,
+        "pavel_bar is still Павел's to claim"
+    );
+}
+
+#[tokio::test]
+async fn two_payloads_of_one_account_claiming_two_seats_at_once_bind_one_and_fail_neither() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let rounds = 8;
+    let names: Vec<(String, String)> = (0..rounds)
+        .map(|round| (format!("seat_{round}_a"), format!("seat_{round}_b")))
+        .collect();
+    let all: Vec<&str> = names
+        .iter()
+        .flat_map(|(a, b)| [a.as_str(), b.as_str()])
+        .collect();
+    invite(&store, bar, &all, morning()).await;
+    let later = morning() + chrono::TimeDelta::minutes(10);
+
+    let mut attempts = Vec::new();
+    let mut accounts = Vec::new();
+    for (a, b) in &names {
+        let account = fresh_account("Двое");
+        accounts.push(account.id.0);
+        for username in [a, b] {
+            let mut payload = account.clone();
+            payload.username = Some(username.clone());
+            let store = store.clone();
+            attempts.push(tokio::spawn(async move {
+                store.identify(bar, &payload, signed(later), later).await
+            }));
+        }
+    }
+    for attempt in attempts {
+        attempt
+            .await
+            .expect("did not panic")
+            .expect("neither payload fails");
+    }
+
+    let staff = store.config(bar).await.expect("loads").staff.clone();
+    for account in accounts {
+        assert_eq!(
+            staff
+                .iter()
+                .filter(|member| member.telegram_user_id == Some(account))
+                .count(),
+            1,
+            "one account, one seat"
+        );
+    }
 }

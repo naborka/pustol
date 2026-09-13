@@ -143,7 +143,10 @@ async fn a_username_kept_in_a_session_does_not_claim_a_seat_offered_after_it() {
         .clone();
     assert_eq!(seat["bound"], false, "the name may have passed to somebody else since: {seat}");
 
-    app.get(SHIFT, &newcomer).await.expect_ok();
+    app.at(morning() + TimeDelta::minutes(2))
+        .get(SHIFT, &newcomer)
+        .await
+        .expect_ok();
 }
 
 #[tokio::test]
@@ -169,6 +172,38 @@ async fn a_session_never_writes_back_a_name_the_account_has_since_changed() {
     .await
     .expect_ok();
     let shift = app.get(SHIFT, &Caller::manager()).await.expect_ok().clone();
+    assert_eq!(
+        shift["bookings"][0]["guest_username"],
+        serde_json::json!(after.username),
+        "{shift}"
+    );
+}
+
+#[tokio::test]
+async fn an_older_payload_never_writes_back_a_name_a_newer_one_replaced() {
+    let app = harness().await;
+    let before = Caller::new("Паша");
+    let signed_early = before.credentials(morning());
+    let after = Caller {
+        username: before.username.as_ref().map(|name| format!("{name}_new")),
+        ..before.clone()
+    };
+    let later = app.at(morning() + TimeDelta::minutes(10));
+    later.get("/api/session", &after).await.expect_ok();
+
+    let answer = later.send_raw("GET", "/api/session", Some(&signed_early), None).await;
+    assert_eq!(answer.expect_ok()["user"]["username"], serde_json::json!(after.username));
+
+    later
+        .send_raw(
+            "POST",
+            "/api/booking",
+            Some(&signed_early),
+            Some(serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 })),
+        )
+        .await
+        .expect_ok();
+    let shift = later.get(SHIFT, &Caller::manager()).await.expect_ok().clone();
     assert_eq!(
         shift["bookings"][0]["guest_username"],
         serde_json::json!(after.username),

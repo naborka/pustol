@@ -7,7 +7,7 @@ use pustol_db::bookings::MoveTo;
 use pustol_db::identity::ReminderChoice;
 use pustol_db::notifications::{NotificationKind, PendingNotification};
 
-use common::{bar_with, config_with, default_bar, fresh_account, guest_booking, morning, numbered, staff_booking, store, table, thursday, utc};
+use common::{bar_with, config_with, signed, default_bar, fresh_account, guest_booking, morning, numbered, staff_booking, store, table, thursday, utc};
 
 #[tokio::test]
 async fn closing_a_table_moves_the_party_sitting_at_it() {
@@ -30,9 +30,9 @@ async fn closing_a_table_moves_the_party_sitting_at_it() {
         )
         .await
         .expect("closed");
-    assert_eq!(outcome.outcome.orphaned, Vec::new());
-    assert_eq!(outcome.outcome.moved.len(), 1);
-    assert_eq!(outcome.outcome.moved[0].to_number, 2);
+    assert_eq!(outcome.reconciliation.outcome.orphaned, Vec::new());
+    assert_eq!(outcome.reconciliation.outcome.moved.len(), 1);
+    assert_eq!(outcome.reconciliation.outcome.moved[0].to_number, 2);
 
     let shift = store.shift(bar, thursday()).await.expect("reads");
     assert_eq!(shift.blocks.len(), 1);
@@ -60,7 +60,7 @@ async fn closing_a_table_takes_it_out_of_the_picker_for_that_shift_only() {
         .expect("closed");
 
     let tonight = store
-        .availability(bar, thursday(), 2, morning(), None)
+        .availability(bar, thursday(), 2, morning(), &[])
         .await
         .expect("reads").slots;
     assert!(
@@ -76,7 +76,7 @@ async fn closing_a_table_takes_it_out_of_the_picker_for_that_shift_only() {
             thursday().checked_add_days(1).expect("in range"),
             2,
             morning(),
-            None,
+            &[],
         )
         .await
         .expect("reads").slots;
@@ -120,8 +120,8 @@ async fn closing_a_whole_zone_reseats_what_it_can_and_strands_the_rest() {
         .await
         .expect("closed");
 
-    assert_eq!(outcome.outcome.moved, Vec::new(), "the room is full");
-    assert_eq!(outcome.outcome.orphaned.len(), 1);
+    assert_eq!(outcome.reconciliation.outcome.moved, Vec::new(), "the room is full");
+    assert_eq!(outcome.reconciliation.outcome.orphaned.len(), 1);
 
     let shift = store.shift(bar, thursday()).await.expect("reads");
     assert_eq!(
@@ -153,15 +153,15 @@ async fn opening_a_table_again_seats_the_party_that_was_left_without_one() {
         .block_tables(bar, thursday(), &[only_table], "Сломан", None, morning())
         .await
         .expect("closed");
-    assert_eq!(closed.outcome.orphaned, vec![stranded.record.booking.id]);
+    assert_eq!(closed.reconciliation.outcome.orphaned, vec![stranded.record.booking.id]);
 
     let reopened = store
         .unblock_tables(bar, thursday(), &[only_table], morning())
         .await
         .expect("opened");
-    assert_eq!(reopened.outcome.orphaned, Vec::new());
-    assert_eq!(reopened.outcome.moved.len(), 1);
-    assert_eq!(reopened.outcome.moved[0].to_number, 1);
+    assert_eq!(reopened.reconciliation.outcome.orphaned, Vec::new());
+    assert_eq!(reopened.reconciliation.outcome.moved.len(), 1);
+    assert_eq!(reopened.reconciliation.outcome.moved[0].to_number, 1);
 
     let shift = store.shift(bar, thursday()).await.expect("reads");
     assert!(shift.blocks.is_empty());
@@ -195,7 +195,7 @@ async fn a_reminder_is_queued_for_a_guest_booking_and_withheld_until_they_ask_fo
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Алексей");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -228,7 +228,7 @@ async fn a_claimed_message_is_not_handed_to_a_second_worker() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Вера");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
     store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -253,7 +253,7 @@ async fn a_reminder_is_not_due_before_its_hour() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Марк");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
     store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -269,7 +269,7 @@ async fn cancelling_a_booking_stops_its_reminder() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Мила");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -310,7 +310,7 @@ async fn rebooking_stops_the_reminder_for_the_booking_it_replaced() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Лиза");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
     let first = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -320,7 +320,7 @@ async fn rebooking_stops_the_reminder_for_the_booking_it_replaced() {
         .create_booking(&guest_booking(bar, &account, 1320, 2), morning())
         .await
         .expect("free");
-    assert_eq!(second.replaced, Some(first.record.booking.id));
+    assert_eq!(second.replaced, vec![first.record.booking.id]);
 
     // 16:00 UTC is three hours before the *new* booking and an hour after the old one's reminder
     // would have been due.
@@ -335,7 +335,7 @@ async fn a_reminder_whose_moment_has_already_passed_is_never_queued() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Егор");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
 
     // Booking at 20:00 Belgrade made at 19:00 Belgrade: a three-hour warning is meaningless.
@@ -358,7 +358,7 @@ async fn a_reminder_is_withheld_from_a_guest_the_bot_cannot_reach() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Настя");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
     store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -383,7 +383,7 @@ async fn a_staff_message_goes_out_regardless_of_the_reminder_preference() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Катя");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -411,7 +411,7 @@ async fn a_deferred_message_comes_back_when_its_retry_falls_due() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Соня");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -446,7 +446,7 @@ async fn a_message_given_up_on_is_never_offered_again() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Данила");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -485,7 +485,7 @@ async fn the_reminder_prompt_is_shown_once_and_then_left_alone() {
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Полина");
     let viewer = store
-        .identify(bar, &account, morning())
+        .identify(bar, &account, signed(morning()), morning())
         .await
         .expect("identified");
     assert!(viewer.reminders.should_ask());
@@ -495,7 +495,7 @@ async fn the_reminder_prompt_is_shown_once_and_then_left_alone() {
         .await
         .expect("not now");
     let after = store
-        .identify(bar, &account, morning())
+        .identify(bar, &account, signed(morning()), morning())
         .await
         .expect("identified");
     assert!(!after.reminders.should_ask());
@@ -503,7 +503,7 @@ async fn the_reminder_prompt_is_shown_once_and_then_left_alone() {
 
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
     let opted = store
-        .identify(bar, &account, morning())
+        .identify(bar, &account, signed(morning()), morning())
         .await
         .expect("identified");
     assert!(opted.reminders.opted_in);
@@ -517,7 +517,7 @@ async fn reminder_claimed_then_moved(
 ) -> (pustol_domain::allocator::BookingId, PendingNotification) {
     let (bar, _) = default_bar(store).await;
     let account = fresh_account("Тоня");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -583,7 +583,7 @@ async fn a_message_being_delivered_is_not_handed_to_a_second_worker() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Рома");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -608,5 +608,41 @@ async fn a_message_being_delivered_is_not_handed_to_a_second_worker() {
             .expect("reads")
             .is_empty(),
         "a second worker would send the same message again"
+    );
+}
+
+#[tokio::test]
+async fn closing_and_opening_name_only_the_tables_that_call_changed() {
+    let store = store().await;
+    let (bar, config) = default_bar(&store).await;
+    let first = numbered(&config.tables, 1).id;
+    let second = numbered(&config.tables, 2).id;
+    let third = numbered(&config.tables, 3).id;
+    store
+        .block_tables(bar, thursday(), &[first], "Дождь", None, morning())
+        .await
+        .expect("closed");
+
+    let closed = store
+        .block_tables(bar, thursday(), &[first, second], "Сломан", None, morning())
+        .await
+        .expect("closed");
+    assert_eq!(
+        closed.closed,
+        vec![second],
+        "the first table was already shut"
+    );
+
+    let reopened = store
+        .unblock_tables(bar, thursday(), &[first, third], morning())
+        .await
+        .expect("opened");
+    assert_eq!(
+        reopened.reopened,
+        vec![pustol_db::bookings::ReopenedTable {
+            table_id: first,
+            reason: "Дождь".to_owned(),
+        }],
+        "the third table was never shut"
     );
 }

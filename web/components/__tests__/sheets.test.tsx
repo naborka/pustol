@@ -16,6 +16,7 @@ import type { ShiftView } from "@/lib/api";
 
 import {
   BookingSheet,
+  CancelReasonSheet,
   ChoiceSheet,
   DaySheet,
   ManualBookingSheet,
@@ -28,7 +29,11 @@ import { availability, noop, shift, shiftBooking, shiftTable } from "./fixtures"
 
 afterEach(cleanup);
 
-function bookingSheet(booking = shiftBooking(), handlers: Record<string, () => void> = {}) {
+function bookingSheet(
+  booking = shiftBooking(),
+  handlers: Record<string, () => void> = {},
+  when: { nowMinutes?: number | null } = {},
+) {
   const props = {
     onAttendance: vi.fn(),
     onNote: vi.fn(),
@@ -42,7 +47,7 @@ function bookingSheet(booking = shiftBooking(), handlers: Record<string, () => v
     <BookingSheet
       open
       booking={booking}
-      nowMinutes={1_280}
+      nowMinutes={when.nowMinutes === undefined ? 1_280 : when.nowMinutes}
       graceMinutes={15}
       onClose={noop}
       onAttendance={props.onAttendance as never}
@@ -126,6 +131,60 @@ describe("one booking", () => {
 
     await userEvent.click(screen.getByText("Не пришли"));
     expect(props.onAttendance).toHaveBeenCalledWith("no_show");
+  });
+});
+
+describe("a booking whose table is given back", () => {
+  it("offers a move and a cancel exactly while the server says the booking is not finished", () => {
+    // The server's clock, not this phone's: a minute cached on a phone left open is how a party that
+    // went home was still offered a move the server then refused.
+    const cases: [string, ReturnType<typeof shiftBooking>, number | null, boolean][] = [
+      ["waiting tonight", shiftBooking(), 1_280, true],
+      ["on an evening to come", shiftBooking(), null, true],
+      ["a no-show whose table is still held", shiftBooking({ status: "no_show", released_minutes: 1_290 }), 1_280, true],
+      ["gone home, while this phone's minute lags behind", shiftBooking({ status: "left", released_minutes: 1_270, finished: true }), 1_200, false],
+      ["past its window, never marked", shiftBooking({ start_minutes: 1_140, end_minutes: 1_260, finished: true }), 1_280, false],
+      ["on an evening already over", shiftBooking({ finished: true }), null, false],
+    ];
+    for (const [name, booking, nowMinutes, offered] of cases) {
+      bookingSheet(booking, {}, { nowMinutes });
+      expect(screen.queryByText("Перенести") !== null, `${name}: move`).toBe(offered);
+      expect(screen.queryByText("Отменить бронь") !== null, `${name}: cancel`).toBe(offered);
+      cleanup();
+    }
+  });
+});
+
+describe("choosing why a booking is cancelled", () => {
+  function reasonSheet(booking = shiftBooking(), onChoose: (reason: string) => void = noop) {
+    return render(
+      <CancelReasonSheet open booking={booking} reasons={["Дождь"]} onClose={noop} onChoose={onChoose} />,
+    );
+  }
+
+  it("promises the guest a message only when the bot can reach them", () => {
+    reasonSheet();
+    expect(
+      screen.getByText(
+        "Гость получит сообщение с этой причиной, и стол сразу освободится. Отменить это нельзя.",
+      ),
+    ).toBeDefined();
+    cleanup();
+
+    reasonSheet(shiftBooking({ reachable_by_bot: false }));
+    expect(screen.queryByText(/получит сообщение/)).toBeNull();
+    expect(
+      screen.getByText(
+        "Боту некуда написать гостю — предупредите его сами. Стол сразу освободится. Отменить это нельзя.",
+      ),
+    ).toBeDefined();
+  });
+
+  it("cancels with the reason chosen", async () => {
+    const onChoose = vi.fn();
+    reasonSheet(shiftBooking(), onChoose);
+    await userEvent.click(screen.getByText("Дождь"));
+    expect(onChoose).toHaveBeenCalledWith("Дождь");
   });
 });
 
@@ -445,12 +504,21 @@ describe("moving a booking", () => {
 
   it("keeps the time of a booking that has started, and still offers the tables", () => {
     // 21:20, and they sat down at 21:00. The window is history; where they sit is not.
-    moveSheet(shiftBooking({ status: "arrived" }), { table: "t2" });
+    moveSheet(shiftBooking({ status: "arrived", started: true }), { table: "t2" });
     expect(
       screen.getByText("Бронь уже началась — время не меняем. Стол можно поменять в любой момент."),
     ).toBeDefined();
     expect(screen.queryByText("Время")).toBeNull();
     expect(screen.getByText("Пересадить за стол 8")).toBeDefined();
+  });
+
+  it("asks whether the booking has begun of the server's clock, not the minute this phone last read", () => {
+    moveSheet({ ...later, started: true });
+    expect(screen.queryByText("Время")).toBeNull();
+    cleanup();
+
+    moveSheet(shiftBooking({ started: false }));
+    expect(screen.getByText("Время")).toBeDefined();
   });
 });
 

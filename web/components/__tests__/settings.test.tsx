@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SECTIONS, SaveBar, SettingsScreen, sectionValue, type Section } from "../Settings";
 import { draftOf, type SettingsDraft } from "@/lib/api";
-import { firstReason } from "@/lib/settingsRules";
+import { edited, firstReason } from "@/lib/settingsRules";
 import { LIMITS, noop, settingsView } from "./fixtures";
 
 afterEach(cleanup);
@@ -29,7 +29,7 @@ function open(overrides: Partial<Omit<ScreenProps, "section" | "onSection">> = {
       settings={view}
       draft={draftOf(view)}
       editedWeekday={5}
-      onDraft={noop}
+      onEdit={noop}
       onEditWeekday={noop}
       {...overrides}
     />,
@@ -79,8 +79,8 @@ describe("the index", () => {
         settings={view}
         draft={current}
         editedWeekday={5}
-        onDraft={(next) => {
-          current = next;
+        onEdit={(change) => {
+          current = edited(current, change);
           rerender(draw());
         }}
         onEditWeekday={noop}
@@ -108,8 +108,8 @@ describe("the index", () => {
         settings={view}
         draft={current}
         editedWeekday={5}
-        onDraft={(next) => {
-          current = next;
+        onEdit={(change) => {
+          current = edited(current, change);
           rerender(draw());
         }}
         onEditWeekday={noop}

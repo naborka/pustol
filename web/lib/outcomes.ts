@@ -44,19 +44,6 @@ export function reconciliationReport(
   return parts.join(" ");
 }
 
-/** The status an attendance change goes back to, so undo restores what was there rather than a guess. */
-export function previousAttendance(booking: ShiftBooking): Attendance {
-  switch (booking.status) {
-    case "arrived":
-    case "left":
-      return "arrived";
-    case "cancelled":
-    case "confirmed":
-    case "no_show":
-      return "confirmed";
-  }
-}
-
 /**
  * What to say after seating a party, marking them gone, or marking them absent.
  *
@@ -78,6 +65,24 @@ export function attendanceOutcome(updated: ShiftBooking, attendance: Attendance)
     case "confirmed":
       return `${updated.guest_name}: снова ждём.`;
   }
+}
+
+/** Tables to close for one reason, the shape closing takes. */
+export interface Closure {
+  tableIds: string[];
+  reason: string;
+}
+
+/**
+ * The way back from opening tables: each closure the server removed, closed again for the reason
+ * it had, whatever this phone last showed as the reason.
+ */
+export function closuresToRestore(reopened: { table_id: string; reason: string }[]): Closure[] {
+  const byReason = new Map<string, string[]>();
+  for (const { table_id: tableId, reason } of reopened) {
+    byReason.set(reason, [...(byReason.get(reason) ?? []), tableId]);
+  }
+  return [...byReason].map(([reason, tableIds]) => ({ tableIds, reason }));
 }
 
 /** The bookings a refused settings save would have stranded, each named with its time. */

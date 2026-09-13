@@ -79,11 +79,7 @@ pub fn reconcile(request: &Request<'_>) -> Reconciliation {
     // party that has already gone home sat, and the room gains nothing: it is holding no table.
     let mut candidates: Vec<(DateTime<Utc>, BookingId)> = working
         .iter()
-        .filter(|booking| {
-            booking
-                .occupancy()
-                .is_some_and(|held| held.end() > request.now)
-        })
+        .filter(|booking| !booking.has_finished(request.now))
         .filter(|booking| !seating_is_sound(booking, request.tables, request.blocks))
         .map(|booking| (booking.window.start(), booking.id))
         .collect();
@@ -100,7 +96,7 @@ pub fn reconcile(request: &Request<'_>) -> Reconciliation {
             tables: request.tables,
             bookings: &working,
             blocks: request.blocks,
-            ignoring: Some(id),
+            ignoring: std::slice::from_ref(&id),
         });
 
         let seat = assignment.map(|found| found.table_id);

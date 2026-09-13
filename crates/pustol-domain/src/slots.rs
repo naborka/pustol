@@ -69,8 +69,9 @@ pub struct Query<'a> {
     pub blocks: &'a [TableBlock],
     /// The instant the guest is looking at the picker.
     pub now: DateTime<Utc>,
-    /// A booking being moved, which must not block its own slot.
-    pub ignoring: Option<crate::allocator::BookingId>,
+    /// Bookings set aside: one being moved, which must not block its own slot, or the ones a guest's
+    /// booking again would replace.
+    pub ignoring: &'a [crate::allocator::BookingId],
 }
 
 impl<'a> Query<'a> {

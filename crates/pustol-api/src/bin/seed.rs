@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
 
     let config = ValidConfig::new(default_bar(&admin))
         .map_err(|errors| anyhow::anyhow!("the seed configuration is not legal: {errors:?}"))?;
-    let bar = store.create_bar(&config).await?;
+    let bar = store.create_bar(&config, chrono::Utc::now()).await?;
     println!("created bar {bar} with @{admin} as its first admin");
     Ok(())
 }

@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use pustol_db::{BarId, Store, TelegramUserId};
-use pustol_telegram::updates::{CallbackQuery, Message};
+use pustol_telegram::updates::{CallbackQuery, Message, UPDATE_RETENTION};
 use pustol_telegram::{Bot, SendError, Update, messages};
 
 use crate::callbacks::{self, Callback};
@@ -16,7 +16,7 @@ use crate::state::Clock;
 /// How long one request waits for something to arrive before asking again.
 const LONG_POLL: Duration = Duration::from_secs(25);
 
-/// How long to wait after Telegram could not be reached.
+/// How long to wait after Telegram or the database could not be reached.
 const AFTER_FAILURE: Duration = Duration::from_secs(5);
 
 /// How long to wait after Telegram refused to hand updates over.
@@ -33,15 +33,34 @@ pub struct Inbox {
     pub clock: Clock,
 }
 
+/// Why an update could not be taken in hand.
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimError {
+    #[error("the bot token names no bot, so no update of it can be claimed")]
+    NoBot,
+    #[error("could not claim an update: {0}")]
+    Store(#[from] pustol_db::Error),
+}
+
+/// Why one poll of the inbox did not finish.
+#[derive(Debug, thiserror::Error)]
+pub enum PollError {
+    #[error(transparent)]
+    Telegram(#[from] SendError),
+    #[error(transparent)]
+    Claim(#[from] ClaimError),
+}
+
 impl Inbox {
     /// Runs until the process is asked to stop.
     ///
-    /// Only the wait for Telegram is cut short by a stop. An update already in hand is answered in
-    /// full, so a guest's tap is never left cancelled but unanswered, and before stopping Telegram
-    /// is told what was answered, so the next process does not answer it again.
+    /// Only the wait for Telegram is cut short by a stop. Updates already in hand are settled in
+    /// full, so a guest's tap is never left cancelled but unanswered, and before stopping Telegram is
+    /// told what was settled. An update that cannot be claimed stops the batch where it is: it is
+    /// fetched again once the wait after a failure is over.
     pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut offset = None;
-        let mut received = None;
+        let mut confirmed = offset;
         loop {
             let polled = tokio::select! {
                 polled = self.bot.get_updates(offset, LONG_POLL) => polled,
@@ -49,9 +68,16 @@ impl Inbox {
             };
             let pause = match polled {
                 Ok(updates) => {
-                    received = offset;
-                    offset = self.handle_all(updates, offset).await;
-                    continue;
+                    confirmed = offset;
+                    let (settled, stopped) = self.settle(updates, offset).await;
+                    offset = settled;
+                    match stopped {
+                        Ok(()) => continue,
+                        Err(error) => {
+                            tracing::error!(%error, "could not take an update in hand");
+                            AFTER_FAILURE
+                        }
+                    }
                 }
                 Err(error) => {
                     tracing::error!(%error, "could not read what was sent to the bot");
@@ -67,11 +93,11 @@ impl Inbox {
                 _ = shutdown.changed() => break,
             }
         }
-        if let Some(answered) = offset
-            && offset > received
-            && let Err(error) = self.confirm(answered).await
+        if let Some(settled) = offset
+            && offset > confirmed
+            && let Err(error) = self.confirm(settled).await
         {
-            tracing::warn!(%error, "could not tell Telegram which updates were answered");
+            tracing::warn!(%error, "could not tell Telegram which updates were settled");
         }
     }
 
@@ -82,30 +108,78 @@ impl Inbox {
         self.bot.get_updates(Some(offset), Duration::ZERO).await.map(drop)
     }
 
-    /// Fetches once and answers everything fetched. Returns the offset to ask from next.
-    pub async fn poll_once(&self, offset: Option<i64>) -> Result<Option<i64>, SendError> {
+    /// Fetches once from `offset`, settles everything fetched, and gives the offset past it.
+    pub async fn poll_once(&self, offset: Option<i64>) -> Result<Option<i64>, PollError> {
         let updates = self.bot.get_updates(offset, LONG_POLL).await?;
-        Ok(self.handle_all(updates, offset).await)
+        let (settled, stopped) = self.settle(updates, offset).await;
+        stopped?;
+        Ok(settled)
     }
 
-    /// Answers each update and moves the offset past it, whether or not answering worked: an update
-    /// that fails every time must not be fetched again for ever.
-    async fn handle_all(&self, updates: Vec<Update>, offset: Option<i64>) -> Option<i64> {
-        let mut next = offset;
+    /// Settles each update in order and gives the offset past the last one settled.
+    ///
+    /// An update is settled once it is claimed and answered, or found claimed by somebody else, and
+    /// the offset moves past it either way: an update whose answer fails every time must not be
+    /// fetched again for ever. The first update that cannot be claimed stops the batch before it,
+    /// with the error.
+    async fn settle(
+        &self,
+        updates: Vec<Update>,
+        mut offset: Option<i64>,
+    ) -> (Option<i64>, Result<(), ClaimError>) {
+        let fetched = !updates.is_empty();
         for update in updates {
             let after = update.update_id + 1;
-            self.handle(update).await;
-            next = Some(next.map_or(after, |current| current.max(after)));
+            if let Err(error) = self.handle(update).await {
+                return (offset, Err(error));
+            }
+            offset = Some(offset.map_or(after, |current| current.max(after)));
         }
-        next
+        if fetched {
+            self.forget_old_claims().await;
+        }
+        (offset, Ok(()))
     }
 
-    /// Answers one update. Failures are logged; there is nobody else to tell.
-    pub async fn handle(&self, update: Update) {
+    /// Answers one update if this process is the one that claims it, and says whether it was.
+    ///
+    /// At most once, not at least once. The claim is written before the answer, so two processes, or
+    /// one process fetching again what it already answered, never answer twice. A crash between the
+    /// claim and the answer leaves that one update unanswered; for a tap that means a spinner that
+    /// gives up, and the guest taps again, which Telegram sends as a new update. Answering twice
+    /// instead would cancel twice and say so twice, which nobody can take back.
+    ///
+    /// Failures to answer are logged; there is nobody else to tell.
+    pub async fn handle(&self, update: Update) -> Result<bool, ClaimError> {
+        let bot = self.bot.id().ok_or(ClaimError::NoBot)?;
+        let now = self.clock.now();
+        if !self
+            .store
+            .claim_update(bot, update.update_id, now, now - UPDATE_RETENTION)
+            .await?
+        {
+            return Ok(false);
+        }
         if let Some(query) = update.callback_query {
             self.answer_tap(query).await;
         } else if let Some(message) = update.message {
             self.answer_message(message).await;
+        }
+        Ok(true)
+    }
+
+    /// Clears away claims too old to mean anything. A claim that stays behind costs a row and
+    /// silences nothing, since claiming takes an old claim over.
+    async fn forget_old_claims(&self) {
+        let Some(bot) = self.bot.id() else {
+            return;
+        };
+        if let Err(error) = self
+            .store
+            .forget_update_claims(bot, self.clock.now() - UPDATE_RETENTION)
+            .await
+        {
+            tracing::warn!(%error, "could not clear away old update claims");
         }
     }
 
@@ -189,8 +263,23 @@ impl Inbox {
 }
 
 /// The deep-link payload of a `/start` command, empty when there is none.
+///
+/// A client that picks the command from a list addresses it to the bot by name, `/start@PodvalBot`,
+/// and a payload follows the name the same way it follows the bare command.
 fn start_payload(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("/start")?;
+    let rest = match rest.strip_prefix('@') {
+        Some(addressed) => {
+            let name = addressed
+                .find(char::is_whitespace)
+                .unwrap_or(addressed.len());
+            if name == 0 {
+                return None;
+            }
+            &addressed[name..]
+        }
+        None => rest,
+    };
     if rest.is_empty() {
         return Some("");
     }

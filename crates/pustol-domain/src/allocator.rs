@@ -93,6 +93,23 @@ impl Booking {
         Interval::new(self.window.start(), end).ok()
     }
 
+    /// Whether the window promised has begun by `now`.
+    #[must_use]
+    pub fn has_started(&self, now: DateTime<Utc>) -> bool {
+        self.window.start() <= now
+    }
+
+    /// Whether this booking is the record of an evening rather than a table still held.
+    ///
+    /// **The one rule for "over".** Whether staff may still move or cancel it, whether it is still
+    /// the guest's, whether the room may re-seat it and whether a screen draws it as done are all
+    /// this question, answered by [`Self::occupancy`]: a party that went home or never came is over
+    /// from the minute its table went back, whatever window was promised.
+    #[must_use]
+    pub fn has_finished(&self, now: DateTime<Utc>) -> bool {
+        self.occupancy().is_none_or(|held| held.end() <= now)
+    }
+
     /// Whether this booking holds `table_id` at any moment of `window`.
     #[must_use]
     pub fn holds(&self, table_id: TableId, window: Interval) -> bool {
@@ -142,8 +159,9 @@ pub struct Request<'a> {
     /// window can outlast midnight; this function does not filter by service day.
     pub bookings: &'a [Booking],
     pub blocks: &'a [TableBlock],
-    /// A booking being moved, which must not be treated as blocking its own new place.
-    pub ignoring: Option<BookingId>,
+    /// Bookings set aside: one being moved, which must not block its own new place, or the ones a
+    /// guest's booking again would replace.
+    pub ignoring: &'a [BookingId],
 }
 
 /// Every table this party could be seated at, smallest first, ties by printed number.
@@ -187,7 +205,7 @@ fn is_blocked(table_id: TableId, service_day: ServiceDay, blocks: &[TableBlock])
 
 fn free_during(table_id: TableId, request: &Request<'_>) -> bool {
     !request.bookings.iter().any(|booking| {
-        Some(booking.id) != request.ignoring && booking.holds(table_id, request.window)
+        !request.ignoring.contains(&booking.id) && booking.holds(table_id, request.window)
     })
 }
 
@@ -216,7 +234,7 @@ pub fn largest_party_seatable(
             tables: &config.tables,
             bookings,
             blocks,
-            ignoring: None,
+            ignoring: &[],
         })
         .is_some()
     })
@@ -318,7 +336,7 @@ mod tests {
                 tables: &self.tables,
                 bookings: &self.bookings,
                 blocks: &self.blocks,
-                ignoring: None,
+                ignoring: &[],
             }
         }
     }
@@ -603,6 +621,59 @@ mod tests {
     }
 
     #[test]
+    fn a_booking_has_started_from_the_first_minute_of_its_window() {
+        let evening = booking(None, window((18, 0), (20, 0)), 2);
+        assert!(!evening.has_started(at(17, 59)));
+        assert!(evening.has_started(at(18, 0)));
+        assert!(evening.has_started(at(21, 0)));
+    }
+
+    #[test]
+    fn a_booking_has_finished_exactly_when_it_holds_its_table_no_longer() {
+        let mut evening = booking(None, window((18, 0), (20, 0)), 2);
+        assert!(!evening.has_finished(at(19, 59)));
+        assert!(evening.has_finished(at(20, 0)));
+
+        evening.status = BookingStatus::Left;
+        evening.released_at = Some(at(19, 0));
+        assert!(!evening.has_finished(at(18, 59)));
+        assert!(
+            evening.has_finished(at(19, 0)),
+            "gone home is over, whatever was promised"
+        );
+
+        evening.released_at = Some(at(18, 0));
+        assert!(
+            evening.has_finished(at(17, 0)),
+            "released as it began holds nothing at all"
+        );
+
+        evening.status = BookingStatus::Cancelled;
+        evening.released_at = None;
+        assert!(evening.has_finished(at(17, 0)));
+    }
+
+    #[test]
+    fn every_booking_set_aside_is_ignored_and_no_other() {
+        let mut room = Room::new(vec![table(1, 2), table(2, 2), table(3, 2)]);
+        let held = window((18, 0), (20, 0));
+        for index in 0..3 {
+            room.bookings
+                .push(booking(Some(&room.tables[index]), held, 2));
+        }
+        let set_aside = [room.bookings[0].id, room.bookings[2].id];
+        let request = Request {
+            ignoring: &set_aside,
+            ..room.request(2, held)
+        };
+        let offered: Vec<i32> = free_tables(&request)
+            .iter()
+            .map(|table| table.number)
+            .collect();
+        assert_eq!(offered, vec![1, 3]);
+    }
+
+    #[test]
     fn a_booking_being_moved_does_not_block_its_own_reassignment() {
         let mut room = Room::new(vec![table(1, 2)]);
         let existing = booking(Some(&room.tables[0]), window((18, 0), (20, 0)), 2);
@@ -611,7 +682,8 @@ mod tests {
 
         let mut request = room.request(2, window((18, 0), (20, 0)));
         assert!(assign(&request).is_none(), "without ignoring, it blocks itself");
-        request.ignoring = Some(existing_id);
+        let moving = [existing_id];
+        request.ignoring = &moving;
         assert!(assign(&request).is_some());
     }
 
@@ -639,7 +711,7 @@ mod tests {
             tables: &room.tables,
             bookings: &room.bookings,
             blocks: &room.blocks,
-            ignoring: None,
+            ignoring: &[],
         };
         assert!(assign(&request).is_none());
     }

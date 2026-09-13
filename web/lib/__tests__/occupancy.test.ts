@@ -43,6 +43,8 @@ function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
     source: "app",
     note: null,
     reachable_by_bot: true,
+    started: true,
+    finished: false,
     ...overrides,
   };
 }
@@ -50,6 +52,7 @@ function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
 function shift(overrides: Partial<ShiftView> = {}): ShiftView {
   return {
     service_date: "2026-09-11",
+    today: "2026-09-11",
     hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
     tables: [table("t1", 1, 2), table("t2", 2, 6)],
     bookings: [],

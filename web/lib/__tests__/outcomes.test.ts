@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { Reconciliation, ShiftBooking } from "../api";
 import {
   attendanceOutcome,
-  previousAttendance,
+  closuresToRestore,
   reconciliationReport,
   strandedLines,
 } from "../outcomes";
@@ -28,6 +28,8 @@ function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
     source: "app",
     note: null,
     reachable_by_bot: true,
+    started: false,
+    finished: false,
     ...overrides,
   };
 }
@@ -90,29 +92,6 @@ describe("what a rearrangement reports", () => {
   });
 });
 
-describe("undo", () => {
-  it("goes back to the status the booking actually had", () => {
-    // A party that was waiting goes back to waiting; one that was at the table goes back to the
-    // table. Guessing one of the two would quietly turn a mis-tap into a second mistake.
-    expect(previousAttendance(booking({ status: "confirmed" }))).toBe("confirmed");
-    expect(previousAttendance(booking({ status: "arrived" }))).toBe("arrived");
-    expect(previousAttendance(booking({ status: "left" }))).toBe("arrived");
-    expect(previousAttendance(booking({ status: "no_show" }))).toBe("confirmed");
-  });
-
-  it("round-trips every reversible change back to where it started", () => {
-    for (const status of ["confirmed", "arrived"] as const) {
-      const was = booking({ status });
-      const before = previousAttendance(was);
-      // Whatever happens next — seated, gone, absent — undo returns to `before`.
-      for (const next of ["arrived", "left", "no_show"] as const) {
-        const after = booking({ status: next });
-        expect(previousAttendance({ ...after, status })).toBe(before);
-      }
-    }
-  });
-});
-
 describe("what an attendance change says", () => {
   it("names the table when there is one", () => {
     expect(attendanceOutcome(booking({ status: "arrived" }), "arrived")).toBe(
@@ -142,5 +121,24 @@ describe("the bookings a refused save would strand", () => {
 
   it("still names a booking whose time is missing", () => {
     expect(strandedLines([{ guestName: "Глеб", startMinutes: null }])).toEqual(["Глеб"]);
+  });
+});
+
+describe("the way back from opening tables", () => {
+  it("closes each table the server reopened again, for the reason the server says it had", () => {
+    expect(
+      closuresToRestore([
+        { table_id: "t2", reason: "Дождь" },
+        { table_id: "t3", reason: "Частное мероприятие" },
+        { table_id: "t4", reason: "Дождь" },
+      ]),
+    ).toEqual([
+      { tableIds: ["t2", "t4"], reason: "Дождь" },
+      { tableIds: ["t3"], reason: "Частное мероприятие" },
+    ]);
+  });
+
+  it("has nothing to close when nothing was reopened", () => {
+    expect(closuresToRestore([])).toEqual([]);
   });
 });

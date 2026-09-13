@@ -37,7 +37,8 @@ pub enum Error {
     #[error("that booking has already started")]
     BookingHasStarted,
 
-    /// Moving a booking that no longer holds a table. It is the record of an evening now.
+    /// Moving or cancelling a booking that no longer holds a table. It is the record of an evening
+    /// now.
     #[error("that booking is over")]
     BookingHasFinished,
 
@@ -103,13 +104,20 @@ pub enum Error {
     #[error("the proposed configuration is not legal: {0:?}")]
     ProposedConfigInvalid(Vec<ConfigError>),
 
+    /// A proposal made from settings another save has replaced since. Saving it would quietly undo
+    /// that save, so nothing is written.
+    #[error("the settings have changed since this proposal was made from them")]
+    SettingsChanged,
+
     /// A proposed configuration would strand bookings that have already been promised.
     #[error("the proposed configuration would strand {} booking(s)", .0.len())]
     WouldStrandBookings(Vec<crate::bar::StrandedBooking>),
 
-    /// The guest would hold two running bookings on one shift: a table they are sitting at, or one
-    /// still held for them through the grace period. Decided by occupancy under the bar's lock, not
-    /// by a constraint, because whether a booking still runs depends on the clock.
+    /// The guest already has a confirmed or arrived booking on that evening whose time is still
+    /// going, so booking again cannot replace it. Staff restoring a booking are refused the same
+    /// way when it would leave the guest two tables held that evening, a no-show inside its grace
+    /// period counting as one. Decided by occupancy under the bar's lock, not by a constraint,
+    /// because whether a booking still runs depends on the clock.
     #[error("this guest already has a booking on this shift")]
     AlreadyBookedThisShift,
 

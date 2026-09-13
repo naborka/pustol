@@ -30,7 +30,7 @@ macro_rules! couple_at {
             bookings: &[],
             blocks: &[],
             now: $now,
-            ignoring: None,
+            ignoring: &[],
         }
     };
 }
@@ -259,7 +259,7 @@ fn a_guest_changing_their_own_booking_still_sees_their_current_time_as_free() {
 
     let with_mine_ignored = slot_list(&Query {
         bookings: &bookings,
-        ignoring: Some(mine),
+        ignoring: &[mine],
         ..couple_at!(config, thursday(), morning())
     });
     assert!(

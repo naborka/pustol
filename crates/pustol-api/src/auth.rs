@@ -13,9 +13,9 @@ use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use chrono::{DateTime, TimeDelta, Utc};
-use pustol_db::identity::{TelegramAccount, Viewer};
+use pustol_db::identity::{Signature, TelegramAccount, Viewer};
 use pustol_db::ids::TelegramUserId;
-use pustol_telegram::init_data::TelegramUser;
+use pustol_telegram::init_data::{CLOCK_SKEW, TelegramUser};
 use pustol_telegram::session::{issue, verify_session};
 use pustol_telegram::{BotToken, verify};
 
@@ -46,8 +46,9 @@ const SESSION_SCHEME: &str = "session ";
 /// How a caller proved who they are.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Proof {
-    /// A payload Telegram signed within [`MAX_INIT_DATA_AGE`]: its profile is current.
-    Telegram,
+    /// A payload Telegram signed at `signed_at`, within [`MAX_INIT_DATA_AGE`]: its profile is as it
+    /// was then, which may be that long ago.
+    Telegram { signed_at: DateTime<Utc> },
     /// A session this server issued: its profile is as it was when Telegram signed, up to
     /// [`SESSION_LIFETIME`] ago.
     Session,
@@ -77,9 +78,9 @@ impl Authenticated {
 
     /// The account as storage knows it, and what it may do.
     ///
-    /// The one way a handler learns about the caller beyond their id. Only a fresh payload may
-    /// rewrite the stored profile or claim a staff seat by username; a session's username may have
-    /// passed to somebody else since it was signed.
+    /// The one way a handler learns about the caller beyond their id. Only a payload may rewrite the
+    /// stored profile or claim a staff seat by username, and only as of when Telegram signed it; a
+    /// session does neither.
     pub async fn viewer(&self, state: &AppState) -> Result<Viewer, ApiError> {
         let account = TelegramAccount {
             id: self.user_id(),
@@ -90,7 +91,16 @@ impl Authenticated {
         };
         let now = state.now();
         Ok(match self.proof {
-            Proof::Telegram => state.store.identify(state.bar, &account, now).await?,
+            Proof::Telegram { signed_at } => {
+                let signature = Signature {
+                    stamped_at: signed_at,
+                    clock_skew: CLOCK_SKEW,
+                };
+                state
+                    .store
+                    .identify(state.bar, &account, signature, now)
+                    .await?
+            }
             Proof::Session => state.store.recognise(state.bar, &account, now).await?,
         })
     }
@@ -125,7 +135,9 @@ impl FromRequestParts<AppState> for Authenticated {
             return Ok(Self {
                 expires_at: verified.auth_date + SESSION_LIFETIME,
                 user: verified.user,
-                proof: Proof::Telegram,
+                proof: Proof::Telegram {
+                    signed_at: verified.auth_date,
+                },
             });
         }
         if let Some(session) = header.strip_prefix(SESSION_SCHEME) {

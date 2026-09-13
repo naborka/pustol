@@ -1,13 +1,16 @@
-//! What a guest can do: see the bar, see their booking, take one, give it back.
+//! What a guest can do: see the bar, see their bookings, take one, give one back.
 
-use axum::extract::{Query, State};
-use axum::routing::{get, post};
+use axum::extract::{Path, Query, State};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use pustol_db::bookings::{Channel, NewBooking};
 use pustol_db::identity::ReminderChoice;
+use pustol_db::records::bookings_of;
 use pustol_domain::config::ValidConfig;
-use pustol_domain::{Interval, ServiceDay};
+use pustol_domain::rebooking::replaced_on;
+use pustol_domain::{Booking, BookingId, Interval, ServiceDay};
 use pustol_telegram::messages;
+use uuid::Uuid;
 
 use crate::auth::Authenticated;
 use crate::dto::{
@@ -29,7 +32,8 @@ pub fn routes() -> Router<AppState> {
         .route("/session", get(session))
         .route("/availability", get(availability))
         .route("/days", get(days))
-        .route("/booking", post(book).delete(cancel))
+        .route("/booking", post(book))
+        .route("/bookings/{id}", delete(cancel))
         .route("/reminders/opt-in", post(opt_in))
         .route("/reminders/dismiss", post(dismiss))
 }
@@ -46,13 +50,20 @@ async fn session(
     let viewer = caller.viewer(&state).await?;
     let config = state.store.config(state.bar).await?;
     let today = config.current_service_day(now);
-    let booking = state
+    let mine = state
         .store
-        .booking_of_guest(state.bar, caller.user_id(), now)
+        .bookings_of_guest(state.bar, caller.user_id(), now)
         .await?;
     let tonight = state
         .store
-        .day_offers(state.bar, &config, &[today], HOME_CARD_PARTY, now)
+        .day_offers(
+            state.bar,
+            &config,
+            &[today],
+            HOME_CARD_PARTY,
+            now,
+            &bookings_of(&mine),
+        )
         .await?;
 
     Ok(Json(Session {
@@ -65,9 +76,10 @@ async fn session(
         is_staff: viewer.is_staff,
         reminders: RemindersView::of(&viewer),
         bar: BarView::of(&config, today, now),
-        booking: booking
-            .as_ref()
-            .map(|record| GuestBooking::of(record, &config)),
+        bookings: mine
+            .iter()
+            .map(|record| GuestBooking::of(record, &config, now))
+            .collect(),
         bookable_days: pustol_domain::bookable_days(&config, today)
             .into_iter()
             .map(ServiceDay::date)
@@ -87,15 +99,16 @@ async fn session(
 /// tapped a different day on the rail it had just drawn.
 async fn days(
     State(state): State<AppState>,
-    _caller: Authenticated,
+    caller: Authenticated,
     Query(query): Query<DayRailQuery>,
 ) -> ApiResult<Json<DayRail>> {
     let now = state.now();
     let config = state.store.config(state.bar).await?;
     let horizon = pustol_domain::horizon_days(&config, config.current_service_day(now));
+    let mine = own_bookings(&state, &caller, now).await?;
     let offers = state
         .store
-        .day_offers(state.bar, &config, &horizon, query.party_size, now)
+        .day_offers(state.bar, &config, &horizon, query.party_size, now, &mine)
         .await?;
     Ok(Json(DayRail {
         party_size: query.party_size,
@@ -105,6 +118,7 @@ async fn days(
                 service_date: offer.day.date(),
                 closed: offer.closed,
                 free_from_minutes: offer.free_from_minutes,
+                booked: offer.booked,
             })
             .collect(),
     }))
@@ -113,7 +127,8 @@ async fn days(
 /// Arrival times for a party on one shift.
 ///
 /// A guest changing an existing booking must still see their own time as free, or the only way to
-/// move from 20:00 to 20:30 would be to give up 20:00 first and hope.
+/// move from 20:00 to 20:30 would be to give up 20:00 first and hope. What is set aside is exactly
+/// what a booking on that shift would replace — never a table they are sitting at.
 async fn availability(
     State(state): State<AppState>,
     caller: Authenticated,
@@ -121,10 +136,7 @@ async fn availability(
 ) -> ApiResult<Json<Availability>> {
     let now = state.now();
     let day = ServiceDay::new(query.service_date);
-    let mine = state
-        .store
-        .booking_of_guest(state.bar, caller.user_id(), now)
-        .await?;
+    let mine = own_bookings(&state, &caller, now).await?;
     let reading = state
         .store
         .availability(
@@ -132,7 +144,7 @@ async fn availability(
             day,
             query.party_size,
             now,
-            mine.as_ref().map(|record| record.booking.id),
+            &replaced_on(&mine, day, now),
         )
         .await?;
     Ok(Json(Availability::of(
@@ -143,11 +155,26 @@ async fn availability(
     )))
 }
 
+/// The caller's own running bookings, which every offer made to them weighs by the rebooking rule.
+async fn own_bookings(
+    state: &AppState,
+    caller: &Authenticated,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ApiResult<Vec<Booking>> {
+    Ok(bookings_of(
+        &state
+            .store
+            .bookings_of_guest(state.bar, caller.user_id(), now)
+            .await?,
+    ))
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct BookingTaken {
     pub booking: GuestBooking,
-    /// The booking this one replaced, so the app can say so rather than appear to have lost it.
-    pub replaced: Option<uuid::Uuid>,
+    /// Every booking this one replaced, soonest first, so the app can say so rather than appear to
+    /// have lost them.
+    pub replaced: Vec<Uuid>,
 }
 
 async fn book(
@@ -180,8 +207,8 @@ async fn book(
         .await?;
 
     Ok(Json(BookingTaken {
-        booking: GuestBooking::of(&created.record, &created.config),
-        replaced: created.replaced.map(|id| id.0),
+        booking: GuestBooking::of(&created.record, &created.config, now),
+        replaced: created.replaced.iter().map(|id| id.0).collect(),
     }))
 }
 
@@ -193,19 +220,25 @@ pub(crate) fn word_reminder(config: &ValidConfig, window: Interval, party_size: 
     messages::reminder(&config.name, window.start(), config.timezone, party_size)
 }
 
-/// A guest gives their table back.
+/// A guest gives one of their tables back.
 ///
 /// No reason is recorded and nothing is sent: they know why, and a bar that messages somebody about
 /// a cancellation they just made themselves looks broken.
 async fn cancel(
     State(state): State<AppState>,
     caller: Authenticated,
+    Path(id): Path<Uuid>,
 ) -> ApiResult<Json<GuestBooking>> {
+    let now = state.now();
     let cancelled = state
         .store
-        .cancel_booking_of_guest(state.bar, caller.user_id(), state.now())
+        .cancel_booking_of_guest(state.bar, caller.user_id(), BookingId(id), now)
         .await?;
-    Ok(Json(GuestBooking::of(&cancelled.record, &cancelled.config)))
+    Ok(Json(GuestBooking::of(
+        &cancelled.record,
+        &cancelled.config,
+        now,
+    )))
 }
 
 async fn opt_in(

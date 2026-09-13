@@ -405,7 +405,7 @@ async fn a_booking_moved_later_gets_the_reminder_it_was_taken_too_late_for() {
 async fn a_booking_moved_past_its_reminder_and_back_is_reminded_again() {
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     let guest = booked_and_opted_in(&app).await;
-    let id = booking_id(app.get("/api/session", &guest).await.expect_ok());
+    let id = app.get("/api/session", &guest).await.expect_ok()["bookings"][0]["id"].as_str().expect("an id").to_owned();
     let staff = Caller::manager();
     move_to(&app.at(utc(2026, 7, 30, 15, 30)), &staff, &id, 1110).await;
     move_to(&app.at(utc(2026, 7, 30, 15, 40)), &staff, &id, 1410).await;
@@ -467,7 +467,8 @@ async fn a_request_telegram_refuses_on_its_merits_is_not_retried() {
 async fn a_cancelled_booking_is_never_reminded_about() {
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     let guest = booked_and_opted_in(&app).await;
-    app.send("DELETE", "/api/booking", &guest, serde_json::Value::Null)
+    let id = app.get("/api/session", &guest).await.expect_ok()["bookings"][0]["id"].as_str().expect("an id").to_owned();
+    app.send("DELETE", &format!("/api/bookings/{id}"), &guest, serde_json::Value::Null)
         .await
         .expect_ok();
 
@@ -634,7 +635,7 @@ async fn the_kinds_of_message_are_distinguishable_to_the_worker() {
 async fn a_party_grown_by_telephone_is_reminded_with_its_new_size() {
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     let guest = booked_and_opted_in(&app).await;
-    let id = booking_id(app.get("/api/session", &guest).await.expect_ok());
+    let id = app.get("/api/session", &guest).await.expect_ok()["bookings"][0]["id"].as_str().expect("an id").to_owned();
     let staff = Caller::manager();
     app.send(
         "PATCH",

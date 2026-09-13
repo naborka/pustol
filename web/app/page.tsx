@@ -13,21 +13,22 @@
  * undo, because the confirmation was the protection. One action runs at a time, so a second tap on
  * a slow connection is not a second booking or a second message. And what is on screen keeps up by
  * itself: a shift left open on the bar is the normal case, not the exception.
+ *
+ * Everything read goes through one read model (`useRead`), and every staff write answers with the
+ * evening as the server has it after the write, which goes on screen through that same model. The
+ * phone never patches its own copy of the room.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  ApiError,
   client as makeClient,
-  draftOf,
   type Attendance,
   type Availability,
   type DayOffer,
   type GuestBooking,
   type Reconciliation,
   type Session,
-  type SettingsDraft,
   type SettingsView,
   type ShiftBooking,
   type ShiftView,
@@ -42,15 +43,24 @@ import {
 import * as fmt from "@/lib/format";
 import {
   attendanceOutcome,
-  previousAttendance,
+  closuresToRestore,
   reconciliationReport,
   strandedLines,
+  type Closure,
 } from "@/lib/outcomes";
-import { firstReason, differs } from "@/lib/settingsRules";
-import { refreshedSheet, withBooking, type OpenSheet } from "@/lib/sheet";
-import { hasStarted } from "@/lib/status";
+import { edited, firstReason, type Edit } from "@/lib/settingsRules";
+import { isDirty, received, savedInto, type SettingsPair } from "@/lib/settingsSync";
+import {
+  NO_SHEET,
+  closedIfStill,
+  refreshedGuestSheet,
+  refreshedSheet,
+  type OpenSheet,
+  type SheetContent,
+} from "@/lib/sheet";
 import { credentials, haptics, openBotChat, openContact, webApp } from "@/lib/telegram";
 import { TIMING } from "@/lib/tokens";
+import { failureOf, useRead } from "@/lib/useRead";
 import { ShiftActions, ShiftScreen, type ShiftPane } from "@/components/AdminShift";
 import { AppShell, InsetFrame, type StaffTab } from "@/components/AppChrome";
 import {
@@ -58,11 +68,15 @@ import {
   DoneScreen,
   HomeScreen,
   bookingDecision,
+  heldAfter,
+  heldOn,
+  pickerStart,
 } from "@/components/GuestScreens";
 import { SaveBar, SettingsScreen, type Section } from "@/components/Settings";
 import { useInsets } from "@/components/ThemeProvider";
 import {
   BookingSheet,
+  CancelReasonSheet,
   ChoiceSheet,
   ConflictSheet,
   DaySheet,
@@ -97,77 +111,15 @@ const SHIFT_REFRESH_MS = 30_000;
 /** How often the guest's home screen does: the open-until line and a booking the bar has closed. */
 const HOME_REFRESH_MS = 60_000;
 
-/** A failure as the API described it, or as close as the app can get. */
-function failureOf(error: unknown): ApiFailure {
-  return error instanceof ApiError ? error.failure : { code: "internal", message: String(error) };
-}
+/** The session is one question, whoever asks it. */
+const SESSION = "session";
 
-/**
- * Numbers the reads of one thing, so only the answer to the newest one counts.
- *
- * Numbered rather than aborted, because an abort still has to be raced against the state update. A
- * write that puts its own answer on screen supersedes every read already on its way: each of those
- * was asked before the write happened.
- */
-function useReadOrder() {
-  const asked = useRef(0);
-  const reading = useRef(0);
-  return useMemo(
-    () => ({
-      begin: () => {
-        reading.current += 1;
-        return (asked.current += 1);
-      },
-      end: () => {
-        reading.current -= 1;
-      },
-      isLatest: (question: number) => question === asked.current,
-      supersede: () => {
-        asked.current += 1;
-      },
-      busy: () => reading.current > 0,
-    }),
-    [],
-  );
-}
-
-/**
- * Fetches, keeps only the answer to the newest question, and says while a newer one is on its way.
- *
- * Tapping 2 then 4 guests fires two requests, and without this the first to come back wins — which
- * on a bad connection is how a guest is shown the times for a party they are no longer bringing.
- *
- * The last answer stays until the next arrives, marked pending, rather than being blanked: blanking
- * swapped the grid for a spinner on every tap and made the page jump under the guest's thumb.
- */
-function useLatest<T>(
-  ask: () => Promise<T | null>,
-  keep: (value: T | null) => void,
-  onFailure: (error: unknown) => void,
-  onSuccess: () => void,
-): [load: () => Promise<void>, pending: boolean] {
-  const reads = useReadOrder();
-  const [pending, setPending] = useState(false);
-  const load = useCallback(async () => {
-    const question = reads.begin();
-    setPending(true);
-    try {
-      const answer = await ask();
-      if (!reads.isLatest(question)) return;
-      keep(answer);
-      onSuccess();
-    } catch (error) {
-      if (!reads.isLatest(question)) return;
-      // An answer to an older question must not stand in for one that failed.
-      keep(null);
-      onFailure(error);
-    } finally {
-      reads.end();
-      if (reads.isLatest(question)) setPending(false);
-    }
-  }, [reads, ask, keep, onFailure, onSuccess]);
-  return [load, pending];
-}
+const EMPTY_MANUAL = {
+  name: "",
+  partySize: DEFAULT_PARTY,
+  minutes: null as number | null,
+  table: null as string | null,
+};
 
 /**
  * Calls `refresh` every `intervalMs` while the app is on screen, and at once when it comes back.
@@ -194,6 +146,20 @@ function useWhileVisible(refresh: (() => void) | null, intervalMs: number) {
   }, [refresh, intervalMs]);
 }
 
+/**
+ * State whose newest value can be read the moment it is written, not only on the next render: an
+ * answer folded into it must be folded into what is there now, not into a copy from a render ago.
+ */
+function useSynced<T>(initial: T): [T, (change: (current: T) => T) => void, { readonly current: T }] {
+  const now = useRef(initial);
+  const [value, setValue] = useState(initial);
+  const change = useCallback((next: (current: T) => T) => {
+    now.current = next(now.current);
+    setValue(now.current);
+  }, []);
+  return [value, change, now];
+}
+
 export default function Page() {
   // Read after mounting, never while rendering. The page is prerendered where there is no Telegram
   // at all, and a first render that decided "no payload" wrote «Откройте приложение из Telegram»
@@ -202,50 +168,49 @@ export default function Page() {
   useEffect(() => setToken(credentials()), []);
   const api = useMemo(() => (token ? makeClient(token) : null), [token]);
 
-  const [session, setSession] = useState<Session | null>(null);
-  const [fatal, setFatal] = useState<ApiFailure | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
+  const toastNow = useRef<ToastMessage | null>(null);
   const dismissToast = useRef(0);
-  const hasSession = useRef(false);
 
   const [tab, setTab] = useState<Tab>("client");
   const [screen, setScreen] = useState<GuestScreen>("home");
-  const [moved, setMoved] = useState(false);
+  const [taken, setTaken] = useState<{ booking: GuestBooking; moved: boolean } | null>(null);
 
   const [partySize, setPartySize] = useState(DEFAULT_PARTY);
   const [serviceDate, setServiceDate] = useState<string | null>(null);
   const [chosenMinutes, setChosenMinutes] = useState<number | null>(null);
   const [availability, setAvailability] = useState<Availability | null>(null);
   const [dayRail, setDayRail] = useState<DayOffer[] | null>(null);
-  const [daysFailed, setDaysFailed] = useState(false);
-  const [timesFailed, setTimesFailed] = useState(false);
 
   const [shiftDate, setShiftDate] = useState<string | null>(null);
   const [pane, setPane] = useState<ShiftPane>("now");
   const [shift, setShift] = useState<ShiftView | null>(null);
-  const [shiftFailed, setShiftFailed] = useState(false);
 
-  const [settings, setSettings] = useState<SettingsView | null>(null);
-  const [draft, setDraft] = useState<SettingsDraft | null>(null);
+  const [session, changeSession, sessionNow] = useSynced<Session | null>(null);
+  // When the session was last found dead: only a session read answered after that brings it back.
+  const [deadAt, setDeadAt] = useState(0);
+
+  const [pair, changePair, pairNow] = useSynced<SettingsPair | null>(null);
+  // The edits made while a save is on its way, to be made again on top of what it stored.
+  const editsDuringSave = useRef<Edit[] | null>(null);
   const [settingsSection, setSettingsSection] = useState<Section | null>(null);
   const [editedWeekday, setEditedWeekday] = useState(1);
   const [saving, setSaving] = useState(false);
 
   const insets = useInsets();
-  const [sheet, setSheet] = useState<OpenSheet>({ kind: "none" });
-  const [manual, setManual] = useState({
-    name: "",
-    partySize: DEFAULT_PARTY,
-    minutes: null as number | null,
-    table: null as string | null,
-  });
+  const [sheet, setSheet] = useState<OpenSheet>(NO_SHEET);
+  const openings = useRef(0);
+  const openSheet = useCallback(
+    (content: SheetContent) => setSheet({ ...content, opened: (openings.current += 1) }),
+    [],
+  );
+  const [manual, setManual] = useState(EMPTY_MANUAL);
   const [move, setMove] = useState({
     minutes: null as number | null,
     table: null as string | null,
     party: null as number | null,
   });
   const [staffTimes, setStaffTimes] = useState<Availability | null>(null);
-  const [staffTimesFailed, setStaffTimesFailed] = useState(false);
   const [walkInParty, setWalkInParty] = useState(DEFAULT_PARTY);
   // A preference, not the decision: the sheet resolves it against the tables actually free.
   const [walkInTable, setWalkInTable] = useState<string | null>(null);
@@ -258,261 +223,159 @@ export default function Page() {
    */
   const say = useCallback((message: ToastMessage) => {
     window.clearTimeout(dismissToast.current);
+    toastNow.current = message;
     setToast(message);
     dismissToast.current = window.setTimeout(
-      () => setToast((current) => (current === message ? null : current)),
+      () => {
+        if (toastNow.current !== message) return;
+        toastNow.current = null;
+        setToast(null);
+      },
       message.undo ? TIMING.undoMs : TIMING.toastMs,
     );
   }, []);
 
   const tell = useCallback((text: string) => say({ text }), [say]);
 
-  /** Turns a failure into words for whoever is looking at it. */
-  const report = useCallback(
-    (error: unknown, audience: "guest" | "staff") => {
-      const failure = failureOf(error);
-      if (needsRelaunch(failure)) {
-        setFatal(failure);
-        return failure;
-      }
-      haptics.error();
-      tell(messageFor(failure, audience));
-      return failure;
-    },
-    [tell],
+  // ---- reads ------------------------------------------------------------------------------------
+
+  /**
+   * Turns a failure into words for whoever is looking at it, when it is worth any.
+   *
+   * A failure only relaunching can fix is always recorded, however quietly it came: the session is
+   * dead, and the screen says so until a session read answers after it.
+   */
+  const reportRef = useRef<(failure: ApiFailure, audience: "guest" | "staff", tell?: boolean) => void>(
+    () => {},
   );
-
-  /**
-   * A refresh nobody asked for fails silently, unless only relaunching can fix it.
-   *
-   * A toast every thirty seconds because the bar's Wi-Fi dropped would bury the one that matters.
-   */
-  const reportQuietly = useCallback((error: unknown) => {
-    const failure = failureOf(error);
-    if (needsRelaunch(failure)) setFatal(failure);
-  }, []);
-
-  /**
-   * One action at a time.
-   *
-   * On a slow connection the button a guest just pressed looks as if nothing happened, and they
-   * press it again. For a message or a cancellation that is a second message or a confusing "not
-   * found"; for a booking, a second request racing the first.
-   */
-  const busy = useRef(false);
-  const exclusive = useCallback(
-    <Args extends unknown[]>(action: (...args: Args) => Promise<void>) =>
-      async (...args: Args) => {
-        if (busy.current) return;
-        busy.current = true;
-        try {
-          await action(...args);
-        } finally {
-          busy.current = false;
-        }
-      },
+  const report = useCallback(
+    (failure: ApiFailure, audience: "guest" | "staff", tellIt = true) =>
+      reportRef.current(failure, audience, tellIt),
     [],
   );
 
-  const sessionReads = useReadOrder();
-  const reload = useCallback(
-    async (quiet = false) => {
-      if (!api) return;
-      const question = sessionReads.begin();
-      try {
-        const next = await api.session();
-        if (!sessionReads.isLatest(question)) return;
-        hasSession.current = true;
-        setSession(next);
-        setServiceDate((current) => current ?? next.bookable_days[0] ?? next.bar.today);
-        setShiftDate((current) => current ?? next.bar.today);
-        setFatal(null);
-      } catch (error) {
-        if (!sessionReads.isLatest(question)) return;
-        if (quiet) {
-          reportQuietly(error);
-          return;
-        }
-        // Without a first screen there is nothing to fall back on. With one, a failed reread
-        // leaves the screen as it was and says so, rather than replacing it with a dead end.
-        const failure = report(error, "guest");
-        if (!hasSession.current) setFatal(failure);
-      } finally {
-        sessionReads.end();
-      }
+  const showSession = (next: Session) => {
+    changeSession(() => next);
+    setSheet((current) => refreshedGuestSheet(current, next.bookings));
+  };
+  const sessionRead = useRead<Session>(
+    api ? { key: SESSION, ask: () => api.session() } : null,
+    (next) => {
+      showSession(next);
+      setServiceDate((current) => current ?? next.bookable_days[0] ?? next.bar.today);
+      setShiftDate((current) => current ?? next.bar.today);
     },
-    [api, report, reportQuietly, sessionReads],
+    (failure, tellIt) => report(failure, "guest", tellIt),
   );
-
-  /**
-   * Puts what a write answered on screen at once.
-   *
-   * A reread afterwards only freshens it, so its failure can never turn something that happened
-   * into an error.
-   */
-  const amendSession = useCallback(
-    (change: Partial<Session>) => {
-      sessionReads.supersede();
-      setSession((current) => (current ? { ...current, ...change } : current));
-    },
-    [sessionReads],
-  );
+  const { load: loadSession, put: putSession, failNow: sessionFailed } = sessionRead;
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    reportRef.current = (failure, audience, tellIt = true) => {
+      if (needsRelaunch(failure)) {
+        setDeadAt(sessionFailed(SESSION, failure));
+        return;
+      }
+      if (!tellIt) return;
+      haptics.error();
+      tell(messageFor(failure, audience));
+    };
+  }, [sessionFailed, tell]);
+
+  /** Puts what a guest write answered on screen at once; a reread afterwards only freshens it. */
+  const amendSession = (change: (current: Session) => Session) =>
+    putSession(SESSION, () => {
+      const current = sessionNow.current;
+      if (current) showSession(change(current));
+    });
+
+  useEffect(() => {
+    if (!api) return;
+    void loadSession();
+  }, [api, loadSession]);
 
   // The rail depends only on how many are coming, so it is fetched when that changes and not when
   // a different day on the rail is tapped.
-  const [loadDays] = useLatest(
-    useCallback(async () => (await api?.days(partySize))?.days ?? null, [api, partySize]),
+  const daysRead = useRead<DayOffer[]>(
+    api ? { key: String(partySize), ask: async () => (await api.days(partySize)).days } : null,
     setDayRail,
-    useCallback(
-      (error: unknown) => {
-        setDaysFailed(true);
-        report(error, "guest");
-      },
-      [report],
-    ),
-    useCallback(() => setDaysFailed(false), []),
+    (failure, tellIt) => report(failure, "guest", tellIt),
   );
+  const loadDays = daysRead.load;
 
   useEffect(() => {
     if (screen !== "book") return;
     void loadDays();
-  }, [screen, loadDays]);
+  }, [screen, partySize, api, loadDays]);
 
   // The time grid recomputes whenever the question changes. Every answer comes from the server,
   // which has run the real allocator: a time shown as free is a time with a table behind it.
-  const [loadAvailability, timesPending] = useLatest(
-    useCallback(
-      async () =>
-        api && serviceDate !== null ? await api.availability(serviceDate, partySize) : null,
-      [api, serviceDate, partySize],
-    ),
+  const timesRead = useRead<Availability>(
+    api && serviceDate !== null
+      ? {
+          key: `${serviceDate}|${partySize}`,
+          ask: () => api.availability(serviceDate, partySize),
+        }
+      : null,
     setAvailability,
-    useCallback(
-      (error: unknown) => {
-        setTimesFailed(true);
-        report(error, "guest");
-      },
-      [report],
-    ),
-    useCallback(() => setTimesFailed(false), []),
+    (failure, tellIt) => report(failure, "guest", tellIt),
   );
+  const loadTimes = timesRead.load;
 
   useEffect(() => {
     if (screen !== "book") return;
-    void loadAvailability();
-  }, [screen, loadAvailability]);
+    void loadTimes();
+  }, [screen, serviceDate, partySize, api, loadTimes]);
 
-  // Read when a load starts rather than passed in: an action that answers after a step to another
-  // evening reloads the evening on screen, not the one it was taken on.
-  const shiftDateNow = useRef(shiftDate);
-  useEffect(() => {
-    shiftDateNow.current = shiftDate;
-  }, [shiftDate]);
-
-  // Numbered, so a slow answer for the evening just left cannot replace the one just asked for —
-  // but not blanked first: a refresh of the same evening keeps it on screen.
-  const shiftReads = useReadOrder();
-  const loadShift = useCallback(
-    async (quiet = false) => {
-      const date = shiftDateNow.current;
-      if (!api || date === null) return;
-      const question = shiftReads.begin();
-      try {
-        const next = await api.shift(date);
-        if (!shiftReads.isLatest(question)) return;
-        setShift(next);
-        setShiftFailed(false);
-        setSheet((current) => refreshedSheet(current, next));
-      } catch (error) {
-        if (!shiftReads.isLatest(question)) return;
-        if (quiet) {
-          reportQuietly(error);
-          return;
-        }
-        setShiftFailed(true);
-        report(error, "staff");
-      } finally {
-        shiftReads.end();
-      }
-    },
-    [api, report, reportQuietly, shiftReads],
+  /** A shift the server answered, and every sheet brought up to date with it. */
+  const showShift = (next: ShiftView) => {
+    setShift(next);
+    setSheet((current) => refreshedSheet(current, next));
+  };
+  const shiftRead = useRead<ShiftView>(
+    api && shiftDate !== null ? { key: shiftDate, ask: () => api.shift(shiftDate) } : null,
+    showShift,
+    (failure, tellIt) => report(failure, "staff", tellIt),
   );
+  const { load: loadShift, put: putShift } = shiftRead;
 
   useEffect(() => {
     if (tab !== "shift" || shiftDate === null) return;
-    // Another evening is not a refresh of this one: what is on screen goes, rather than standing
-    // under the new day's name while it loads — and so does a failure to read the last one.
-    setShift((current) => (current?.service_date === shiftDate ? current : null));
-    setShiftFailed(false);
     void loadShift();
-  }, [tab, shiftDate, loadShift]);
+  }, [tab, shiftDate, api, loadShift]);
 
-  // A refresh nobody asked for never overtakes a read still on its way. It would throw that answer
-  // away, and if it then failed it would say nothing, leaving a spinner turning for ever.
   useWhileVisible(
     useMemo(
-      () =>
-        tab === "shift" && shiftDate !== null
-          ? () => {
-              if (!shiftReads.busy()) void loadShift(true);
-            }
-          : null,
-      [tab, shiftDate, loadShift, shiftReads],
+      () => (tab === "shift" && shiftDate !== null ? () => void loadShift(true) : null),
+      [tab, shiftDate, loadShift],
     ),
     SHIFT_REFRESH_MS,
   );
   useWhileVisible(
     useMemo(
-      () =>
-        tab === "client" && screen === "home"
-          ? () => {
-              if (!sessionReads.busy()) void reload(true);
-            }
-          : null,
-      [tab, screen, reload, sessionReads],
+      () => (tab === "client" && screen === "home" ? () => void loadSession(true) : null),
+      [tab, screen, loadSession],
     ),
     HOME_REFRESH_MS,
   );
 
-  const draftNow = useRef(draft);
-  useEffect(() => {
-    draftNow.current = draft;
-  }, [draft]);
-
-  const settingsReads = useReadOrder();
-  const loadSettings = useCallback(
-    async (date: string) => {
-      if (!api) return;
-      const question = settingsReads.begin();
-      const asked = draftNow.current;
-      try {
-        const next = await api.settings(date);
-        if (!settingsReads.isLatest(question)) return;
-        setSettings(next);
-        // An edit typed while this was on its way is the manager's, not the server's to replace.
-        setDraft((current) => (current === asked ? draftOf(next) : current));
-      } catch (error) {
-        if (!settingsReads.isLatest(question)) return;
-        report(error, "staff");
-      } finally {
-        settingsReads.end();
-      }
+  // Folded into the edit at the moment it lands, so nothing typed while it loaded is lost.
+  const settingsRead = useRead<SettingsView>(
+    api && shiftDate !== null ? { key: shiftDate, ask: () => api.settings(shiftDate) } : null,
+    (next, date) => {
+      const outcome = received(pairNow.current, date, next);
+      changePair(() => outcome.pair);
+      if (outcome.notice) tell(outcome.notice);
     },
-    [api, report, settingsReads],
+    (failure, tellIt) => report(failure, "staff", tellIt),
   );
+  const { load: loadSettings, put: putSettings } = settingsRead;
 
-  const settingsDirty = settings !== null && draft !== null && differs(draft, draftOf(settings));
+  const settingsDirty = pair !== null && isDirty(pair);
 
   useEffect(() => {
-    // An edit in progress is never replaced by a reread. Switching to the shift and back used to
-    // throw a manager's unsaved changes away without a word.
-    if (tab !== "settings" || shiftDate === null || settingsDirty) return;
-    void loadSettings(shiftDate);
-  }, [tab, shiftDate, loadSettings, settingsDirty]);
+    if (tab !== "settings" || shiftDate === null) return;
+    void loadSettings();
+  }, [tab, shiftDate, api, loadSettings]);
 
   // Closing Telegram with unsaved settings asks first, the way switching tabs no longer loses them.
   useEffect(() => {
@@ -521,38 +384,74 @@ export default function Page() {
     else app?.disableClosingConfirmation?.();
   }, [settingsDirty]);
 
+  const editDraft = useCallback(
+    (change: Edit) => {
+      editsDuringSave.current?.push(change);
+      changePair((current) => current && { ...current, draft: edited(current.draft, change) });
+    },
+    [changePair],
+  );
+
+  const revertDraft = useCallback(() => {
+    if (editsDuringSave.current) editsDuringSave.current = [];
+    changePair((current) => current && { ...current, draft: current.base });
+  }, [changePair]);
+
   // Writing a booking down and moving one ask the same question, so there is one of it. A move
   // sets its own booking aside — shifting it half an hour must not mean giving up its table first
   // and hoping — and a booking already under way is not asking at all: its time cannot change.
   const moving = sheet.kind === "move" ? sheet.booking : null;
-  const movingTime = moving !== null && !hasStarted(moving, shift?.now_minutes ?? null);
+  const movingTime = moving !== null && !moving.started;
   const asksTimes = sheet.kind === "manual" || movingTime;
   const askParty = moving ? (move.party ?? moving.party_size) : manual.partySize;
   const askIgnoring = movingTime && moving ? moving.id : undefined;
+  const staffTimesKey =
+    shiftDate !== null && asksTimes ? `${shiftDate}|${askParty}|${askIgnoring ?? ""}` : null;
 
-  const [loadStaffTimes, staffTimesPending] = useLatest(
-    useCallback(
-      async () =>
-        api && shiftDate !== null && asksTimes
-          ? await api.staffAvailability(shiftDate, askParty, askIgnoring)
-          : null,
-      [api, shiftDate, asksTimes, askParty, askIgnoring],
-    ),
+  const staffTimesRead = useRead<Availability>(
+    api && shiftDate !== null && staffTimesKey !== null
+      ? {
+          key: staffTimesKey,
+          ask: () => api.staffAvailability(shiftDate, askParty, askIgnoring),
+        }
+      : null,
     setStaffTimes,
-    useCallback(
-      (error: unknown) => {
-        setStaffTimesFailed(true);
-        report(error, "staff");
-      },
-      [report],
-    ),
-    useCallback(() => setStaffTimesFailed(false), []),
+    (failure, tellIt) => report(failure, "staff", tellIt),
   );
+  const loadStaffTimes = staffTimesRead.load;
 
   useEffect(() => {
-    if (!asksTimes) return;
+    if (staffTimesKey === null) return;
     void loadStaffTimes();
-  }, [asksTimes, loadStaffTimes]);
+  }, [staffTimesKey, api, loadStaffTimes]);
+
+  /**
+   * One action at a time.
+   *
+   * On a slow connection the button a guest just pressed looks as if nothing happened, and they
+   * press it again. For a message or a cancellation that is a second message or a confusing "not
+   * found"; for a booking, a second request racing the first. A tap dropped for that reason says so,
+   * or it reads as a button that does not work — except over a way back: replacing «Вернуть» with
+   * «Подождите» takes away the undo of the tap before, so then it only buzzes.
+   */
+  const busy = useRef(false);
+  const exclusive = useCallback(
+    <Args extends unknown[]>(action: (...args: Args) => Promise<void>) =>
+      async (...args: Args) => {
+        if (busy.current) {
+          haptics.warning();
+          if (!toastNow.current?.undo) tell("Подождите — прошлое действие ещё выполняется.");
+          return;
+        }
+        busy.current = true;
+        try {
+          await action(...args);
+        } finally {
+          busy.current = false;
+        }
+      },
+    [tell],
+  );
 
   // Telegram's own back button, where there is one, rather than a second one drawn in the page. It
   // steps back through whatever is open, innermost first — on Android the hardware back button is
@@ -562,7 +461,7 @@ export default function Page() {
     if (!back) return undefined;
     const goBack =
       sheet.kind !== "none"
-        ? () => setSheet({ kind: "none" })
+        ? () => setSheet(NO_SHEET)
         : tab === "client" && screen === "book"
           ? () => setScreen("home")
           : tab === "settings" && settingsSection !== null
@@ -584,22 +483,24 @@ export default function Page() {
       </InsetFrame>
     );
   }
-  if (fatal) {
+  const dead = deadAt > sessionRead.applied;
+  const blocking = dead || session === null ? sessionRead.failure : null;
+  if (blocking) {
     // Retrying with the proof the server just refused refuses again. Only reopening from Telegram
     // brings a new one, so that is the way out offered.
     const telegram = webApp();
-    const relaunch = needsRelaunch(fatal) && telegram !== undefined;
+    const relaunch = needsRelaunch(blocking) && telegram !== undefined;
     return (
       <InsetFrame insets={insets}>
         <Failure
-          message={messageFor(fatal, "guest")}
+          message={messageFor(blocking, "guest")}
           actionLabel={relaunch ? "Закрыть" : "Попробовать снова"}
-          onAction={() => (relaunch ? telegram.close() : void reload())}
+          onAction={() => (relaunch ? telegram.close() : void loadSession())}
         />
       </InsetFrame>
     );
   }
-  if (!session || !api || serviceDate === null || shiftDate === null) {
+  if (dead || !session || !api || serviceDate === null || shiftDate === null) {
     return (
       <InsetFrame insets={insets}>
         <Spinner label="Открываем" />
@@ -608,20 +509,27 @@ export default function Page() {
   }
 
   const bar = session.bar;
-  const closeSheet = () => setSheet({ kind: "none" });
-  const isToday = shiftDate === bar.today;
+  const closeSheet = () => setSheet(NO_SHEET);
+  /** Closes the sheet an action was started from, and no sheet opened since. */
+  const closeIfStill = (from: OpenSheet) => setSheet((current) => closedIfStill(current, from));
+  // Only the evening asked for is shown: another evening is not a refresh of this one.
+  const shiftOnScreen = shift !== null && shift.service_date === shiftDate ? shift : null;
+  // The server's day, not the one this phone read when it opened: a shift left open overnight.
+  const today = shiftOnScreen?.today ?? bar.today;
+  const isToday = shiftDate === today;
   // ISO dates compare as strings. An evening that is over is read, not written into.
-  const isPast = shiftDate < bar.today;
+  const isPast = shiftDate < today;
+  // An answer to another question must not stand in for one that failed.
+  const days = daysRead.failure ? null : dayRail;
+  const times = timesRead.failure ? null : availability;
+  const shownStaffTimes = staffTimesRead.failure ? null : staffTimes;
 
   // ---- guest actions --------------------------------------------------------------------------
 
-  const openPicker = () => {
-    const start = session.booking?.service_date ?? bar.today;
+  const openPicker = (booking: GuestBooking | null = null) => {
     // The party the home card spoke for, so the picker opens on the promise the card just made.
-    setPartySize(session.booking?.party_size ?? session.today_free_for_party);
-    setServiceDate(
-      session.bookable_days.includes(start) ? start : (session.bookable_days[0] ?? start),
-    );
+    setPartySize(booking?.party_size ?? session.today_free_for_party);
+    setServiceDate(pickerStart(session, booking));
     setChosenMinutes(null);
     setScreen("book");
   };
@@ -629,20 +537,23 @@ export default function Page() {
   const book = exclusive(async () => {
     if (chosenMinutes === null) return;
     try {
-      const taken = await api.book(serviceDate, chosenMinutes, partySize);
+      const answer = await api.book(serviceDate, chosenMinutes, partySize);
       haptics.success();
-      setMoved(taken.replaced !== null);
+      setTaken({ booking: answer.booking, moved: answer.replaced.length > 0 });
       // The answer already says what was booked. Showing it does not wait on rereading the home
       // screen, whose failure must never turn a booking that happened into an error.
-      amendSession({ booking: taken.booking });
+      amendSession((current) => ({
+        ...current,
+        bookings: heldAfter(current.bookings, answer.replaced, answer.booking),
+      }));
       setScreen("done");
-      void reload(true);
+      void loadSession(true);
     } catch (error) {
-      report(error, "guest");
+      report(failureOf(error), "guest");
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
       // showing a time that no longer exists.
       setChosenMinutes(null);
-      void loadAvailability();
+      void loadTimes();
       void loadDays();
     }
   });
@@ -650,103 +561,119 @@ export default function Page() {
   /** Books the same slot again, for a guest who has just changed their mind about cancelling. */
   const rebook = exclusive(async (was: GuestBooking) => {
     try {
-      const taken = await api.book(was.service_date, was.start_minutes, was.party_size);
+      const answer = await api.book(was.service_date, was.start_minutes, was.party_size);
       haptics.success();
-      amendSession({ booking: taken.booking });
+      amendSession((current) => ({
+        ...current,
+        bookings: heldAfter(current.bookings, answer.replaced, answer.booking),
+      }));
       tell("Бронь вернулась.");
     } catch (error) {
-      report(error, "guest");
+      report(failureOf(error), "guest");
     }
-    void reload(true);
+    void loadSession(true);
   });
 
-  const cancelMine = exclusive(async () => {
-    const was = session.booking;
-    if (!was) return;
+  const cancelMine = exclusive(async (from: OpenSheet, was: GuestBooking) => {
     try {
-      await api.cancelMine();
+      await api.cancelMine(was.id);
       haptics.success();
-      closeSheet();
-      amendSession({ booking: null });
+      closeIfStill(from);
+      amendSession((current) => ({
+        ...current,
+        bookings: heldAfter(current.bookings, [was.id], null),
+      }));
       say({
         text: "Бронь отменена. Стол снова свободен.",
         undo: { label: "Вернуть", run: () => void rebook(was) },
       });
-      void reload(true);
+      void loadSession(true);
     } catch (error) {
-      report(error, "guest");
+      report(failureOf(error), "guest");
     }
   });
 
   const enableReminders = exclusive(async () => {
     try {
-      amendSession({ reminders: await api.optInToReminders() });
-      void reload(true);
+      const reminders = await api.optInToReminders();
+      amendSession((current) => ({ ...current, reminders }));
+      void loadSession(true);
       openBotChat(process.env.NEXT_PUBLIC_BOT_USERNAME ?? "");
       tell(`Напомним за ${fmt.hoursWord(bar.remind_hours)} до брони.`);
     } catch (error) {
-      report(error, "guest");
+      report(failureOf(error), "guest");
     }
   });
 
   const dismissReminders = exclusive(async () => {
     try {
-      amendSession({ reminders: await api.dismissReminderPrompt() });
-      void reload(true);
+      const reminders = await api.dismissReminderPrompt();
+      amendSession((current) => ({ ...current, reminders }));
+      void loadSession(true);
     } catch (error) {
-      report(error, "guest");
+      report(failureOf(error), "guest");
     }
   });
 
+  const offer = dayRail?.find((day) => day.service_date === serviceDate);
   const decision = bookingDecision(
     partySize,
     serviceDate,
-    bar.today,
+    bar,
     chosenMinutes,
-    session.booking !== null,
+    session.bookings,
+    offer ? offer.booked : heldOn(session.bookings, serviceDate),
   );
+  // A guest holding a plan moves it from its card; one holding only a table tonight, or nothing,
+  // books another evening from here.
+  const holdsPlan = session.bookings.some((held) => held.rebooking_replaces === "any_evening");
   const guestFooter =
     screen === "done" ? (
       <MainButton label="На главную" onClick={() => setScreen("home")} />
     ) : screen === "book" ? (
       <MainButton label={decision.label} enabled={decision.enabled} onClick={() => void book()} />
-    ) : session.booking ? null : (
-      <MainButton label="Забронировать стол" onClick={openPicker} />
+    ) : holdsPlan ? null : (
+      <MainButton label="Забронировать стол" onClick={() => openPicker()} />
     );
 
   // ---- staff actions -------------------------------------------------------------------------
 
-  const afterShiftChange = async (message?: ToastMessage) => {
-    await loadShift();
-    if (message) say(message);
+  /**
+   * Puts the evening a staff action answered with on screen, if it is still the evening on screen.
+   *
+   * The answer is the room after the write, every booking in it, so a party the server reseated is
+   * shown where it now sits, and a sheet on a booking that is gone closes.
+   */
+  const showAnswered = (room: ShiftView) => {
+    putShift(room.service_date, () => showShift(room));
   };
 
   /**
    * One tap, applied at once, with the way back attached.
    *
-   * The undo goes back to the status the booking *had*, read off it before the change, so taking
-   * back a mistake restores the room rather than something that resembles it.
+   * The undo goes back to the attendance the server says the booking had just before the change,
+   * so taking back a mistake restores the room — even when a colleague changed it a moment earlier
+   * and this phone had not heard yet.
    */
   const setAttendance = exclusive(
     async (booking: ShiftBooking, attendance: Attendance, undoable = true) => {
-      const before = previousAttendance(booking);
       try {
-        const updated = await api.setAttendance(booking.id, attendance);
+        const answer = await api.setAttendance(booking.id, attendance);
         haptics.success();
-        setSheet((current) => withBooking(current, updated));
-        await afterShiftChange({
-          text: attendanceOutcome(updated, attendance),
-          ...(undoable
+        showAnswered(answer.shift);
+        say({
+          text: attendanceOutcome(answer.booking, attendance),
+          ...(undoable && answer.previous !== attendance
             ? {
                 undo: {
                   label: "Вернуть",
-                  run: () => void setAttendance(updated, before, false),
+                  run: () => void setAttendance(answer.booking, answer.previous, false),
                 },
               }
             : {}),
         });
       } catch (error) {
-        report(error, "staff");
+        report(failureOf(error), "staff");
       }
     },
   );
@@ -756,184 +683,240 @@ export default function Page() {
 
   const setNote = exclusive(async (booking: ShiftBooking, note: string | null) => {
     try {
-      const updated = await api.setNote(booking.id, note);
-      setSheet((current) => withBooking(current, updated));
-      await loadShift();
+      showAnswered((await api.setNote(booking.id, note)).shift);
     } catch (error) {
-      report(error, "staff");
+      report(failureOf(error), "staff");
     }
   });
 
-  const cancelAsStaff = exclusive(async (booking: ShiftBooking, reason: string) => {
-    try {
-      const outcome = await api.cancelAsStaff(booking.id, reason);
-      const told = outcome.guest_notified
-        ? `${booking.guest_name} получил сообщение с причиной.`
-        : `${booking.guest_name} записан вручную — предупредите его сами.`;
-      closeSheet();
-      await afterShiftChange({
-        text: [`Бронь отменена. ${told}`, reconciliationReport(outcome.reconciliation)]
-          .filter(Boolean)
-          .join(" "),
-      });
-    } catch (error) {
-      report(error, "staff");
-    }
-  });
-
-  const sendTemplate = exclusive(async (booking: ShiftBooking, text: string) => {
-    try {
-      await api.sendTemplate(booking.id, text);
-      closeSheet();
-      tell(`Отправлено ${booking.guest_name}: «${text}»`);
-    } catch (error) {
-      report(error, "staff");
-    }
-  });
-
-  /**
-   * Runs something that rearranges the shift, then reloads and reports what moved — per booking,
-   * by name, never as a count of what it hoped to do.
-   */
-  const rearrange = async (
-    run: () => Promise<Reconciliation>,
-    lead: string,
-    whenNothingMoved: string,
-    orphanLead?: string,
-    undo?: ToastMessage["undo"],
-  ) => {
-    try {
-      const summary = reconciliationReport(await run(), orphanLead);
-      const text = summary.length > 0 ? `${lead} ${summary}`.trim() : whenNothingMoved;
-      await afterShiftChange(undo ? { text, undo } : { text });
-    } catch (error) {
-      report(error, "staff");
-    }
-  };
-
-  const blockTables = exclusive(async (tableIds: string[], reason: string, number: number) => {
-    closeSheet();
-    await rearrange(
-      () => api.blockTables(shiftDate, tableIds, reason),
-      `Стол ${number} закрыт на вечер.`,
-      `Стол ${number} закрыт на вечер. Броней там не было.`,
-      "Остались без стола",
-      { label: "Вернуть", run: () => void unblockTables(tableIds, number) },
-    );
-  });
-
-  /**
-   * Opening a table back up is as reversible as closing it, so it offers the same way back — with
-   * the reason it was closed for, which is the only way re-closing it puts the room where it was.
-   */
-  const unblockTables = exclusive(
-    async (tableIds: string[], number: number, wasClosedFor?: string) => {
-      closeSheet();
-      await rearrange(
-        () => api.unblockTables(shiftDate, tableIds),
-        `Стол ${number} снова в подборе.`,
-        `Стол ${number} снова в подборе.`,
-        undefined,
-        wasClosedFor === undefined
-          ? undefined
-          : {
-              label: "Вернуть",
-              run: () => void blockTables(tableIds, wasClosedFor, number),
-            },
-      );
+  const cancelAsStaff = exclusive(
+    async (from: OpenSheet, booking: ShiftBooking, reason: string) => {
+      try {
+        const answer = await api.cancelAsStaff(booking.id, reason);
+        const told = answer.guest_notified
+          ? `${booking.guest_name} получил сообщение с причиной.`
+          : `${booking.guest_name} не получит сообщения — предупредите его сами.`;
+        closeIfStill(from);
+        showAnswered(answer.shift);
+        say({
+          text: [`Бронь отменена. ${told}`, reconciliationReport(answer.reconciliation)]
+            .filter(Boolean)
+            .join(" "),
+        });
+      } catch (error) {
+        report(failureOf(error), "staff");
+      }
     },
   );
 
-  const findTables = exclusive(async () => {
-    closeSheet();
-    await rearrange(
-      () => api.reconcileShift(shiftDate),
-      "",
-      "Свободных столов на это время нет. Откройте закрытый стол или предложите другое время.",
-    );
-  });
-
-  const seatWalkIn = exclusive(async (tableId: string) => {
+  const sendTemplate = exclusive(async (from: OpenSheet, booking: ShiftBooking, text: string) => {
     try {
-      const created = await api.seatWalkIn(shiftDate, walkInParty, tableId);
-      haptics.success();
-      closeSheet();
-      await afterShiftChange({ text: `Посадили за стол ${created.table_number}.` });
+      await api.sendTemplate(booking.id, text);
+      closeIfStill(from);
+      tell(`Отправлено ${booking.guest_name}: «${text}»`);
     } catch (error) {
-      report(error, "staff");
-      await loadShift();
+      report(failureOf(error), "staff");
     }
   });
 
-  const createManualBooking = exclusive(async (tableId: string) => {
-    if (manual.minutes === null) return;
+  /** What a rearrangement did, per booking, by name — never a count of what it hoped to do. */
+  const rearranged = (
+    reconciliation: Reconciliation,
+    lead: string,
+    whenNothingMoved: string,
+    orphanLead?: string,
+  ) => {
+    const summary = reconciliationReport(reconciliation, orphanLead);
+    return summary.length > 0 ? `${lead} ${summary}`.trim() : whenNothingMoved;
+  };
+
+  /**
+   * Closing tables is as reversible as opening them: the way back opens exactly the tables this tap
+   * closed, as the server counted them — not one a colleague had already closed.
+   */
+  const closeTables = exclusive(async (from: OpenSheet, closures: Closure[], number: number) => {
+    closeIfStill(from);
+    const closed: string[] = [];
+    const moved: Reconciliation = { moved: [], orphaned: [] };
     try {
-      const created = await api.createStaffBooking(
+      for (const closure of closures) {
+        const answer = await api.blockTables(shiftDate, closure.tableIds, closure.reason);
+        showAnswered(answer.shift);
+        closed.push(...answer.closed);
+        moved.moved.push(...answer.reconciliation.moved);
+        moved.orphaned.push(...answer.reconciliation.orphaned);
+      }
+    } catch (error) {
+      report(failureOf(error), "staff");
+      return;
+    }
+    const text = rearranged(
+      moved,
+      `Стол ${number} закрыт на вечер.`,
+      `Стол ${number} закрыт на вечер. Броней там не было.`,
+      "Остались без стола",
+    );
+    say(
+      closed.length > 0
+        ? { text, undo: { label: "Вернуть", run: () => void openTables(NO_SHEET, closed, number) } }
+        : { text },
+    );
+  });
+
+  /** Opening tables comes back as closures the server removed, each with the reason it had. */
+  const openTables = exclusive(async (from: OpenSheet, tableIds: string[], number: number) => {
+    closeIfStill(from);
+    try {
+      const answer = await api.unblockTables(shiftDate, tableIds);
+      showAnswered(answer.shift);
+      const text = rearranged(
+        answer.reconciliation,
+        `Стол ${number} снова в подборе.`,
+        `Стол ${number} снова в подборе.`,
+      );
+      const restore = closuresToRestore(answer.reopened);
+      say(
+        restore.length > 0
+          ? { text, undo: { label: "Вернуть", run: () => void closeTables(NO_SHEET, restore, number) } }
+          : { text },
+      );
+    } catch (error) {
+      report(failureOf(error), "staff");
+    }
+  });
+
+  const findTables = exclusive(async (from: OpenSheet) => {
+    closeIfStill(from);
+    try {
+      const answer = await api.reconcileShift(shiftDate);
+      showAnswered(answer.shift);
+      tell(
+        rearranged(
+          answer.reconciliation,
+          "",
+          "Свободных столов на это время нет. Откройте закрытый стол или предложите другое время.",
+        ),
+      );
+    } catch (error) {
+      report(failureOf(error), "staff");
+    }
+  });
+
+  const seatWalkIn = exclusive(async (from: OpenSheet, tableId: string) => {
+    try {
+      const answer = await api.seatWalkIn(shiftDate, walkInParty, tableId);
+      haptics.success();
+      closeIfStill(from);
+      showAnswered(answer.shift);
+      tell(`Посадили за стол ${answer.booking.table_number}.`);
+    } catch (error) {
+      report(failureOf(error), "staff");
+      // A refusal carries no room, and it usually means the room on screen is behind.
+      void loadShift(true);
+    }
+  });
+
+  const createManualBooking = exclusive(async (from: OpenSheet, tableId: string) => {
+    const sent = manual;
+    if (sent.minutes === null) return;
+    try {
+      const answer = await api.createStaffBooking(
         shiftDate,
-        manual.minutes,
-        manual.partySize,
-        manual.name,
+        sent.minutes,
+        sent.partySize,
+        sent.name,
         tableId,
       );
-      setManual({ name: "", partySize: DEFAULT_PARTY, minutes: null, table: null });
-      closeSheet();
-      await afterShiftChange({
-        text: `${created.guest_name} записан на ${fmt.time(created.start_minutes)}, стол ${created.table_number}.`,
-      });
+      // A form already holding the next guest is not this one's to clear.
+      setManual((current) =>
+        JSON.stringify(current) === JSON.stringify(sent) ? EMPTY_MANUAL : current,
+      );
+      closeIfStill(from);
+      showAnswered(answer.shift);
+      const created = answer.booking;
+      tell(
+        `${created.guest_name} записан на ${fmt.time(created.start_minutes)}, стол ${created.table_number}.`,
+      );
     } catch (error) {
-      report(error, "staff");
+      report(failureOf(error), "staff");
       void loadStaffTimes();
     }
   });
 
   /** The report says whether the guest was told: not knowing means sending a second message. */
   const moveBooking = exclusive(
-    async (booking: ShiftBooking, minutes: number, tableId: string, party: number) => {
-    try {
-      const moved = await api.moveBooking(booking.id, minutes, tableId, party);
-      haptics.success();
-      closeSheet();
-      const where = `стол ${moved.booking.table_number}`;
-      const told = moved.booking.start_minutes === booking.start_minutes
-        ? moved.booking.party_size === booking.party_size
-          ? `${moved.booking.guest_name} за ${where}.`
-          : `${moved.booking.guest_name}: ${fmt.guests(moved.booking.party_size)}, ${where}.`
-        : `${moved.booking.guest_name}: ${fmt.time(moved.booking.start_minutes)}, ${where}. ` +
-          (moved.guest_notified ? "Гостю сообщили." : "Гость не в боте — предупредите сами.");
-      await afterShiftChange({
-        text: [told, reconciliationReport(moved.reconciliation)].filter(Boolean).join(" "),
-      });
-    } catch (error) {
-      report(error, "staff");
-      await loadShift();
-    }
-  },
+    async (
+      from: OpenSheet,
+      booking: ShiftBooking,
+      minutes: number,
+      tableId: string,
+      party: number,
+    ) => {
+      try {
+        const answer = await api.moveBooking(booking.id, minutes, tableId, party);
+        haptics.success();
+        closeIfStill(from);
+        showAnswered(answer.shift);
+        const now = answer.booking;
+        const where = `стол ${now.table_number}`;
+        const told =
+          now.start_minutes === booking.start_minutes
+            ? now.party_size === booking.party_size
+              ? `${now.guest_name} за ${where}.`
+              : `${now.guest_name}: ${fmt.guests(now.party_size)}, ${where}.`
+            : `${now.guest_name}: ${fmt.time(now.start_minutes)}, ${where}. ` +
+              (answer.guest_notified ? "Гостю сообщили." : "Гость не в боте — предупредите сами.");
+        say({
+          text: [told, reconciliationReport(answer.reconciliation)].filter(Boolean).join(" "),
+        });
+      } catch (error) {
+        report(failureOf(error), "staff");
+        void loadShift(true);
+      }
+    },
   );
 
   const saveSettings = exclusive(async () => {
-    if (!draft) return;
+    const sent = pairNow.current?.draft;
+    if (!sent) return;
+    const date = shiftDate;
+    const openedBefore = openings.current;
     setSaving(true);
+    editsDuringSave.current = [];
     try {
-      const saved = await api.saveSettings(shiftDate, draft);
-      settingsReads.supersede();
-      setSettings(saved.settings);
-      setDraft(draftOf(saved.settings));
+      const saved = await api.saveSettings(date, sent);
+      const meanwhile = editsDuringSave.current ?? [];
+      const shown = putSettings(date, () =>
+        changePair((current) => savedInto(current, date, sent, saved.settings, meanwhile)),
+      );
+      // Saved for an evening no longer on screen: its per-table counts are that evening's, so the
+      // one on screen is read instead.
+      if (!shown) void loadSettings(true);
       const parts = ["Настройки сохранены.", reconciliationReport(saved.reconciliation)];
       if (saved.above_cap > 0) {
         parts.push(`${fmt.bookings(saved.above_cap)} больше нового лимита — они остаются в силе.`);
       }
       tell(parts.filter(Boolean).join(" "));
-      void reload(true);
+      void loadSession(true);
     } catch (error) {
-      const failure = report(error, "staff");
+      const failure = failureOf(error);
+      report(failure, "staff");
+      // A sheet opened while the save was on its way is somebody's next decision; the toast alone
+      // reports the refusal rather than a sheet thrown over theirs.
+      const undisturbed = openings.current === openedBefore;
       if (failure.code === "would_strand_bookings") {
         // Named, with their times. The API has always sent both; showing one general sentence
         // instead left a manager to work out which of thirty evenings was in the way.
-        setSheet({ kind: "conflict", reasons: strandedLines(strandedBookings(failure)) });
+        if (undisturbed) {
+          openSheet({ kind: "conflict", reasons: strandedLines(strandedBookings(failure)) });
+        }
       } else if (failure.code === "settings_invalid") {
-        setSheet({ kind: "conflict", reasons: invalidReasons(failure) });
+        if (undisturbed) openSheet({ kind: "conflict", reasons: invalidReasons(failure) });
+      } else if (failure.code === "settings_changed") {
+        void loadSettings();
       }
     } finally {
+      editsDuringSave.current = null;
       setSaving(false);
     }
   });
@@ -941,22 +924,22 @@ export default function Page() {
   // ---- what the shell is given ------------------------------------------------------------------
 
   const staffFooter =
-    tab === "shift" && shift !== null && !shift.hours.closed && !isPast ? (
+    tab === "shift" && shiftOnScreen !== null && !shiftOnScreen.hours.closed && !isPast ? (
       <ShiftActions
         isToday={isToday}
         onWalkIn={() => {
           setWalkInParty(DEFAULT_PARTY);
           setWalkInTable(null);
-          setSheet({ kind: "walkIn" });
+          openSheet({ kind: "walkIn" });
         }}
-        onManual={() => setSheet({ kind: "manual" })}
+        onManual={() => openSheet({ kind: "manual" })}
       />
-    ) : tab === "settings" && settingsDirty && draft && settings ? (
+    ) : tab === "settings" && pair !== null && settingsDirty ? (
       <SaveBar
-        reason={firstReason(draft, settings.limits)}
+        reason={firstReason(pair.draft, pair.settings.limits)}
         saving={saving}
         onSave={() => void saveSettings()}
-        onRevert={() => setDraft(draftOf(settings))}
+        onRevert={revertDraft}
       />
     ) : undefined;
 
@@ -975,7 +958,7 @@ export default function Page() {
           <BookingSheet
             open={sheet.kind === "booking"}
             booking={sheet.kind === "booking" ? sheet.booking : null}
-            nowMinutes={shift?.now_minutes ?? null}
+            nowMinutes={shiftOnScreen?.now_minutes ?? null}
             graceMinutes={bar.grace_minutes}
             onClose={closeSheet}
             onAttendance={(attendance) => {
@@ -987,17 +970,17 @@ export default function Page() {
             }}
             onOpenTemplates={() => {
               if (sheet.kind !== "booking") return;
-              setSheet({ kind: "templates", booking: sheet.booking });
+              openSheet({ kind: "templates", booking: sheet.booking });
             }}
             onOpenCancel={() => {
-              if (sheet.kind === "booking") setSheet({ kind: "cancelBooking", booking: sheet.booking });
+              if (sheet.kind === "booking") openSheet({ kind: "cancelBooking", booking: sheet.booking });
             }}
             onOpenMove={() => {
               if (sheet.kind !== "booking") return;
               setMove({ minutes: null, table: null, party: null });
-              setSheet({ kind: "move", booking: sheet.booking });
+              openSheet({ kind: "move", booking: sheet.booking });
             }}
-            onFindTable={() => void findTables()}
+            onFindTable={() => void findTables(sheet)}
           />
 
           <ChoiceSheet
@@ -1006,21 +989,20 @@ export default function Page() {
             hint={`Уйдёт от бота в чат гостя. ${
               sheet.kind === "templates" ? sheet.booking.guest_name : ""
             } получит его сразу — отменить отправку нельзя.`}
-            choices={shift?.message_templates ?? []}
+            choices={shiftOnScreen?.message_templates ?? []}
             onClose={closeSheet}
             onChoose={(text) => {
-              if (sheet.kind === "templates") void sendTemplate(sheet.booking, text);
+              if (sheet.kind === "templates") void sendTemplate(sheet, sheet.booking, text);
             }}
           />
 
-          <ChoiceSheet
+          <CancelReasonSheet
             open={sheet.kind === "cancelBooking"}
-            title="Причина отмены"
-            hint="Гость получит сообщение с этой причиной, и стол сразу освободится. Отменить это нельзя."
-            choices={shift?.cancel_reasons ?? []}
+            booking={sheet.kind === "cancelBooking" ? sheet.booking : null}
+            reasons={shiftOnScreen?.cancel_reasons ?? []}
             onClose={closeSheet}
             onChoose={(reason) => {
-              if (sheet.kind === "cancelBooking") void cancelAsStaff(sheet.booking, reason);
+              if (sheet.kind === "cancelBooking") void cancelAsStaff(sheet, sheet.booking, reason);
             }}
           />
 
@@ -1028,27 +1010,24 @@ export default function Page() {
             key={sheet.kind === "table" ? sheet.table.id : "no-table"}
             open={sheet.kind === "table"}
             table={sheet.kind === "table" ? sheet.table : null}
-            shift={shift}
+            shift={shiftOnScreen}
             onClose={closeSheet}
             onBlock={(tableIds, reason) => {
-              if (sheet.kind === "table") void blockTables(tableIds, reason, sheet.table.number);
+              if (sheet.kind === "table") {
+                void closeTables(sheet, [{ tableIds, reason }], sheet.table.number);
+              }
             }}
             onUnblock={(tableIds) => {
-              if (sheet.kind !== "table") return;
-              void unblockTables(
-                tableIds,
-                sheet.table.number,
-                sheet.table.blocked_because ?? undefined,
-              );
+              if (sheet.kind === "table") void openTables(sheet, tableIds, sheet.table.number);
             }}
           />
 
           <DaySheet
             open={sheet.kind === "days"}
-            days={shift?.days ?? []}
-            today={bar.today}
+            days={shiftOnScreen?.days ?? []}
+            today={today}
             serviceDate={shiftDate}
-            guestHorizonDays={shift?.guest_horizon_days ?? 0}
+            guestHorizonDays={shiftOnScreen?.guest_horizon_days ?? 0}
             onClose={closeSheet}
             onChoose={(date) => {
               closeSheet();
@@ -1058,7 +1037,7 @@ export default function Page() {
 
           <WalkInSheet
             open={sheet.kind === "walkIn"}
-            shift={shift}
+            shift={shiftOnScreen}
             maxParty={bar.max_party}
             turnMinutes={bar.turn_minutes}
             partySize={walkInParty}
@@ -1066,21 +1045,21 @@ export default function Page() {
             onClose={closeSheet}
             onPartySize={setWalkInParty}
             onChooseTable={setWalkInTable}
-            onSeat={(tableId) => void seatWalkIn(tableId)}
+            onSeat={(tableId) => void seatWalkIn(sheet, tableId)}
           />
 
           <ManualBookingSheet
             open={sheet.kind === "manual"}
-            shift={shift}
+            shift={shiftOnScreen}
             maxParty={bar.max_party}
             turnMinutes={bar.turn_minutes}
-            availability={staffTimes}
+            availability={shownStaffTimes}
             partySize={manual.partySize}
             chosenMinutes={manual.minutes}
             chosenTableId={manual.table}
             guestName={manual.name}
-            failedToLoad={staffTimesFailed}
-            timesPending={staffTimesPending}
+            failedToLoad={staffTimesRead.failure !== null}
+            timesPending={staffTimesRead.pending}
             onClose={closeSheet}
             onPartySize={(size) =>
               setManual((current) => ({ ...current, partySize: size, minutes: null }))
@@ -1090,21 +1069,21 @@ export default function Page() {
             onChooseTable={(table) => setManual((current) => ({ ...current, table }))}
             onGuestName={(name) => setManual((current) => ({ ...current, name }))}
             onRetry={() => void loadStaffTimes()}
-            onCreate={(tableId) => void createManualBooking(tableId)}
+            onCreate={(tableId) => void createManualBooking(sheet, tableId)}
           />
 
           <MoveBookingSheet
             open={sheet.kind === "move"}
             booking={moving}
-            shift={shift}
+            shift={shiftOnScreen}
             turnMinutes={bar.turn_minutes}
             maxParty={bar.max_party}
             partySize={move.party ?? moving?.party_size ?? DEFAULT_PARTY}
-            availability={staffTimes}
+            availability={shownStaffTimes}
             chosenMinutes={move.minutes}
             chosenTableId={move.table}
-            failedToLoad={staffTimesFailed}
-            timesPending={staffTimesPending}
+            failedToLoad={staffTimesRead.failure !== null}
+            timesPending={staffTimesRead.pending}
             onClose={closeSheet}
             // A table chosen for the old party may not seat the new one, so the choice goes back to
             // the room's own best fit.
@@ -1114,16 +1093,18 @@ export default function Page() {
             onChooseTable={(table) => setMove((current) => ({ ...current, table }))}
             onRetry={() => void loadStaffTimes()}
             onMove={(minutes, tableId, party) => {
-              if (moving) void moveBooking(moving, minutes, tableId, party);
+              if (moving) void moveBooking(sheet, moving, minutes, tableId, party);
             }}
           />
 
           <GuestCancelSheet
             open={sheet.kind === "guestCancel"}
-            booking={session.booking}
+            booking={sheet.kind === "guestCancel" ? sheet.booking : null}
             today={bar.today}
             onClose={closeSheet}
-            onConfirm={() => void cancelMine()}
+            onConfirm={() => {
+              if (sheet.kind === "guestCancel") void cancelMine(sheet, sheet.booking);
+            }}
           />
 
           <ConflictSheet
@@ -1138,7 +1119,7 @@ export default function Page() {
         <HomeScreen
           session={session}
           onMove={openPicker}
-          onCancel={() => setSheet({ kind: "guestCancel" })}
+          onCancel={(booking) => openSheet({ kind: "guestCancel", booking })}
           onEnableReminders={() => void enableReminders()}
           onDismissReminders={() => void dismissReminders()}
           onContact={openContact}
@@ -1148,14 +1129,14 @@ export default function Page() {
       {tab === "client" && screen === "book" ? (
         <BookScreen
           bar={bar}
-          days={dayRail}
-          availability={availability}
+          days={days}
+          availability={times}
           partySize={partySize}
           serviceDate={serviceDate}
           chosenMinutes={chosenMinutes}
-          daysFailed={daysFailed}
-          timesFailed={timesFailed}
-          timesPending={timesPending}
+          daysFailed={daysRead.failure !== null}
+          timesFailed={timesRead.failure !== null}
+          timesPending={timesRead.pending}
           onPartySize={(size) => {
             setPartySize(size);
             setChosenMinutes(null);
@@ -1168,35 +1149,35 @@ export default function Page() {
           onTakenSlot={() => tell("Это время занято. Свободное — без зачёркивания.")}
           onRetry={() => {
             void loadDays();
-            void loadAvailability();
+            void loadTimes();
           }}
           {...(webApp()?.BackButton ? {} : { onBack: () => setScreen("home") })}
         />
       ) : null}
 
-      {tab === "client" && screen === "done" && session.booking ? (
-        <DoneScreen booking={session.booking} bar={bar} moved={moved} />
+      {tab === "client" && screen === "done" && taken ? (
+        <DoneScreen booking={taken.booking} bar={bar} moved={taken.moved} />
       ) : null}
 
       {tab === "shift" ? (
-        shift ? (
+        shiftOnScreen ? (
           <ShiftScreen
-            shift={shift}
-            today={bar.today}
+            shift={shiftOnScreen}
+            today={shiftOnScreen.today}
             graceMinutes={bar.grace_minutes}
             pane={pane}
             onPane={setPane}
             onServiceDate={setShiftDate}
-            onOpenDays={() => setSheet({ kind: "days" })}
-            onOpenTable={(table) => setSheet({ kind: "table", table })}
+            onOpenDays={() => openSheet({ kind: "days" })}
+            onOpenTable={(table) => openSheet({ kind: "table", table })}
             actions={{
-              onOpen: (booking) => setSheet({ kind: "booking", booking }),
+              onOpen: (booking) => openSheet({ kind: "booking", booking }),
               onSeat: seat,
               onLeft: markLeft,
-              onFindTable: () => void findTables(),
+              onFindTable: () => void findTables(NO_SHEET),
             }}
           />
-        ) : shiftFailed ? (
+        ) : shiftRead.failure ? (
           <Failure
             message="Не удалось прочитать смену."
             actionLabel="Попробовать снова"
@@ -1208,12 +1189,12 @@ export default function Page() {
       ) : null}
 
       {tab === "settings" ? (
-        settings && draft ? (
+        pair ? (
           <SettingsScreen
-            settings={settings}
-            draft={draft}
+            settings={pair.settings}
+            draft={pair.draft}
             editedWeekday={editedWeekday}
-            onDraft={setDraft}
+            onEdit={editDraft}
             onEditWeekday={setEditedWeekday}
             section={settingsSection}
             onSection={setSettingsSection}

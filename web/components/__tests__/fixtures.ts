@@ -31,6 +31,7 @@ export const bar: BarView = {
   contact: null,
 };
 
+/** Tonight at 21:30, not yet begun: a plan a booking on any evening would replace. */
 export const booking: GuestBooking = {
   id: "b1",
   service_date: "2026-09-11",
@@ -38,6 +39,19 @@ export const booking: GuestBooking = {
   end_minutes: 1_410,
   party_size: 4,
   status: "confirmed",
+  started: false,
+  rebooking_replaces: "any_evening",
+};
+
+/** The same guest already at the table tonight: never replaced, and tonight is theirs. */
+export const seated: GuestBooking = {
+  ...booking,
+  id: "b0",
+  start_minutes: 1_260,
+  end_minutes: 1_380,
+  status: "arrived",
+  started: true,
+  rebooking_replaces: null,
 };
 
 export function session(overrides: Partial<Session> = {}): Session {
@@ -47,7 +61,7 @@ export function session(overrides: Partial<Session> = {}): Session {
     is_staff: false,
     reminders: { opted_in: false, deliverable: true, should_ask: true },
     bar,
-    booking: null,
+    bookings: [],
     bookable_days: ["2026-09-11", "2026-09-12"],
     today_free_from_minutes: 1_290,
     today_free_for_party: 2,
@@ -60,6 +74,7 @@ export function dayOffer(overrides: Partial<DayOffer> = {}): DayOffer {
     service_date: "2026-09-11",
     closed: false,
     free_from_minutes: 1_290,
+    booked: false,
     ...overrides,
   };
 }
@@ -69,7 +84,7 @@ export function rail(length: number): DayOffer[] {
   const days: DayOffer[] = [];
   for (let offset = 0; offset < length; offset += 1) {
     const date = new Date(Date.UTC(2026, 8, 11 + offset)).toISOString().slice(0, 10);
-    days.push({ service_date: date, closed: false, free_from_minutes: 1_290 });
+    days.push(dayOffer({ service_date: date }));
   }
   return days;
 }
@@ -106,6 +121,8 @@ export function shiftBooking(overrides: Partial<ShiftBooking> = {}): ShiftBookin
     source: "app",
     note: null,
     reachable_by_bot: true,
+    started: false,
+    finished: false,
     ...overrides,
   };
 }
@@ -117,6 +134,7 @@ export function shiftTable(overrides: Partial<ShiftTable> = {}): ShiftTable {
 export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
   return {
     service_date: "2026-09-11",
+    today: "2026-09-11",
     hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
     tables: [
       shiftTable(),
@@ -183,6 +201,7 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     next_table_number: 9,
     limits: LIMITS,
     contact: "",
+    version: "2026-09-13T08:00:00Z",
     ...overrides,
   };
 }

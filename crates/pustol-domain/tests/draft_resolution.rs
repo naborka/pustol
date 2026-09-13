@@ -20,6 +20,7 @@ fn minter(from: u128) -> impl FnMut() -> Uuid {
 
 fn draft_of(config: &BarConfig) -> Draft {
     Draft {
+        version: chrono::DateTime::UNIX_EPOCH,
         name: config.name.clone(),
         address: config.address.clone(),
         timezone: config.timezone.name().to_owned(),

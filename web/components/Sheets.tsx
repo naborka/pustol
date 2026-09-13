@@ -27,7 +27,7 @@ import * as fmt from "@/lib/format";
 import { tableOffers, walkInOffers } from "@/lib/occupancy";
 import type { TableOffer } from "@/lib/occupancy";
 import { trimmed } from "@/lib/settingsRules";
-import { hasStarted, isSettled, standingOf, statusLabel } from "@/lib/status";
+import { standingOf, statusLabel } from "@/lib/status";
 import { openChatWith } from "@/lib/telegram";
 import { RADIUS, SPACE, TEXT } from "@/lib/tokens";
 import {
@@ -126,8 +126,9 @@ export function BookingSheet({
   const seated = booking.table_id !== null;
   const standing = standingOf(booking, nowMinutes, graceMinutes);
   const title = booking.source === "walk" ? "Гости без брони" : booking.guest_name;
-  // An evening that is over is a record, not a plan.
-  const movable = !isSettled(standing);
+  // A booking whose table has been given back is a record, not a plan: the server will neither move
+  // nor cancel it, so neither is offered. Its clock says so, not this phone's.
+  const changeable = !booking.finished;
 
   return (
     <Sheet open={open} onClose={onClose} title={title}>
@@ -155,7 +156,7 @@ export function BookingSheet({
           <Fact label="Откуда" value={SOURCE_LABEL[booking.source]} />
         </Card>
 
-        {movable ? <CardAction label="Перенести" onClick={onOpenMove} /> : null}
+        {changeable ? <CardAction label="Перенести" onClick={onOpenMove} /> : null}
 
         {!seated ? (
           <div
@@ -265,7 +266,9 @@ export function BookingSheet({
           </Pressable>
         ) : null}
 
-        <CardAction tone="destructive" label="Отменить бронь" onClick={onOpenCancel} />
+        {changeable ? (
+          <CardAction tone="destructive" label="Отменить бронь" onClick={onOpenCancel} />
+        ) : null}
       </div>
     </Sheet>
   );
@@ -310,6 +313,40 @@ export function ChoiceSheet({
         </div>
       </div>
     </Sheet>
+  );
+}
+
+/**
+ * Why a booking is being cancelled, chosen from the bar's own list.
+ *
+ * It promises the guest a message only when the bot can reach them: telling staff "the guest will
+ * be told" about a guest nobody can write to is how a party turns up to a table that was given away.
+ */
+export function CancelReasonSheet({
+  open,
+  booking,
+  reasons,
+  onClose,
+  onChoose,
+}: {
+  open: boolean;
+  booking: ShiftBooking | null;
+  reasons: string[];
+  onClose: () => void;
+  onChoose: (reason: string) => void;
+}) {
+  const told = booking?.reachable_by_bot
+    ? "Гость получит сообщение с этой причиной, и стол сразу освободится."
+    : "Боту некуда написать гостю — предупредите его сами. Стол сразу освободится.";
+  return (
+    <ChoiceSheet
+      open={open}
+      title="Причина отмены"
+      hint={`${told} Отменить это нельзя.`}
+      choices={reasons}
+      onClose={onClose}
+      onChoose={onChoose}
+    />
   );
 }
 
@@ -928,7 +965,7 @@ export function MoveBookingSheet({
   onMove: (startMinutes: number, tableId: string, partySize: number) => void;
 }) {
   if (!open || !booking || !shift) return null;
-  const started = hasStarted(booking, shift.now_minutes);
+  const started = booking.started;
   const minutes = started ? booking.start_minutes : (chosenMinutes ?? booking.start_minutes);
   const until = minutes === booking.start_minutes ? booking.end_minutes : minutes + turnMinutes;
   const offers = tableOffers(shift, partySize, minutes, until, booking.id);

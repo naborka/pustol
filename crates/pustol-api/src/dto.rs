@@ -6,14 +6,14 @@
 //! the same type the allocator uses. And the admin projection carries staff usernames, which must
 //! be structurally incapable of reaching a guest's response.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use pustol_db::bookings::Attendance;
 use pustol_db::identity::{ReminderStanding, Viewer};
 use pustol_db::bookings::Reseated;
 use pustol_db::records::{BookingRecord, BookingSource};
 use pustol_domain::config::{DayHours, LIMITS, ValidConfig};
 use pustol_domain::slots::{PartOfDay, Slot, SlotAvailability};
-use pustol_domain::{BookingStatus, ServiceDay, minutes_within};
+use pustol_domain::{BookingStatus, Rebooking, ServiceDay, minutes_within};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -26,10 +26,15 @@ pub struct GuestBooking {
     pub end_minutes: i32,
     pub party_size: i32,
     pub status: Status,
+    /// Whether the window has begun, by the bar's clock rather than the phone's.
+    pub started: bool,
+    /// Which new booking would replace this one, absent when none would. The app says so before
+    /// the guest taps, from the rule the booking endpoint then applies.
+    pub rebooking_replaces: Option<RebookingView>,
 }
 
 impl GuestBooking {
-    pub fn of(record: &BookingRecord, config: &ValidConfig) -> Self {
+    pub fn of(record: &BookingRecord, config: &ValidConfig, now: DateTime<Utc>) -> Self {
         let day = record.booking.service_day;
         Self {
             id: record.booking.id.0,
@@ -38,6 +43,24 @@ impl GuestBooking {
             end_minutes: minutes_within(day, record.booking.window.end(), config.timezone),
             party_size: record.booking.party_size,
             status: record.booking.status.into(),
+            started: record.booking.has_started(now),
+            rebooking_replaces: record.booking.rebooking(now).map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RebookingView {
+    AnyEvening,
+    SameEvening,
+}
+
+impl From<Rebooking> for RebookingView {
+    fn from(rebooking: Rebooking) -> Self {
+        match rebooking {
+            Rebooking::AnyEvening => Self::AnyEvening,
+            Rebooking::SameEvening => Self::SameEvening,
         }
     }
 }
@@ -159,12 +182,15 @@ pub struct Session {
     pub is_staff: bool,
     pub reminders: RemindersView,
     pub bar: BarView,
-    pub booking: Option<GuestBooking>,
+    /// Every booking of the guest whose table is still held for them, soonest first: the table they
+    /// are sitting at, and a plan for another evening beside it.
+    pub bookings: Vec<GuestBooking>,
     pub bookable_days: Vec<NaiveDate>,
     /// The earliest arrival time tonight still has, absent when it has none.
     ///
     /// The home screen's one honest sentence about this evening — "Сегодня свободно с 21:30" —
-    /// answered here so the first screen still costs one request.
+    /// answered here so the first screen still costs one request. Their own bookings a booking
+    /// tonight would replace are set aside, so it is true for the guest reading it.
     pub today_free_from_minutes: Option<i32>,
     /// The party size that sentence speaks for, and the size the picker opens on.
     ///
@@ -244,6 +270,9 @@ pub struct DayOffer {
     pub closed: bool,
     /// The earliest arrival time still free for this party, absent when the day holds none.
     pub free_from_minutes: Option<i32>,
+    /// The guest already holds this evening with a booking booking again cannot replace, so a
+    /// booking here would be refused.
+    pub booked: bool,
 }
 
 /// The whole rail, for one party size.
@@ -318,6 +347,11 @@ pub struct ShiftBooking {
     /// Whether the bot could ever message this guest. False for a booking taken at the door, which
     /// has no Telegram account behind it at all.
     pub reachable_by_bot: bool,
+    /// Whether the window has begun, by the server's clock.
+    pub started: bool,
+    /// Whether the booking is the record of an evening rather than a table still held, by the
+    /// server's clock and the one rule every refusal to move or cancel it uses.
+    pub finished: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -339,7 +373,7 @@ impl From<BookingSource> for Source {
 }
 
 impl ShiftBooking {
-    pub fn of(record: &BookingRecord, config: &ValidConfig) -> Self {
+    pub fn of(record: &BookingRecord, config: &ValidConfig, now: DateTime<Utc>) -> Self {
         let day = record.booking.service_day;
         Self {
             id: record.booking.id.0,
@@ -359,6 +393,8 @@ impl ShiftBooking {
             source: record.source.into(),
             note: record.note.clone(),
             reachable_by_bot: record.has_telegram_account(),
+            started: record.booking.has_started(now),
+            finished: record.booking.has_finished(now),
         }
     }
 }
@@ -393,6 +429,9 @@ pub struct ShiftDay {
 #[derive(Debug, Serialize)]
 pub struct ShiftView {
     pub service_date: NaiveDate,
+    /// The shift running by the bar's clock, whichever day is on screen. What "today" and "past"
+    /// mean to the screen, answered by the server rather than by a phone in another timezone.
+    pub today: NaiveDate,
     pub hours: Hours,
     pub tables: Vec<ShiftTable>,
     pub bookings: Vec<ShiftBooking>,
@@ -584,6 +623,8 @@ pub struct ReconcileRequest {
 /// and so widening a limit needs no change here.
 #[derive(Debug, Serialize)]
 pub struct SettingsView {
+    /// Which settings these are. A save sends it back and is refused if they have changed since.
+    pub version: DateTime<Utc>,
     pub name: String,
     pub address: String,
     /// As the manager typed it; empty when there is none.

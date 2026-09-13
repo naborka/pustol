@@ -38,6 +38,22 @@ describe("what a failure says", () => {
     );
   });
 
+  it("says a finished booking can be neither moved nor cancelled, to whoever tried", () => {
+    const staff = messageFor(failure("booking_finished"), "staff");
+    expect(staff).toMatch(/перенести/);
+    expect(staff).toMatch(/отменить/);
+    expect(messageFor(failure("booking_finished"), "guest")).not.toBe(
+      messageFor(failure("something_unmapped"), "guest"),
+    );
+  });
+
+  it("tells a manager somebody else saved the settings first, without asking them to type it again", () => {
+    // The screen folds the other save into the edit; «повторите» sent managers retyping what was kept.
+    const said = messageFor(failure("settings_changed"), "staff");
+    expect(said).toMatch(/кто-то/i);
+    expect(said).not.toMatch(/повторите/i);
+  });
+
   it("has words for every failure the staff side can produce", () => {
     for (const code of [
       "blank_guest_name",

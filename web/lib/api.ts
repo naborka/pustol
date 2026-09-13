@@ -21,6 +21,15 @@ export type Attendance = "confirmed" | "arrived" | "no_show" | "left";
 export type Source = "app" | "staff" | "walk";
 export type SlotState = "free" | "taken" | "past";
 
+/**
+ * What a new booking would do to one the guest already holds — the server's rule, never guessed here.
+ *
+ * `any_evening`: a plan not yet begun, replaced by a booking on any evening. `same_evening`: a
+ * no-show whose table is still held, replaced only by a booking on its own evening. `null`: never
+ * replaced, and a booking on its evening is refused.
+ */
+export type Rebooking = "any_evening" | "same_evening" | null;
+
 export interface GuestBooking {
   id: string;
   service_date: IsoDate;
@@ -28,6 +37,9 @@ export interface GuestBooking {
   end_minutes: number;
   party_size: number;
   status: BookingStatus;
+  /** Its window has begun, by the server's clock. */
+  started: boolean;
+  rebooking_replaces: Rebooking;
 }
 
 export interface BarView {
@@ -55,9 +67,10 @@ export interface Session {
   is_staff: boolean;
   reminders: { opted_in: boolean; deliverable: boolean; should_ask: boolean };
   bar: BarView;
-  booking: GuestBooking | null;
+  /** Every booking still holding a table for the guest, soonest first. */
+  bookings: GuestBooking[];
   bookable_days: IsoDate[];
-  /** The earliest time tonight still has, or null when it has none. */
+  /** The earliest time tonight still has for a new booking, or null when it has none. */
   today_free_from_minutes: number | null;
   /** The party size that answer speaks for, and the one the picker opens on. */
   today_free_for_party: number;
@@ -69,6 +82,8 @@ export interface DayOffer {
   closed: boolean;
   /** The earliest arrival time still free for this party, null when the day holds none. */
   free_from_minutes: number | null;
+  /** The guest already holds this evening with a booking a new one would not replace. */
+  booked: boolean;
 }
 
 export interface DayRail {
@@ -92,7 +107,8 @@ export interface Availability {
 
 export interface BookingTaken {
   booking: GuestBooking;
-  replaced: string | null;
+  /** Every booking this one replaced, soonest first. */
+  replaced: string[];
 }
 
 export interface ShiftBooking {
@@ -113,6 +129,10 @@ export interface ShiftBooking {
   /** What staff wrote on this booking. Never shown to the guest and never sent anywhere. */
   note: string | null;
   reachable_by_bot: boolean;
+  /** Its window has begun, by the server's clock: its time is history from then on. */
+  started: boolean;
+  /** Its hold on its table is over, by the server's clock: it can be neither moved nor cancelled. */
+  finished: boolean;
 }
 
 export interface ShiftTable {
@@ -132,6 +152,8 @@ export interface ShiftDay {
 
 export interface ShiftView {
   service_date: IsoDate;
+  /** The bar's running service day by the server's clock, which a phone left open overnight is not. */
+  today: IsoDate;
   hours: Hours;
   tables: ShiftTable[];
   bookings: ShiftBooking[];
@@ -152,17 +174,50 @@ export interface Reconciliation {
   orphaned: { booking_id: string; guest_name: string }[];
 }
 
-export interface CancelledByStaff {
+/**
+ * Every staff write that can change the room answers with the evening as it stands after the write,
+ * read once it was committed: a room the phone patched itself kept every other booking the server
+ * had just reseated where it used to be.
+ */
+interface WithShift {
+  shift: ShiftView;
+}
+
+export interface CancelledByStaff extends WithShift {
   booking: ShiftBooking;
   reconciliation: Reconciliation;
   guest_notified: boolean;
 }
 
-export interface MovedBooking {
+/** An attendance change: the booking now, and the attendance it had just before, for an undo. */
+export interface AttendanceChange extends WithShift {
+  booking: ShiftBooking;
+  previous: Attendance;
+}
+
+export interface MovedBooking extends WithShift {
   booking: ShiftBooking;
   reconciliation: Reconciliation;
   /** Only a time change is the guest's to hear about. A table number they never saw. */
   guest_notified: boolean;
+}
+
+export interface BookingWritten extends WithShift {
+  booking: ShiftBooking;
+}
+
+export interface Rearranged extends WithShift {
+  reconciliation: Reconciliation;
+}
+
+export interface TablesClosed extends Rearranged {
+  /** The tables this call closed; one that was already closed is not among them. */
+  closed: string[];
+}
+
+export interface TablesReopened extends Rearranged {
+  /** The closures this call removed, each with the reason it had. */
+  reopened: { table_id: string; reason: string }[];
 }
 
 export interface Bounds {
@@ -212,6 +267,8 @@ export interface SettingsView {
   staff: { username: string; bound: boolean }[];
   next_table_number: number;
   limits: Limits;
+  /** When these settings were last saved. A save names it, and is refused if anybody saved since. */
+  version: string;
 }
 
 export interface SavedSettings {
@@ -242,6 +299,8 @@ export interface SettingsDraft {
   message_templates: string[];
   cancel_reasons: string[];
   staff: { username: string }[];
+  /** The version of the settings this proposal was made from. */
+  version: string;
 }
 
 /** A failure that carries the API's own code, so callers can decide what to say. */
@@ -360,7 +419,8 @@ export function client(credentials: string) {
         party_size: partySize,
       }),
 
-    cancelMine: () => send<GuestBooking>("DELETE", "/api/booking"),
+    cancelMine: (bookingId: string) =>
+      send<GuestBooking>("DELETE", `/api/bookings/${encodeURIComponent(bookingId)}`),
 
     optInToReminders: () => send<Session["reminders"]>("POST", "/api/reminders/opt-in"),
     dismissReminderPrompt: () => send<Session["reminders"]>("POST", "/api/reminders/dismiss"),
@@ -385,7 +445,7 @@ export function client(credentials: string) {
       guestName: string,
       tableId: string,
     ) =>
-      send<ShiftBooking>("POST", "/api/admin/bookings", {
+      send<BookingWritten>("POST", "/api/admin/bookings", {
         service_date: serviceDate,
         start_minutes: startMinutes,
         party_size: partySize,
@@ -407,19 +467,19 @@ export function client(credentials: string) {
 
     /** `tableId` is the table staff chose; `null` asks the room for its own best fit. */
     seatWalkIn: (serviceDate: IsoDate, partySize: number, tableId: string | null) =>
-      send<ShiftBooking>("POST", "/api/admin/walkins", {
+      send<BookingWritten>("POST", "/api/admin/walkins", {
         service_date: serviceDate,
         party_size: partySize,
         table_id: tableId,
       }),
 
     setAttendance: (bookingId: string, attendance: Attendance) =>
-      send<ShiftBooking>("PATCH", `/api/admin/bookings/${bookingId}/attendance`, {
+      send<AttendanceChange>("PATCH", `/api/admin/bookings/${bookingId}/attendance`, {
         attendance,
       }),
 
     setNote: (bookingId: string, note: string | null) =>
-      send<ShiftBooking>("PATCH", `/api/admin/bookings/${bookingId}/note`, { note }),
+      send<BookingWritten>("PATCH", `/api/admin/bookings/${bookingId}/note`, { note }),
 
     cancelAsStaff: (bookingId: string, reason: string) =>
       send<CancelledByStaff>("POST", `/api/admin/bookings/${bookingId}/cancel`, { reason }),
@@ -428,20 +488,20 @@ export function client(credentials: string) {
       send<{ queued: boolean }>("POST", `/api/admin/bookings/${bookingId}/message`, { text }),
 
     blockTables: (serviceDate: IsoDate, tableIds: string[], reason: string) =>
-      send<Reconciliation>("POST", "/api/admin/blocks", {
+      send<TablesClosed>("POST", "/api/admin/blocks", {
         service_date: serviceDate,
         table_ids: tableIds,
         reason,
       }),
 
     unblockTables: (serviceDate: IsoDate, tableIds: string[]) =>
-      send<Reconciliation>("DELETE", "/api/admin/blocks", {
+      send<TablesReopened>("DELETE", "/api/admin/blocks", {
         service_date: serviceDate,
         table_ids: tableIds,
       }),
 
     reconcileShift: (serviceDate: IsoDate) =>
-      send<Reconciliation>("POST", "/api/admin/shift/reconcile", {
+      send<Rearranged>("POST", "/api/admin/shift/reconcile", {
         service_date: serviceDate,
       }),
 
@@ -483,5 +543,6 @@ export function draftOf(settings: SettingsView): SettingsDraft {
     message_templates: [...settings.message_templates],
     cancel_reasons: [...settings.cancel_reasons],
     staff: settings.staff.map((member) => ({ username: member.username })),
+    version: settings.version,
   };
 }

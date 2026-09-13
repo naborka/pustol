@@ -10,6 +10,7 @@
 //! room — because bookings that already happened at it must keep resolving to it, and its printed
 //! number must never be handed to a different table.
 
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -51,6 +52,9 @@ pub struct StaffDraft {
 /// projections, so a field added to this struct cannot accidentally appear in a guest's payload.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Draft {
+    /// The version of the settings this proposal was made from. Saving it over any other version
+    /// would quietly put back whatever changed in between, so that is refused.
+    pub version: DateTime<Utc>,
     pub name: String,
     pub address: String,
     pub timezone: String,

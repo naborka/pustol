@@ -186,6 +186,9 @@ impl From<DbError> for ApiError {
                     }))
                     .collect::<Vec<_>>(),
             })),
+            DbError::SettingsChanged => {
+                Self::new(Code::CONFLICT, "settings_changed", error.to_string())
+            }
             DbError::UnusableProposal(detail) => {
                 Self::bad_request("settings_unreadable", detail.clone())
             }

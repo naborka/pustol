@@ -22,6 +22,7 @@
 pub mod allocator;
 pub mod config;
 pub mod draft;
+pub mod rebooking;
 pub mod reconcile;
 pub mod schedule;
 pub mod service_day;
@@ -37,6 +38,7 @@ pub use config::{
     schedule_conflicts,
 };
 pub use draft::{DayHoursDraft, Draft, DraftError, StaffDraft, TableDraft};
+pub use rebooking::Rebooking;
 pub use reconcile::{Reconciliation, Reseating};
 pub use schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 pub use service_day::{Interval, ServiceDay, TimeError, minutes_within, resolve};

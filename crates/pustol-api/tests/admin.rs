@@ -21,6 +21,74 @@ async fn an_invited_username_is_recognised_on_its_first_visit() {
     let _ = manager(&app).await;
 }
 
+const SETTINGS: &str = "/api/admin/settings?service_date=2026-07-30";
+const SHIFT: &str = "/api/admin/shift?service_date=2026-07-30";
+
+#[tokio::test]
+async fn a_payload_signed_before_a_seat_was_offered_does_not_claim_it() {
+    // A payload is accepted for an hour, and the username in it is whatever the account was called
+    // when Telegram signed. The name may have been somebody else's by the time the seat was offered.
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let newcomer = Caller::new("Паша");
+    let signed_before = newcomer.credentials(morning());
+
+    let invited = app.at(morning() + chrono::TimeDelta::minutes(10));
+    let settings = invited.get(SETTINGS, &staff).await.expect_ok().clone();
+    let mut draft = draft_from(&settings);
+    draft["staff"]
+        .as_array_mut()
+        .expect("staff")
+        .push(serde_json::json!({ "username": newcomer.username }));
+    invited.send("PUT", SETTINGS, &staff, draft).await.expect_ok();
+
+    let answer = invited.send_raw("GET", SHIFT, Some(&signed_before), None).await;
+    assert_eq!(answer.status, axum::http::StatusCode::FORBIDDEN, "{}", answer.body);
+    let seat = invited.get(SETTINGS, &staff).await.expect_ok()["staff"]
+        .as_array()
+        .expect("staff")
+        .iter()
+        .find(|member| member["username"] == serde_json::json!(newcomer.username))
+        .expect("invited")
+        .clone();
+    assert_eq!(seat["bound"], false, "{seat}");
+
+    app.at(morning() + chrono::TimeDelta::minutes(11))
+        .get(SHIFT, &newcomer)
+        .await
+        .expect_ok();
+}
+
+#[tokio::test]
+async fn a_save_from_settings_another_manager_has_changed_since_is_refused_and_theirs_stands() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    assert!(settings["version"].is_string(), "{settings}");
+
+    let mut renamed = draft_from(&settings);
+    renamed["name"] = serde_json::json!("Бар «Чердак»");
+    let mut capped = draft_from(&settings);
+    capped["max_party"] = serde_json::json!(4);
+
+    let saved = app.send("PUT", SETTINGS, &staff, renamed).await.expect_ok().clone();
+    let refused = app.send("PUT", SETTINGS, &staff, capped).await;
+    assert_eq!(refused.status, axum::http::StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(refused.error_code(), Some("settings_changed"));
+
+    let current = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    assert_eq!(current["name"], "Бар «Чердак»", "the other manager's change stands");
+    assert_eq!(current["max_party"], 6, "nothing of the refused save was written");
+    assert_eq!(current["version"], saved["settings"]["version"]);
+    assert_ne!(current["version"], settings["version"]);
+
+    let mut fresh = draft_from(&current);
+    fresh["max_party"] = serde_json::json!(4);
+    let saved = app.send("PUT", SETTINGS, &staff, fresh).await.expect_ok().clone();
+    assert_eq!(saved["settings"]["max_party"], 4);
+    assert_eq!(saved["settings"]["name"], "Бар «Чердак»");
+}
+
 #[tokio::test]
 async fn a_stranger_who_takes_over_an_invited_username_gets_nothing() {
     // A Telegram username can be released and claimed by somebody else. Once a seat carries a
@@ -124,13 +192,13 @@ async fn staff_take_a_booking_at_the_door_and_the_bot_has_no_chat_with_that_gues
         .await
         .expect_ok()
         .clone();
-    assert_eq!(created["guest_name"], "Полина", "trimmed on the way in");
-    assert_eq!(created["source"], "staff");
-    assert_eq!(created["reachable_by_bot"], false);
+    assert_eq!(created["booking"]["guest_name"], "Полина", "trimmed on the way in");
+    assert_eq!(created["booking"]["source"], "staff");
+    assert_eq!(created["booking"]["reachable_by_bot"], false);
 
     let refused = app
         .post(
-            &format!("/api/admin/bookings/{}/message", created["id"].as_str().unwrap()),
+            &format!("/api/admin/bookings/{}/message", created["booking"]["id"].as_str().unwrap()),
             &staff,
             serde_json::json!({ "text": "Ваш стол готов, ждём вас!" }),
         )
@@ -193,9 +261,9 @@ async fn staff_record_whether_a_party_turned_up() {
         .await
         .expect_ok()
         .clone();
-    let id = created["id"].as_str().expect("an id");
+    let id = created["booking"]["id"].as_str().expect("an id");
 
-    for (attendance, expected) in [("arrived", "arrived"), ("no_show", "no_show"), ("confirmed", "confirmed")] {
+    for (attendance, previous) in [("arrived", "confirmed"), ("no_show", "arrived"), ("confirmed", "no_show")] {
         let updated = app
             .send(
                 "PATCH",
@@ -204,7 +272,8 @@ async fn staff_record_whether_a_party_turned_up() {
                 serde_json::json!({ "attendance": attendance }),
             )
             .await;
-        assert_eq!(updated.expect_ok()["status"], expected);
+        assert_eq!(updated.expect_ok()["booking"]["status"], attendance);
+        assert_eq!(updated.expect_ok()["previous"], previous, "what undo goes back to");
     }
 
     // A status endpoint that could also cancel would let a mis-tap free a table with no reason
@@ -218,6 +287,135 @@ async fn staff_record_whether_a_party_turned_up() {
         )
         .await;
     assert_eq!(refused.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn undo_learns_what_the_booking_was_from_the_server_not_from_a_screen_that_missed_a_change() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let id = booked(&app, &staff, 1_200, "Марина").await;
+    let attendance = format!("/api/admin/bookings/{id}/attendance");
+    let mark = |status: &'static str| {
+        let app = &app;
+        let staff = &staff;
+        let attendance = attendance.clone();
+        async move {
+            app.send("PATCH", &attendance, staff, serde_json::json!({ "attendance": status }))
+                .await
+                .expect_ok()
+                .clone()
+        }
+    };
+
+    // The bar screen saw them arrive. The door screen then marked them as not coming, and the bar
+    // screen, still showing «Пришли», marks them gone.
+    mark("arrived").await;
+    mark("no_show").await;
+    let gone = mark("left").await;
+
+    assert_eq!(gone["previous"], "no_show", "{gone}");
+}
+
+async fn cancelled_notices(app: &common::Harness, booking: &str) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from notification where booking_id = $1::uuid and kind = 'cancelled'",
+    )
+    .bind(booking)
+    .fetch_one(app.store.pool())
+    .await
+    .expect("counted")
+}
+
+#[tokio::test]
+async fn an_evening_that_is_over_cannot_be_cancelled_and_nobody_is_told_it_was() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let guest = Caller::new("Вера");
+    let booking = app
+        .post(
+            "/api/booking",
+            &guest,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let attendance = format!("/api/admin/bookings/{booking}/attendance");
+    let sitting = app.at(common::utc(2026, 7, 30, 18, 30));
+    for status in ["arrived", "left"] {
+        sitting
+            .send("PATCH", &attendance, &staff, serde_json::json!({ "attendance": status }))
+            .await
+            .expect_ok();
+    }
+
+    for later in [common::utc(2026, 7, 30, 18, 45), common::utc(2026, 7, 30, 20, 30)] {
+        let refused = app
+            .at(later)
+            .post(
+                &format!("/api/admin/bookings/{booking}/cancel"),
+                &staff,
+                serde_json::json!({ "reason": "Частное мероприятие" }),
+            )
+            .await;
+        assert_eq!(refused.status, axum::http::StatusCode::CONFLICT, "{later}: {}", refused.body);
+        assert_eq!(refused.error_code(), Some("booking_finished"), "{later}");
+    }
+    assert_eq!(cancelled_notices(&app, &booking).await, 0, "no notice about an evening that happened");
+}
+
+#[tokio::test]
+async fn a_party_still_at_their_table_can_be_cancelled() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let guest = Caller::new("Вера");
+    let booking = app
+        .post(
+            "/api/booking",
+            &guest,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let sitting = app.at(common::utc(2026, 7, 30, 18, 30));
+    sitting
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{booking}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "arrived" }),
+        )
+        .await
+        .expect_ok();
+
+    let cancelled = sitting
+        .post(
+            &format!("/api/admin/bookings/{booking}/cancel"),
+            &staff,
+            serde_json::json!({ "reason": "Технические проблемы в баре" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(cancelled["booking"]["status"], "cancelled");
+    assert_eq!(cancelled_notices(&app, &booking).await, 1);
 }
 
 #[tokio::test]
@@ -251,8 +449,8 @@ async fn staff_cancel_with_one_of_the_bars_reasons_and_the_guest_is_told() {
 
     // And the guest sees it gone.
     assert_eq!(
-        app.get("/api/session", &guest).await.expect_ok()["booking"],
-        serde_json::Value::Null
+        app.get("/api/session", &guest).await.expect_ok()["bookings"],
+        serde_json::json!([])
     );
 }
 
@@ -278,7 +476,7 @@ async fn a_reason_the_bar_never_configured_is_refused() {
         .clone();
     let refused = app
         .post(
-            &format!("/api/admin/bookings/{}/cancel", created["id"].as_str().unwrap()),
+            &format!("/api/admin/bookings/{}/cancel", created["booking"]["id"].as_str().unwrap()),
             &staff,
             serde_json::json!({ "reason": "перейдите по ссылке http://example.invalid" }),
         )
@@ -355,10 +553,10 @@ async fn closing_a_table_moves_its_party_and_names_them_in_the_report() {
         .await
         .expect_ok()
         .clone();
-    assert_eq!(report["moved"].as_array().expect("moved").len(), 1);
-    assert_eq!(report["moved"][0]["guest_name"], "Анна К.");
-    assert_eq!(report["moved"][0]["to_number"], 2);
-    assert!(report["orphaned"].as_array().expect("orphaned").is_empty());
+    assert_eq!(report["reconciliation"]["moved"].as_array().expect("moved").len(), 1);
+    assert_eq!(report["reconciliation"]["moved"][0]["guest_name"], "Анна К.");
+    assert_eq!(report["reconciliation"]["moved"][0]["to_number"], 2);
+    assert!(report["reconciliation"]["orphaned"].as_array().expect("orphaned").is_empty());
 
     let shift = app
         .get("/api/admin/shift?service_date=2026-07-30", &staff)
@@ -425,12 +623,12 @@ async fn a_party_the_room_cannot_take_is_reported_and_seated_when_a_table_reopen
         .await
         .expect_ok()
         .clone();
-    assert_eq!(closed["orphaned"].as_array().expect("orphaned").len(), 1);
-    assert_eq!(closed["orphaned"][0]["guest_name"], "Павел");
+    assert_eq!(closed["reconciliation"]["orphaned"].as_array().expect("orphaned").len(), 1);
+    assert_eq!(closed["reconciliation"]["orphaned"][0]["guest_name"], "Павел");
 
     // The guest is never told, and their booking still reads as confirmed to them.
     let session = app.get("/api/session", &guest).await.expect_ok().clone();
-    assert_eq!(session["booking"]["status"], "confirmed");
+    assert_eq!(session["bookings"][0]["status"], "confirmed");
 
     let reopened = app
         .send(
@@ -442,8 +640,8 @@ async fn a_party_the_room_cannot_take_is_reported_and_seated_when_a_table_reopen
         .await
         .expect_ok()
         .clone();
-    assert_eq!(reopened["moved"].as_array().expect("moved").len(), 1);
-    assert_eq!(reopened["moved"][0]["guest_name"], "Павел");
+    assert_eq!(reopened["reconciliation"]["moved"].as_array().expect("moved").len(), 1);
+    assert_eq!(reopened["reconciliation"]["moved"][0]["guest_name"], "Павел");
 }
 
 #[tokio::test]
@@ -484,8 +682,8 @@ async fn asking_the_room_to_try_again_says_plainly_when_there_is_still_nowhere()
         .await
         .expect_ok()
         .clone();
-    assert!(retried["moved"].as_array().expect("moved").is_empty());
-    assert_eq!(retried["orphaned"][0]["guest_name"], "Тимур");
+    assert!(retried["reconciliation"]["moved"].as_array().expect("moved").is_empty());
+    assert_eq!(retried["reconciliation"]["orphaned"][0]["guest_name"], "Тимур");
 }
 
 // ---- settings ---------------------------------------------------------------------------------
@@ -733,8 +931,8 @@ async fn lengthening_the_turn_leaves_the_bookings_already_taken_alone() {
 
     // The guest keeps the two hours they were promised.
     let session = app.get("/api/session", &guest).await.expect_ok().clone();
-    assert_eq!(session["booking"]["start_minutes"], 1200);
-    assert_eq!(session["booking"]["end_minutes"], 1320);
+    assert_eq!(session["bookings"][0]["start_minutes"], 1200);
+    assert_eq!(session["bookings"][0]["end_minutes"], 1320);
     // The next guest gets the new length.
     let next = Caller::new("Юля");
     let taken = app
@@ -882,15 +1080,15 @@ async fn a_walk_in_is_seated_at_the_minute_they_sat_down() {
         .expect_ok()
         .clone();
 
-    assert_eq!(seated["table_number"], 1, "the smallest table that fits");
-    assert_eq!(seated["source"], "walk");
-    assert_eq!(seated["status"], "arrived");
-    assert_eq!(seated["guest_name"], "Без брони");
+    assert_eq!(seated["booking"]["table_number"], 1, "the smallest table that fits");
+    assert_eq!(seated["booking"]["source"], "walk");
+    assert_eq!(seated["booking"]["status"], "arrived");
+    assert_eq!(seated["booking"]["guest_name"], "Без брони");
     assert_eq!(
-        seated["start_minutes"], 1_207,
+        seated["booking"]["start_minutes"], 1_207,
         "20:07 local, not floored onto the half-hour grid"
     );
-    assert_eq!(seated["reachable_by_bot"], false);
+    assert_eq!(seated["booking"]["reachable_by_bot"], false);
 }
 
 /// Takes a booking by telephone on the fixture Thursday and answers with its identifier.
@@ -906,7 +1104,7 @@ async fn booked(app: &common::Harness, staff: &Caller, minutes: i64, name: &str)
         }),
     )
     .await
-    .expect_ok()["id"]
+    .expect_ok()["booking"]["id"]
         .as_str()
         .expect("an identifier")
         .to_owned()
@@ -1058,7 +1256,7 @@ async fn staff_seat_a_walk_in_at_the_table_they_picked_themselves() {
         .await
         .expect_ok()
         .clone();
-    assert_eq!(seated["table_number"], 2);
+    assert_eq!(seated["booking"]["table_number"], 2);
 
     let refused = app
         .post(
@@ -1132,7 +1330,7 @@ async fn a_party_that_leaves_hands_its_table_back_to_the_room_at_once() {
         .await
         .expect_ok()
         .clone();
-    let id = seated["id"].as_str().expect("an identifier").to_owned();
+    let id = seated["booking"]["id"].as_str().expect("an identifier").to_owned();
 
     let before = app
         .get("/api/admin/shift?service_date=2026-07-30", &staff)
@@ -1152,9 +1350,9 @@ async fn a_party_that_leaves_hands_its_table_back_to_the_room_at_once() {
         .await
         .expect_ok()
         .clone();
-    assert_eq!(gone["status"], "left");
+    assert_eq!(gone["booking"]["status"], "left");
     assert_eq!(
-        gone["released_minutes"], 1_200,
+        gone["booking"]["released_minutes"], 1_200,
         "the table goes back into the pool at the minute they left"
     );
 
@@ -1177,7 +1375,7 @@ async fn a_party_that_leaves_hands_its_table_back_to_the_room_at_once() {
         .await
         .expect_ok()
         .clone();
-    assert!(back["released_minutes"].is_null());
+    assert!(back["booking"]["released_minutes"].is_null());
     let restored = app
         .get("/api/admin/shift?service_date=2026-07-30", &staff)
         .await
@@ -1213,11 +1411,11 @@ async fn a_note_belongs_to_the_shift_and_never_reaches_the_guest() {
         .await
         .expect_ok()
         .clone();
-    assert_eq!(noted["note"], "День рождения");
+    assert_eq!(noted["booking"]["note"], "День рождения");
 
     let session = app.get("/api/session", &guest).await.expect_ok().clone();
     assert!(
-        session["booking"].get("note").is_none(),
+        session["bookings"][0].get("note").is_none(),
         "a guest's own booking has no field a note could travel in"
     );
 
@@ -1231,7 +1429,7 @@ async fn a_note_belongs_to_the_shift_and_never_reaches_the_guest() {
         .await
         .expect_ok()
         .clone();
-    assert!(rubbed["note"].is_null());
+    assert!(rubbed["booking"]["note"].is_null());
 
     let refused = app
         .send(
@@ -1303,4 +1501,331 @@ async fn staff_grow_a_party_over_the_telephone_without_cancelling_anything() {
     assert_eq!(grown["booking"]["party_size"], 4);
     assert_eq!(grown["booking"]["table_number"], 2);
     assert_eq!(grown["booking"]["status"], "confirmed", "the booking stands; nothing was cancelled");
+}
+
+/// The booking with this id in a shift the API answered with, if it is there.
+fn in_shift<'a>(shift: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
+    shift["bookings"]
+        .as_array()
+        .expect("the shift lists its bookings")
+        .iter()
+        .find(|booking| booking["id"] == id)
+}
+
+#[tokio::test]
+async fn every_write_to_a_booking_answers_with_the_evening_as_it_now_stands() {
+    // A screen that reloads the shift after every tap shows the room as it was between the write and
+    // the read, and as nobody saw it; the answer to the write is the room the write left.
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let second = table_id(&app, &staff, 2).await;
+
+    let created = app
+        .post(
+            "/api/admin/bookings",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2, "guest_name": "Глеб" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    let id = created["booking"]["id"].as_str().expect("an id").to_owned();
+    assert_eq!(created["shift"]["service_date"], "2026-07-30");
+    assert!(in_shift(&created["shift"], &id).is_some(), "{created}");
+
+    let noted = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/note"),
+            &staff,
+            serde_json::json!({ "note": "У окна" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        in_shift(&noted["shift"], &id).expect("on the shift")["note"],
+        "У окна"
+    );
+
+    let marked = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "arrived" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        in_shift(&marked["shift"], &id).expect("on the shift")["status"],
+        "arrived"
+    );
+
+    let moved = app
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            &staff,
+            serde_json::json!({ "start_minutes": 1200, "table_id": second }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        in_shift(&moved["shift"], &id).expect("on the shift")["table_number"],
+        2
+    );
+
+    let cancelled = app
+        .post(
+            &format!("/api/admin/bookings/{id}/cancel"),
+            &staff,
+            serde_json::json!({ "reason": "Частное мероприятие" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert!(
+        in_shift(&cancelled["shift"], &id).is_none(),
+        "a cancelled booking is not part of the evening"
+    );
+}
+
+#[tokio::test]
+async fn every_write_to_the_room_answers_with_the_evening_as_it_now_stands() {
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар"), table(2, 4, "Зал")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let second = table_id(&app, &staff, 2).await;
+
+    let seated = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "party_size": 2 }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    let walk_in = seated["booking"]["id"].as_str().expect("an id").to_owned();
+    assert!(in_shift(&seated["shift"], &walk_in).is_some(), "{seated}");
+
+    let closed = app
+        .post(
+            "/api/admin/blocks",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "table_ids": [second], "reason": "Дождь" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(closed["closed"], serde_json::json!([second]));
+    assert_eq!(closed["shift"]["tables"][1]["blocked_because"], "Дождь");
+
+    let reopened = app
+        .send(
+            "DELETE",
+            "/api/admin/blocks",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "table_ids": [second] }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        reopened["reopened"],
+        serde_json::json!([{ "table_id": second, "reason": "Дождь" }])
+    );
+    assert!(reopened["shift"]["tables"][1]["blocked_because"].is_null());
+
+    let retried = app
+        .post(
+            "/api/admin/shift/reconcile",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(retried["shift"]["service_date"], "2026-07-30");
+    assert!(in_shift(&retried["shift"], &walk_in).is_some());
+}
+
+#[tokio::test]
+async fn the_shift_says_by_the_bars_own_clock_what_has_started_what_is_over_and_which_day_is_today()
+{
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let early = booked(&app, &staff, 1_200, "Вера").await;
+    let late = booked(&app, &staff, 1_320, "Глеб").await;
+
+    // Half past eight in Belgrade.
+    let evening = app.at(common::utc(2026, 7, 30, 18, 30));
+    let shift = evening.get(SHIFT, &staff).await.expect_ok().clone();
+    assert_eq!(shift["today"], "2026-07-30");
+    let vera = in_shift(&shift, &early).expect("on the shift");
+    assert_eq!(
+        (vera["started"].clone(), vera["finished"].clone()),
+        (serde_json::json!(true), serde_json::json!(false))
+    );
+    let gleb = in_shift(&shift, &late).expect("on the shift");
+    assert_eq!(
+        (gleb["started"].clone(), gleb["finished"].clone()),
+        (serde_json::json!(false), serde_json::json!(false))
+    );
+
+    let gone = evening
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{early}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "left" }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        gone["booking"]["finished"], true,
+        "gone home is over, whatever was promised"
+    );
+    assert_eq!(
+        in_shift(&gone["shift"], &early).expect("on the shift")["finished"],
+        true
+    );
+
+    let next_week = evening
+        .get("/api/admin/shift?service_date=2026-08-05", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        next_week["today"], "2026-07-30",
+        "the day on screen is not the day it is"
+    );
+    let one_in_the_morning = app
+        .at(common::utc(2026, 7, 30, 23, 0))
+        .get(SHIFT, &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        one_in_the_morning["today"], "2026-07-30",
+        "the evening still running"
+    );
+}
+
+#[tokio::test]
+async fn moving_a_booking_marked_as_not_coming_before_its_time_to_a_later_time_makes_it_a_plan_again()
+ {
+    // Booked for eight, marked as not coming at seven, moved to ten. Keeping the release from the
+    // old window put it outside the new one, and the database refused the write.
+    let app = harness_at(
+        common::utc(2026, 7, 30, 16, 0),
+        config_with(vec![table(1, 4, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let id = booked(&app, &staff, 1_200, "Рита").await;
+    let phoned = app.at(common::utc(2026, 7, 30, 17, 0));
+    phoned
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "no_show" }),
+        )
+        .await
+        .expect_ok();
+
+    let moved = phoned
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            &staff,
+            serde_json::json!({ "start_minutes": 1_320 }),
+        )
+        .await;
+    assert_eq!(moved.status, axum::http::StatusCode::OK, "{}", moved.body);
+    assert_eq!(moved.body["booking"]["status"], "confirmed");
+    assert!(moved.body["booking"]["released_minutes"].is_null());
+    assert_eq!(moved.body["booking"]["start_minutes"], 1_320);
+}
+
+#[tokio::test]
+async fn closing_a_table_already_shut_or_opening_one_never_shut_is_not_reported_as_done() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let first = table_id(&app, &staff, 1).await;
+    let second = table_id(&app, &staff, 2).await;
+    let third = table_id(&app, &staff, 3).await;
+    app.post("/api/admin/blocks", &staff, serde_json::json!({ "service_date": "2026-07-30", "table_ids": [first], "reason": "Дождь" }))
+        .await
+        .expect_ok();
+
+    let closed = app
+        .post("/api/admin/blocks", &staff, serde_json::json!({ "service_date": "2026-07-30", "table_ids": [first, second], "reason": "Сломан" }))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(closed["closed"], serde_json::json!([second]));
+
+    let reopened = app
+        .send(
+            "DELETE",
+            "/api/admin/blocks",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "table_ids": [first, third] }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        reopened["reopened"],
+        serde_json::json!([{ "table_id": first, "reason": "Дождь" }])
+    );
+}
+
+#[tokio::test]
+async fn a_payload_stamped_within_a_minute_of_the_invitation_does_not_claim_the_seat() {
+    // Telegram's clock may be a minute ahead of this one, so a payload stamped thirty seconds after
+    // the seat was offered may have been signed before it, under a name that was not yet invited.
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let newcomer = Caller::new("Паша");
+    let offered = morning() + chrono::TimeDelta::minutes(10);
+    let invited = app.at(offered);
+    let settings = invited.get(SETTINGS, &staff).await.expect_ok().clone();
+    let mut draft = draft_from(&settings);
+    draft["staff"]
+        .as_array_mut()
+        .expect("staff")
+        .push(serde_json::json!({ "username": newcomer.username }));
+    invited
+        .send("PUT", SETTINGS, &staff, draft)
+        .await
+        .expect_ok();
+
+    let close = app.at(offered + chrono::TimeDelta::seconds(30));
+    assert_eq!(
+        close.get(SHIFT, &newcomer).await.status,
+        axum::http::StatusCode::FORBIDDEN
+    );
+
+    app.at(offered + chrono::TimeDelta::minutes(1))
+        .get(SHIFT, &newcomer)
+        .await
+        .expect_ok();
 }

@@ -103,6 +103,12 @@ impl Bot {
         self
     }
 
+    /// The bot's own account id, from its token.
+    #[must_use]
+    pub fn id(&self) -> Option<i64> {
+        self.token.bot_id()
+    }
+
     /// Sends a message, optionally with buttons under it.
     ///
     /// The reminder carries a "cannot make it" button, which is the whole point of reminding

@@ -53,6 +53,7 @@ function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
     cancel_reasons: ["Частное мероприятие"],
     staff: [{ username: "anna_mgr" }],
     contact: "",
+    version: "2026-09-13T08:00:00Z",
     ...overrides,
   };
 }
@@ -342,6 +343,20 @@ describe("trimming the way the server trims", () => {
   it("strips exactly Unicode White_Space from both ends", () => {
     expect(trimmed(" a b 　")).toBe("a b");
     expect(trimmed("﻿a﻿")).toBe("﻿a﻿");
+  });
+
+  it("keeps what is inside, astral characters and inner space included", () => {
+    expect(trimmed(" 🍺 a　b🍺 ")).toBe("🍺 a　b🍺");
+    expect(trimmed("\t\n ")).toBe("");
+    expect(trimmed("")).toBe("");
+  });
+
+  it("takes a long run of inner space in one pass", () => {
+    const text = `x${" ".repeat(100_000)}x`;
+    const started = performance.now();
+    expect(trimmed(text)).toBe(text);
+    expect(trimmed(`${text} `)).toBe(text);
+    expect(performance.now() - started).toBeLessThan(250);
   });
 
   it("calls a text of nothing but White_Space blank, and a byte-order mark not", () => {

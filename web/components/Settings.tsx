@@ -19,7 +19,6 @@ import { useState, type ReactNode } from "react";
 import type { Limits, SettingsDraft, SettingsView, TableDraft } from "@/lib/api";
 import * as fmt from "@/lib/format";
 import {
-  copyDraft,
   largestTable,
   lastArrivalMinutes,
   shortestShiftMinutes,
@@ -95,7 +94,7 @@ export function SettingsScreen({
   settings,
   draft,
   editedWeekday,
-  onDraft,
+  onEdit,
   onEditWeekday,
   section,
   onSection,
@@ -103,7 +102,7 @@ export function SettingsScreen({
   settings: SettingsView;
   draft: SettingsDraft;
   editedWeekday: number;
-  onDraft: (next: SettingsDraft) => void;
+  onEdit: (change: Edit) => void;
   onEditWeekday: (weekday: number) => void;
   /**
    * The open section, or the index. Held by the page, so that a look at the shift comes back to
@@ -114,20 +113,15 @@ export function SettingsScreen({
 }) {
   const limits = settings.limits;
 
-  // One notion of "an edit", built here and handed to every section: a change is described once and
-  // then both asked about and made, rather than written out twice in two shapes.
-  const edit: Apply = (change) => {
-    const next = copyDraft(draft);
-    change(next);
-    onDraft(next);
-  };
+  // One notion of "an edit", handed to every section: a change is described once and then both asked
+  // about and made, rather than written out twice in two shapes.
   const context: Context = {
     draft,
     settings,
     limits,
     editedWeekday,
     onEditWeekday,
-    edit,
+    edit: onEdit,
     allowed: (change) => wouldBeLegal(draft, change, limits),
   };
 

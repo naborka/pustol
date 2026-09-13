@@ -33,11 +33,13 @@ const HASH_FIELD: &str = "hash";
 /// here — that check exists for parties who do *not* hold the bot token, and we do.
 const SIGNATURE_FIELD: &str = "signature";
 
-/// How far ahead of this server's clock a payload may be dated.
+/// How far Telegram's clock may be from this server's, either way.
 ///
 /// `auth_date` comes from Telegram's clock. Two synchronised clocks still drift by seconds, and a
-/// payload dated a moment "in the future" is a guest who cannot open the app, not a forgery.
-const CLOCK_SKEW: TimeDelta = TimeDelta::minutes(1);
+/// payload dated a moment "in the future" is a guest who cannot open the app, not a forgery. The
+/// same bound says how early a payload may really have been signed: anything that must have happened
+/// after some moment on this server's clock is judged against `auth_date` less this.
+pub const CLOCK_SKEW: TimeDelta = TimeDelta::minutes(1);
 
 /// A Telegram account, as Telegram describes it.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
@@ -130,6 +132,15 @@ impl BotToken {
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.token
+    }
+
+    /// The bot's own account id: the part of the token before the colon, which stays the same when
+    /// the token is revoked and issued again. `None` for a token not in the shape Telegram issues.
+    #[must_use]
+    pub fn bot_id(&self) -> Option<i64> {
+        self.token
+            .split_once(':')
+            .and_then(|(id, _)| id.parse().ok())
     }
 }
 

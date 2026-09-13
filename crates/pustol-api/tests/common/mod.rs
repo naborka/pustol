@@ -6,6 +6,9 @@
 
 #![allow(dead_code)]
 
+#[path = "../../../pustol-db/tests/common/database.rs"]
+mod database;
+
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::Router;
@@ -27,7 +30,6 @@ pub const TOKEN: &str = "123456:AAHfakeTokenForTestsOnly-000000000000000";
 pub const BELGRADE: chrono_tz::Tz = chrono_tz::Europe::Belgrade;
 
 static NEXT_ACCOUNT: AtomicI64 = AtomicI64::new(1);
-static NEXT_DATABASE: AtomicI64 = AtomicI64::new(1);
 
 /// A running app: the router, the state it was built with, and the bar it serves.
 pub struct Harness {
@@ -37,48 +39,6 @@ pub struct Harness {
     pub store: Store,
     pub config: ValidConfig,
     pub now: DateTime<Utc>,
-}
-
-fn cluster_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres@127.0.0.1:55432/pustol".to_owned())
-}
-
-fn pointing_at(url: &str, database: &str) -> String {
-    let (base, query) = url
-        .split_once('?')
-        .map_or((url, ""), |(base, query)| (base, query));
-    let stem = base.rsplit_once('/').map_or(base, |(stem, _)| stem);
-    if query.is_empty() {
-        format!("{stem}/{database}")
-    } else {
-        format!("{stem}/{database}?{query}")
-    }
-}
-
-async fn fresh_store() -> Store {
-    let cluster = cluster_url();
-    let name = format!(
-        "pustol_t{}_api{}",
-        std::process::id(),
-        NEXT_DATABASE.fetch_add(1, Ordering::Relaxed)
-    );
-    let maintenance = pointing_at(&cluster, "postgres");
-    let admin = sqlx::PgPool::connect(&maintenance)
-        .await
-        .unwrap_or_else(|error| panic!("no cluster at {maintenance}: {error}"));
-    // `create database` takes no bind parameters; the name is built here and never supplied.
-    sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
-        .execute(&admin)
-        .await
-        .unwrap_or_else(|error| panic!("cannot create {name}: {error}"));
-    admin.close().await;
-
-    let store = Store::connect(&pointing_at(&cluster, &name), 12)
-        .await
-        .expect("the new database accepts connections");
-    store.migrate().await.expect("migrations apply");
-    store
 }
 
 /// Thursday 30 July 2026 at 06:00 UTC — early morning in Belgrade, before any fixture booking.
@@ -169,6 +129,7 @@ pub fn config_with(tables: Vec<BarTable>) -> BarConfig {
 /// The settings screen's payload turned back into the proposal the screen would send.
 pub fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
+        "version": settings["version"],
         "name": settings["name"],
         "address": settings["address"],
         "timezone": settings["timezone"],
@@ -203,11 +164,17 @@ pub fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
 }
 
 /// Builds an app whose clock is stopped at `now`.
+///
+/// The bar was set up an hour earlier, so the manager it invited signs a payload well after the seat
+/// was offered, as they would in life, rather than within the clock skew a claim allows for.
 pub async fn harness_at(now: DateTime<Utc>, config: BarConfig) -> Harness {
-    let store = fresh_store().await;
+    let store = database::fresh_store().await;
     let config = ValidConfig::new(config)
         .unwrap_or_else(|errors| panic!("fixture config is illegal: {errors:?}"));
-    let bar = store.create_bar(&config).await.expect("bar created");
+    let bar = store
+        .create_bar(&config, now - chrono::TimeDelta::hours(1))
+        .await
+        .expect("bar created");
     stopped_at(store, bar, config, now)
 }
 

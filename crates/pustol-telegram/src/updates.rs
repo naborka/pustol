@@ -4,8 +4,16 @@
 //! dropped rather than failing the batch it came in: the batch is confirmed by its highest id, so a
 //! single unreadable update would otherwise be fetched again for ever and wedge every one behind it.
 
+use chrono::TimeDelta;
 use serde::de::{DeserializeOwned, Deserializer};
 use serde::Deserialize;
+
+/// How long a claim on an update stays evidence that the update was taken in hand.
+///
+/// Telegram keeps an update nobody fetched for a day, and after a week without updates counts update
+/// ids afresh from a random number. A claim younger than a day can only name an update Telegram may
+/// still send again; an older one may name a new update that happens to carry the same id.
+pub const UPDATE_RETENTION: TimeDelta = TimeDelta::days(1);
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Update {

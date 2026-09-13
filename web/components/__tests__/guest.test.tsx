@@ -11,12 +11,34 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { BookScreen, DayRailStrip, DoneScreen, HomeScreen, bookingDecision } from "../GuestScreens";
+import {
+  BookScreen,
+  DayRailStrip,
+  DoneScreen,
+  HomeScreen,
+  bookingDecision,
+  heldAfter,
+  pickerStart,
+} from "../GuestScreens";
 import { GuestCancelSheet } from "../Sheets";
+import type { GuestBooking } from "@/lib/api";
 import { TAP } from "@/lib/tokens";
-import { availability, bar, booking, dayOffer, noop, rail, session } from "./fixtures";
+import { availability, bar, booking, dayOffer, noop, rail, seated, session } from "./fixtures";
 
 afterEach(cleanup);
+
+/** A no-show whose table is still held tonight: only a booking tonight replaces it. */
+const heldNoShow: GuestBooking = {
+  ...booking,
+  id: "b9",
+  start_minutes: 1_260,
+  end_minutes: 1_380,
+  status: "no_show",
+  started: true,
+  rebooking_replaces: "same_evening",
+};
+
+const friday: GuestBooking = { ...booking, id: "b2", service_date: "2026-09-12" };
 
 function home(overrides: Parameters<typeof session>[0] = {}) {
   return render(
@@ -61,10 +83,11 @@ describe("the guest's home screen", () => {
   it("shows a booking without ever naming a table", () => {
     // The bar assigns tables and moves them when the room changes. A number on a guest's screen is
     // a number they arrive quoting.
-    const { container } = home({ booking });
+    const { container } = home({ bookings: [booking] });
     expect(screen.getByText("Стол ваш")).toBeDefined();
     expect(screen.getByText("Сегодня в 21:30")).toBeDefined();
     expect(screen.getByText("4 гостя")).toBeDefined();
+    expect(screen.queryByText("Столик на вечер")).toBeNull();
     // A table as a *place* — "стол 7 · Стойка", "стол 7." — never appears. "Держим стол 15 минут"
     // is about a duration, which is why the pattern ends where a place would.
     expect(container.textContent).not.toMatch(/стол\s+\d+\s*(·|,|\.|$)/i);
@@ -72,16 +95,16 @@ describe("the guest's home screen", () => {
   });
 
   it("quotes the grace period the bar actually configured", () => {
-    home({ booking, bar: { ...bar, grace_minutes: 25 } });
+    home({ bookings: [booking], bar: { ...bar, grace_minutes: 25 } });
     expect(screen.getByText(/Держим стол 25 минут после времени брони/)).toBeDefined();
   });
 
-  it("offers to move and to cancel, and hands both back to whoever asked", async () => {
+  it("offers to move and to cancel, and hands back which booking", async () => {
     const onMove = vi.fn();
     const onCancel = vi.fn();
     render(
       <HomeScreen
-        session={session({ booking })}
+        session={session({ bookings: [booking] })}
         onMove={onMove}
         onCancel={onCancel}
         onEnableReminders={noop}
@@ -90,34 +113,47 @@ describe("the guest's home screen", () => {
       />,
     );
     await userEvent.click(screen.getByText("Перенести"));
-    expect(onMove).toHaveBeenCalledOnce();
+    expect(onMove).toHaveBeenCalledWith(booking);
     await userEvent.click(screen.getByText("Отменить"));
-    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onCancel).toHaveBeenCalledWith(booking);
   });
 
-  it("does not offer to move a booking that is already under way, but still lets it be cancelled", () => {
-    // The server refuses a second booking while one is running, so «Перенести» could only fail.
-    const cases = [
-      { booking, bar: { ...bar, now_minutes: booking.start_minutes } },
-      { booking, bar: { ...bar, now_minutes: 1_500 } },
-      { booking: { ...booking, service_date: "2026-09-10" }, bar },
+  it("offers a move exactly when a new booking would replace this one, and always a cancel", () => {
+    // The server says what a new booking would do to each; the card does not work it out again.
+    const cases: [string, GuestBooking, boolean][] = [
+      ["a plan not yet begun", booking, true],
+      ["a no-show whose table is still held", heldNoShow, true],
+      ["a party at the table", seated, false],
     ];
-    for (const started of cases) {
-      const { unmount } = home(started);
-      expect(screen.queryByText("Перенести")).toBeNull();
-      expect(screen.getByText("Отменить")).toBeDefined();
-      unmount();
+    for (const [name, held, movable] of cases) {
+      home({ bookings: [held] });
+      expect(screen.queryByText("Перенести") !== null, name).toBe(movable);
+      expect(screen.getByText("Отменить"), name).toBeDefined();
+      expect(screen.queryByText("Другой вечер"), name).toBeNull();
+      cleanup();
     }
+  });
 
-    home({ booking, bar: { ...bar, now_minutes: booking.start_minutes - 1 } });
-    expect(screen.getByText("Перенести")).toBeDefined();
-    cleanup();
-    home({ booking: { ...booking, service_date: "2026-09-12", start_minutes: 1_080 }, bar });
-    expect(screen.getByText("Перенести")).toBeDefined();
+  it("shows a card for every booking the guest holds, each cancelling its own", async () => {
+    const onCancel = vi.fn();
+    render(
+      <HomeScreen
+        session={session({ bookings: [seated, friday] })}
+        onMove={noop}
+        onCancel={onCancel}
+        onEnableReminders={noop}
+        onDismissReminders={noop}
+        onContact={noop}
+      />,
+    );
+    expect(screen.getAllByText("Стол ваш")).toHaveLength(2);
+    const card = screen.getByRole("group", { name: "Завтра в 21:30" });
+    await userEvent.click(within(card).getByText("Отменить"));
+    expect(onCancel).toHaveBeenCalledWith(friday);
   });
 
   it("asks about reminders exactly once, and never again after «Не нужно»", () => {
-    const { unmount } = home({ booking });
+    const { unmount } = home({ bookings: [booking] });
     expect(screen.getByText("Напомнить за 3 часа?")).toBeDefined();
     expect(
       screen.getByText(
@@ -126,7 +162,7 @@ describe("the guest's home screen", () => {
     ).toBeDefined();
     unmount();
 
-    home({ booking, reminders: { opted_in: false, deliverable: true, should_ask: false } });
+    home({ bookings: [booking], reminders: { opted_in: false, deliverable: true, should_ask: false } });
     expect(screen.queryByText("Напомнить за 3 часа?")).toBeNull();
   });
 
@@ -194,6 +230,14 @@ describe("the day rail", () => {
 
     await userEvent.click(screen.getByText("Сегодня"));
     expect(onServiceDate).toHaveBeenCalledWith("2026-09-11");
+  });
+
+  it("marks an evening the guest already holds as theirs, and will not let it be tapped", async () => {
+    const onServiceDate = vi.fn();
+    railOf([dayOffer({ booked: true }), dayOffer({ service_date: "2026-09-12" })], onServiceDate);
+    expect(screen.getByText("ваша бронь")).toBeDefined();
+    await userEvent.click(screen.getByText("Сегодня"));
+    expect(onServiceDate).not.toHaveBeenCalled();
   });
 });
 
@@ -298,20 +342,67 @@ describe("the picker", () => {
 
 describe("the main button", () => {
   it("carries the whole decision once a time is chosen", () => {
-    expect(bookingDecision(4, "2026-09-11", "2026-09-11", 1_290)).toEqual({
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290)).toEqual({
       label: "Забронировать · 4 гостя · сегодня в 21:30",
       enabled: true,
     });
-    expect(bookingDecision(2, "2026-09-13", "2026-09-11", 1_320).label).toBe(
+    expect(bookingDecision(2, "2026-09-13", bar, 1_320).label).toBe(
       "Забронировать · 2 гостя · вс, 13 сен в 22:00",
     );
   });
 
   it("asks for the missing half of the decision until it has it", () => {
-    expect(bookingDecision(4, "2026-09-11", "2026-09-11", null)).toEqual({
+    expect(bookingDecision(4, "2026-09-11", bar, null)).toEqual({
       label: "Выберите время",
       enabled: false,
     });
+  });
+
+  it("will not book an evening the guest already holds, and says why", () => {
+    const refused = { label: "На этот вечер у вас уже есть бронь", enabled: false };
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290, [seated], true)).toEqual(refused);
+    expect(bookingDecision(4, "2026-09-11", bar, null, [seated], true)).toEqual(refused);
+  });
+});
+
+describe("the evening the picker opens on", () => {
+  it("is today without a booking, and a plan's own evening when moving it", () => {
+    expect(pickerStart(session())).toBe("2026-09-11");
+    expect(pickerStart(session({ bookings: [booking] }), booking)).toBe("2026-09-11");
+    expect(pickerStart(session({ bookings: [friday] }), friday)).toBe("2026-09-12");
+  });
+
+  it("is never an evening the guest already holds while another is open", () => {
+    // A guest at the table tonight tapping «Забронировать стол» is booking another evening.
+    expect(pickerStart(session({ bookings: [seated] }))).toBe("2026-09-12");
+  });
+
+  it("is that evening when it is the only one the bar takes, where the picker then says so", () => {
+    expect(pickerStart(session({ bookings: [seated], bookable_days: ["2026-09-11"] }))).toBe(
+      "2026-09-11",
+    );
+  });
+
+  it("is a held no-show's own evening, which is the only one that replaces it", () => {
+    const session_ = session({ bookings: [heldNoShow], bookable_days: ["2026-09-12"] });
+    expect(pickerStart(session_, heldNoShow)).toBe("2026-09-11");
+  });
+
+  it("falls back to the first open evening when a plan's own is out of reach", () => {
+    const far = { ...booking, service_date: "2026-09-20" };
+    expect(pickerStart(session({ bookings: [far] }), far)).toBe("2026-09-11");
+  });
+});
+
+describe("the bookings a guest holds after a write", () => {
+  it("lose what a booking replaced, gain what it took, and read soonest first", () => {
+    const later = { ...booking, id: "b5", start_minutes: 1_350 };
+    expect(heldAfter([friday, booking], [booking.id], later)).toEqual([later, friday]);
+    expect(heldAfter([seated], [], friday)).toEqual([seated, friday]);
+  });
+
+  it("lose a cancelled booking and nothing else", () => {
+    expect(heldAfter([seated, friday], [friday.id], null)).toEqual([seated]);
   });
 });
 
@@ -375,8 +466,26 @@ describe("reaching a person at the bar", () => {
 
 describe("moving a booking the guest already holds", () => {
   it("says «Перенести» on the button, so nobody wonders whether they are about to hold two", () => {
-    expect(bookingDecision(4, "2026-09-11", "2026-09-11", 1_290, true).label).toBe(
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290, [booking]).label).toBe(
       "Перенести · 4 гостя · сегодня в 21:30",
+    );
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290, [booking]).label).toBe(
+      "Перенести · 4 гостя · завтра в 21:30",
+    );
+  });
+
+  it("says «Забронировать» when no booking the guest holds would be replaced", () => {
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290, [seated]).label).toBe(
+      "Забронировать · 4 гостя · завтра в 21:30",
+    );
+  });
+
+  it("says «Перенести» for a held no-show only on its own evening", () => {
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290, [heldNoShow]).label).toBe(
+      "Перенести · 4 гостя · сегодня в 21:30",
+    );
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290, [heldNoShow]).label).toBe(
+      "Забронировать · 4 гостя · завтра в 21:30",
     );
   });
 
@@ -387,7 +496,7 @@ describe("moving a booking the guest already holds", () => {
   });
 
   it("tells the guest how long the table is held in words that agree with the number", () => {
-    home({ booking, bar: { ...bar, grace_minutes: 21 } });
+    home({ bookings: [booking], bar: { ...bar, grace_minutes: 21 } });
     expect(screen.getByText(/Держим стол 21 минуту после времени брони/)).toBeDefined();
     expect(screen.queryByText(/стол дождётся/)).toBeNull();
   });

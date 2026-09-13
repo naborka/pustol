@@ -18,6 +18,7 @@ pub mod bookings;
 pub mod error;
 pub mod identity;
 pub mod ids;
+pub mod inbox;
 pub mod notifications;
 pub mod records;
 

@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { refreshedSheet, withBooking, type OpenSheet } from "../sheet";
-import { shift, shiftBooking, shiftTable } from "@/components/__tests__/fixtures";
+import {
+  NO_SHEET,
+  closedIfStill,
+  isStill,
+  refreshedGuestSheet,
+  refreshedSheet,
+  withBooking,
+  type OpenSheet,
+} from "../sheet";
+import { booking, shift, shiftBooking, shiftTable } from "@/components/__tests__/fixtures";
 
 describe("an open sheet when the shift is read again", () => {
   const arrived = shiftBooking({ status: "arrived" });
@@ -12,37 +20,58 @@ describe("an open sheet when the shift is read again", () => {
 
   it("shows the booking as the shift now has it, whichever sheet it is open in", () => {
     for (const kind of ["booking", "templates", "cancelBooking", "move"] as const) {
-      expect(refreshedSheet({ kind, booking: shiftBooking() }, fresh)).toEqual({
+      expect(refreshedSheet({ kind, booking: shiftBooking(), opened: 3 }, fresh)).toEqual({
         kind,
         booking: arrived,
+        opened: 3,
       });
     }
   });
 
   it("shows the table as the shift now has it", () => {
-    expect(refreshedSheet({ kind: "table", table: shiftTable() }, fresh)).toEqual({
+    expect(refreshedSheet({ kind: "table", table: shiftTable(), opened: 4 }, fresh)).toEqual({
       kind: "table",
       table: shiftTable({ blocked_because: "Дождь" }),
+      opened: 4,
     });
   });
 
-  it("leaves a sheet alone when the shift no longer has what it shows", () => {
-    const gone: OpenSheet = { kind: "booking", booking: shiftBooking({ id: "elsewhere" }) };
-    expect(refreshedSheet(gone, fresh)).toBe(gone);
-    const noTable: OpenSheet = { kind: "table", table: shiftTable({ id: "t9" }) };
-    expect(refreshedSheet(noTable, fresh)).toBe(noTable);
+  it("closes a sheet whose booking or table the shift no longer has", () => {
+    // A cancelled booking's sheet left open was a way to seat, move or message a booking that no
+    // longer exists.
+    for (const kind of ["booking", "templates", "cancelBooking", "move"] as const) {
+      const gone: OpenSheet = { kind, booking: shiftBooking({ id: "elsewhere" }), opened: 1 };
+      expect(refreshedSheet(gone, fresh)).toEqual(NO_SHEET);
+    }
+    const noTable: OpenSheet = { kind: "table", table: shiftTable({ id: "t9" }), opened: 1 };
+    expect(refreshedSheet(noTable, fresh)).toEqual(NO_SHEET);
   });
 
   it("leaves a sheet that shows no booking and no table alone", () => {
     const sheets: OpenSheet[] = [
       { kind: "none" },
-      { kind: "days" },
-      { kind: "walkIn" },
-      { kind: "manual" },
-      { kind: "guestCancel" },
-      { kind: "conflict", reasons: ["x"] },
+      { kind: "days", opened: 1 },
+      { kind: "walkIn", opened: 1 },
+      { kind: "manual", opened: 1 },
+      { kind: "guestCancel", booking, opened: 1 },
+      { kind: "conflict", reasons: ["x"], opened: 1 },
     ];
     for (const sheet of sheets) expect(refreshedSheet(sheet, fresh)).toBe(sheet);
+  });
+});
+
+describe("the guest's cancel sheet when their bookings are read again", () => {
+  const open: OpenSheet = { kind: "guestCancel", booking, opened: 2 };
+
+  it("stays while the booking it restates is still theirs", () => {
+    const moved = { ...booking, start_minutes: 1_320 };
+    expect(refreshedGuestSheet(open, [moved])).toEqual({ ...open, booking: moved });
+  });
+
+  it("closes once that booking is gone, and leaves any other sheet alone", () => {
+    expect(refreshedGuestSheet(open, [{ ...booking, id: "b2" }])).toEqual(NO_SHEET);
+    const days: OpenSheet = { kind: "days", opened: 3 };
+    expect(refreshedGuestSheet(days, [])).toBe(days);
   });
 });
 
@@ -50,16 +79,47 @@ describe("an open sheet when one booking comes back changed", () => {
   const updated = shiftBooking({ status: "arrived" });
 
   it("takes the change only when it still shows that booking", () => {
-    expect(withBooking({ kind: "booking", booking: shiftBooking() }, updated)).toEqual({
+    expect(withBooking({ kind: "booking", booking: shiftBooking(), opened: 2 }, updated)).toEqual({
       kind: "booking",
       booking: updated,
+      opened: 2,
     });
-    const other: OpenSheet = { kind: "booking", booking: shiftBooking({ id: "b2" }) };
+    const other: OpenSheet = { kind: "booking", booking: shiftBooking({ id: "b2" }), opened: 2 };
     expect(withBooking(other, updated)).toBe(other);
   });
 
   it("does not open a sheet that was closed meanwhile", () => {
     const closed: OpenSheet = { kind: "none" };
     expect(withBooking(closed, updated)).toBe(closed);
+  });
+});
+
+describe("closing the sheet an action came from", () => {
+  const from: OpenSheet = { kind: "templates", booking: shiftBooking(), opened: 5 };
+
+  it("closes it when it is still open, however its copy has been refreshed since", () => {
+    const refreshed = withBooking(from, shiftBooking({ status: "arrived" }));
+    expect(isStill(refreshed, from)).toBe(true);
+    expect(closedIfStill(refreshed, from)).toEqual({ kind: "none" });
+  });
+
+  it("leaves another sheet open, even one on the same booking or of the same kind", () => {
+    const others: OpenSheet[] = [
+      { kind: "booking", booking: shiftBooking(), opened: 6 },
+      { kind: "templates", booking: shiftBooking(), opened: 6 },
+      { kind: "manual", opened: 5 },
+      { kind: "none" },
+    ];
+    for (const current of others) {
+      expect(isStill(current, from)).toBe(false);
+      expect(closedIfStill(current, from)).toBe(current);
+    }
+  });
+
+  it("opens nothing, and closes nothing new, when it came from no sheet at all", () => {
+    const none: OpenSheet = { kind: "none" };
+    expect(closedIfStill(none, none)).toEqual({ kind: "none" });
+    const opened: OpenSheet = { kind: "days", opened: 1 };
+    expect(closedIfStill(opened, none)).toBe(opened);
   });
 });
