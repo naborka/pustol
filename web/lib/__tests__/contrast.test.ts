@@ -59,8 +59,7 @@ describe("the contrast arithmetic", () => {
 
 describe("the palette Telegram hands over", () => {
   it("replaces a hint colour that cannot be read on the grounds it is drawn on", () => {
-    // Telegram's own default dark theme: its hint grey is under 4.5:1 on its own card colour, and
-    // half the small text in the app is drawn in it.
+    // Telegram default dark theme: hint grey under 4.5:1 on its card colour; half small text uses it.
     const palette = paletteFrom("dark", {
       bg_color: "#17212b",
       secondary_bg_color: "#232e3c",

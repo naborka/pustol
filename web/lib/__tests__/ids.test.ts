@@ -1,7 +1,3 @@
-/**
- * Names the app gives things before the server has seen them.
- */
-
 import { describe, expect, it } from "vitest";
 
 import { uuid } from "../ids";

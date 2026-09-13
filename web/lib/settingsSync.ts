@@ -1,13 +1,11 @@
 /**
- * Settings that change under a manager's edits.
+ * Settings changing under manager edits.
  *
- * The screen holds two things: the settings as the server last gave them, and the manager's
- * proposal (`draft`). An edit is measured against the proposal those settings make untouched, never
- * against a copy kept beside them, so the manager's own save is never mistaken for somebody else's.
- * Whatever arrives — a reread, the reread after a save refused as stale, a save's own answer — is
- * folded in at the moment it arrives, against the draft as it is then, so an edit typed while a read
- * was loading is never the thing that gets lost. The read model orders settings by version, so
- * nothing older than what is on screen arrives here.
+ * Screen holds server settings and manager proposal (`draft`). Edit measured against untouched
+ * proposal of those settings, never side copy, so own save never mistaken for someone else's.
+ * Anything arriving (reread, reread after stale save refusal, save answer) folds in on arrival
+ * against draft as it is then, so edit typed during load never lost. Read model orders settings by
+ * version, so nothing older than screen arrives here.
  */
 
 import { draftOf, type SettingsDraft, type SettingsView } from "./api";
@@ -20,7 +18,7 @@ export interface SettingsPair {
 
 type DraftField = Exclude<keyof SettingsDraft, "version">;
 
-/** Every field of a proposal, in the words a manager knows it by. A new field without words is a type error. */
+/** Manager-facing name per field. New field without name is type error. */
 const FIELD_NAME: Record<DraftField, string> = {
   name: "название",
   address: "адрес",
@@ -42,7 +40,6 @@ const FIELD_NAME: Record<DraftField, string> = {
 
 const FIELDS = Object.keys(FIELD_NAME) as DraftField[];
 
-/** The settings as they came, with nothing edited. */
 export function fresh(settings: SettingsView): SettingsPair {
   return { settings, draft: draftOf(settings) };
 }
@@ -52,13 +49,12 @@ export function isDirty(pair: SettingsPair): boolean {
 }
 
 /**
- * A proposal as the server stores it and reads it back: `Draft::resolve` in `pustol-domain`, then
- * the order storage lists it in. Advisory, like `settingsRules`: it only decides whether two
- * proposals mean the same, so the manager's own save, trimmed or reordered by the server, is never
- * taken for somebody else's.
+ * Proposal as server stores and reads it back: `Draft::resolve` in `pustol-domain`, then storage
+ * order. Advisory like `settingsRules`: only decides whether two proposals mean same, so own save
+ * trimmed or reordered by server never taken for someone else's.
  *
- * Tables go by number: one these settings have keeps its number, any other takes the next in the
- * order the proposal lists it. Staff go by username, whatever its case.
+ * Tables by number: known id keeps number, others take next in proposal order. Staff by username,
+ * case-insensitive.
  */
 export function asStored(draft: SettingsDraft, settings: SettingsView): SettingsDraft {
   let next = settings.next_table_number;
@@ -86,9 +82,8 @@ export function asStored(draft: SettingsDraft, settings: SettingsView): Settings
 }
 
 /**
- * Three-way, one top-level field at a time, each compared as the server stores it: a field only I
- * changed is mine, a field only they changed, or one we both made the same, is theirs, and a field
- * we both changed differently is mine and named as a conflict.
+ * Three-way per top-level field, compared as stored. Only mine changed: mine. Only theirs, or both
+ * same: theirs. Both differently: mine, named as conflict.
  */
 export function mergeDrafts(
   shown: SettingsView,
@@ -112,10 +107,7 @@ export function mergeDrafts(
   return { draft, conflicts };
 }
 
-/**
- * Settings read from the server, folded into what is on screen, and what to tell the manager. Settings
- * of the version on screen are the settings on screen, whatever order the server lists them in.
- */
+/** Same version as screen means same settings, whatever order server lists them in. */
 export function received(
   current: SettingsPair | null,
   next: SettingsView,
@@ -141,10 +133,7 @@ export function received(
   };
 }
 
-/**
- * A save's own answer. The edits made while it was on its way are made again on top of what it
- * stored, which is the server's own wording of what was sent.
- */
+/** Save answer. Edits made while in flight replay on what it stored, server's own form of what was sent. */
 export function savedInto(
   current: SettingsPair | null,
   stored: SettingsView,

@@ -9,10 +9,9 @@
 //!
 //! * **A booking is only ever recorded against a concrete table.** Nothing is accepted against
 //!   an aggregate seat count, so "confirmed but unseatable" has no representation at all.
-//! * **Overlap is only ever judged on absolute instants.** Opening hours are wall-clock facts
-//!   and are compared as wall-clock minutes; whether two parties would share a table is a
-//!   question about real time. Answering the second question in wall-clock minutes is how a
-//!   table gets sold twice on the night the clocks change.
+//! * **Overlap and opening hours are only ever judged on absolute instants.** Hours are set in
+//!   wall-clock minutes, but clock changes skip and repeat them; judged on wall minutes, a table
+//!   sells twice on clock-change night.
 //! * **Derived facts are derived.** The latest arrival time is closing time minus one turn, and
 //!   is computed everywhere it is needed rather than stored somewhere it can drift.
 //!
@@ -44,7 +43,7 @@ pub use reconcile::{Reconciliation, Reseating};
 pub use schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 pub use service_day::{Interval, ServiceDay, TimeError, minutes_within, resolve};
 pub use slots::{
-    PartOfDay, Slot, SlotAvailability, bookable_days, days_from, first_free_minutes,
-    horizon_days, open_tables_at,
+    PartOfDay, Slot, SlotAvailability, bookable_days, days_from, first_free_minutes, horizon_days,
+    open_tables_at,
 };
 pub use text::{BlankGuestName, BlockReason, GuestName, MissingBlockReason, longer_than};

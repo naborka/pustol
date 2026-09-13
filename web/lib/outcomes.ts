@@ -1,9 +1,7 @@
 /**
- * What the app says after it has done something, and what the way back is.
+ * What app says after acting, and way back.
  *
- * These were closures inside the page, which meant the two things most worth pinning down — that a
- * report names every booking it moved *and* every one it could not, and that an undo goes back to
- * the status the booking actually had — could not be tested at all.
+ * Outside page so tests pin it: report names every booking moved and every one not placed.
  */
 
 import type { Attendance, Reconciliation, ShiftBooking } from "./api";
@@ -67,16 +65,12 @@ export function attendanceOutcome(updated: ShiftBooking, attendance: Attendance)
   }
 }
 
-/** Tables to close for one reason, the shape closing takes. */
 export interface Closure {
   tableIds: string[];
   reason: string;
 }
 
-/**
- * The way back from opening tables: each closure the server removed, closed again for the reason
- * it had, whatever this phone last showed as the reason.
- */
+/** Undo for reopening: close each removed closure again with server's reason, not reason phone showed. */
 export function closuresToRestore(reopened: { table_id: string; reason: string }[]): Closure[] {
   const byReason = new Map<string, string[]>();
   for (const { table_id: tableId, reason } of reopened) {
@@ -94,7 +88,7 @@ export function strandedLines(stranded: StrandedBooking[]): string[] {
   );
 }
 
-/** Why a settings save was refused, kept until the next edit or save so it can be read again. */
+/** Why settings save refused; kept until next edit or save so it can be reread. */
 export interface Refusal {
   lead: string;
   reasons: string[];

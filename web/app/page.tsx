@@ -8,15 +8,12 @@
  * and every fetch with it — means the screens stay pure functions of what is loaded, which is what
  * makes them worth testing.
  *
- * This file also holds the rules for how an action feels. Anything reversible happens on one tap
- * and comes back with a way to undo it; anything the guest will feel is confirmed first and gets no
- * undo, because the confirmation was the protection. One action runs at a time, so a second tap on
- * a slow connection is not a second booking or a second message. And what is on screen keeps up by
- * itself: a shift left open on the bar is the normal case, not the exception.
+ * Action rules: reversible acts happen on one tap with undo; acts guest feels get confirmation, no
+ * undo. One action at a time, so second tap on slow connection is not second booking or message.
+ * Screen refreshes itself: shift left open on bar is normal case.
  *
- * Everything read goes through one read model (`useRead`), and every staff write answers with the
- * evening as the server has it after the write, which goes on screen through that same model. The
- * phone never patches its own copy of the room.
+ * All reads go through `useRead`. Every staff write answers with room as server has it after, put on
+ * screen through same model. Phone never patches own copy of room.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -108,34 +105,30 @@ type GuestScreen = "home" | "book" | "done";
 const DEFAULT_PARTY = 2;
 
 /**
- * How often an open shift asks what has changed.
- *
- * A guest books from the app, a colleague seats somebody from another phone, a party runs late —
- * and none of it reached a shift screen that nobody touched. Half a minute is well inside the grace
- * a late party is given, and a request that small costs the server nothing.
+ * Open shift poll. Guest bookings, colleague seatings, late parties must reach untouched screen.
+ * 30 s sits well inside late-party grace.
  */
 const SHIFT_REFRESH_MS = 30_000;
 
-/** How often the guest's home screen does: the open-until line and a booking the bar has closed. */
+/** Guest home poll: open-until line, bookings bar closed. */
 const HOME_REFRESH_MS = 60_000;
 
-/** The session is one question, whoever asks it. */
+/** One read key for session, whoever asks. */
 const SESSION = "session";
 
-/** So are the settings: they are the bar's, whichever evening is on screen. */
+/** One read key for settings: bar-wide, not per evening. */
 const SETTINGS = "settings";
 
 /**
- * Rooms are ordered by the server's version, not by when they arrived. The version does not move
- * with the clock or with whether the bot can reach a guest, so two rooms of one version go by when
- * they were asked.
+ * Rooms ordered by server version, not arrival. Version ignores clock and bot reachability, so equal
+ * versions go by ask order.
  */
 const roomOrder: Order<ShiftView> = (next, shown) => next.version - shown.version;
 
-/** Settings are ordered by the bar's count of saves, so an older reread never lands over a save. */
+/** Ordered by save count, so older reread never lands over save. */
 const settingsOrder: Order<SettingsView> = (next, shown) => next.version - shown.version;
 
-/** A read whose answers are only drawn, never folded into anything. */
+/** For reads whose answers only drawn, never folded. */
 const nothing = () => {};
 
 const EMPTY_MANUAL = {
@@ -146,11 +139,8 @@ const EMPTY_MANUAL = {
 };
 
 /**
- * Calls `refresh` every `intervalMs` while the app is on screen, and at once when it comes back.
- *
- * Telegram keeps a minimised Mini App alive and tells it when it is shown again; a phone locked on
- * the bar hides the page. Neither is a reason to keep polling, and both are a reason to catch up
- * the moment somebody looks.
+ * Calls `refresh` every `intervalMs` while visible, and at once on return. Telegram keeps minimised
+ * Mini App alive and fires `activated`; locked phone hides page. Neither should poll; both catch up.
  */
 function useWhileVisible(refresh: (() => void) | null, intervalMs: number) {
   useEffect(() => {
@@ -171,8 +161,8 @@ function useWhileVisible(refresh: (() => void) | null, intervalMs: number) {
 }
 
 /**
- * State whose newest value can be read the moment it is written, not only on the next render: an
- * answer folded into it must be folded into what is there now, not into a copy from a render ago.
+ * State readable right after write, not only next render: answers must fold into current value, not
+ * stale render copy.
  */
 function useSynced<T>(initial: T): [T, (change: (current: T) => T) => void, { readonly current: T }] {
   const now = useRef(initial);
@@ -185,11 +175,10 @@ function useSynced<T>(initial: T): [T, (change: (current: T) => T) => void, { re
 }
 
 export default function Page() {
-  // Read after mounting, never while rendering: the page is prerendered where there is no Telegram,
-  // and that HTML is what a guest sees until the scripts have loaded.
+  // Read after mount, never in render: page prerenders without Telegram, and guest sees that HTML
+  // until scripts load.
   const [token, setToken] = useState<string | null | undefined>(undefined);
   useEffect(() => setToken(credentials()), []);
-  // Whether the client found the session ended, as it last said.
   const [sessionEnd, changeSessionEnd, sessionEndNow] = useSynced<SessionEnd>(null);
   const api = useMemo(
     () => (token ? makeClient(token, (end) => changeSessionEnd(() => end)) : null),
@@ -212,16 +201,16 @@ export default function Page() {
   const [pane, setPane] = useState<ShiftPane>("now");
 
   const [pair, changePair, pairNow] = useSynced<SettingsPair | null>(null);
-  // The edits made while a save is on its way, to be made again on top of what it stored.
+  // Edits made during save, replayed on top of what save stored.
   const editsDuringSave = useRef<Edit[] | null>(null);
   const [settingsSection, setSettingsSection] = useState<Section | null>(null);
   const [editedWeekday, setEditedWeekday] = useState(1);
   const [saving, changeSaving, savingNow] = useSynced(false);
-  // Whether somebody asked for the settings while a save was on its way, to read once it answered.
+  // Settings asked for during save; read once save answers.
   const settingsWanted = useRef(false);
-  // Why the last save was refused, until the next edit or save.
+  // Last save refusal, until next edit or save.
   const [refusal, setRefusal] = useState<Refusal | null>(null);
-  // What a read folded into the edit, said on the settings screen until the next edit or save.
+  // What read folded into edit; shown on settings until next edit or save.
   const [folded, setFolded] = useState<string | null>(null);
 
   const insets = useInsets();
@@ -263,7 +252,7 @@ export default function Page() {
 
   const tell = useCallback((text: string) => say({ text }), [say]);
 
-  /** Turns a failed action into words for whoever took it. An ended session has a screen of its own. */
+  /** Ended session has own screen, so no toast for it. */
   const report = useCallback(
     (error: unknown, audience: Audience) => {
       const failure = failureOf(error);
@@ -277,9 +266,8 @@ export default function Page() {
   // ---- reads ------------------------------------------------------------------------------------
 
   /**
-   * Asks by itself — a refresh, a reread after a write — only while the session stands. Once it has
-   * ended only a retry somebody taps asks: anything else spun over the screen that says to reopen
-   * the app, and met the same refusal.
+   * Self-started reads (poll, reread after write) only while session stands. After end only tapped
+   * retry asks: anything else spins over reopen screen and meets same refusal.
    */
   const refresh = useCallback(
     (load: () => Promise<void> | void) => {
@@ -298,12 +286,12 @@ export default function Page() {
   const { load: loadSession, put: putSession } = sessionRead;
   const session = sessionRead.value;
 
-  // The guest's cancel sheet follows the bookings on screen, whether a read or a write brought them.
+  // Guest cancel sheet follows bookings on screen, from read or write.
   useEffect(() => {
     if (session) setSheet((current) => refreshedGuestSheet(current, session.bookings));
   }, [session]);
 
-  /** Puts what a guest write answered on screen at once; a reread afterwards only freshens it. */
+  /** Guest write answer goes on screen at once; later reread only freshens. */
   const amendSession = (change: (current: Session) => Session) =>
     putSession(SESSION, (current) => current && change(current));
 
@@ -325,9 +313,8 @@ export default function Page() {
     void loadDays();
   }, [screen, partySize, api, loadDays]);
 
-  // The time grid recomputes whenever the question changes. Every answer comes from the server,
-  // which has run the real allocator: a time shown as free is a time with a table behind it, and
-  // what a booking then would replace is the server's word too.
+  // Refetch on question change. Server runs real allocator: time shown free has table behind it, and
+  // what booking would replace is server's word too.
   const timesRead = useRead<GuestAvailability>(
     api && serviceDate !== null
       ? {
@@ -350,16 +337,15 @@ export default function Page() {
     roomOrder,
   );
   const { load: loadShift, put: putShift, mark: markShift } = shiftRead;
-  // Only the evening asked for is shown: another evening is not a refresh of this one.
+  // Only evening asked for shown: another evening is not refresh of this one.
   const shiftOnScreen = shiftRead.value;
 
-  // Every sheet open on the evening on screen follows the room it now has, whether a read or a write
-  // brought it.
+  // Open sheet follows shown evening's current room, from read or write.
   useEffect(() => {
     if (shiftOnScreen) setSheet((current) => refreshedSheet(current, shiftOnScreen));
   }, [shiftOnScreen]);
 
-  // The settings count each table's bookings from this evening too.
+  // Settings also count table bookings from this evening.
   useEffect(() => {
     if ((tab !== "shift" && tab !== "settings") || shiftDate === null) return;
     void loadShift();
@@ -380,10 +366,9 @@ export default function Page() {
     HOME_REFRESH_MS,
   );
 
-  // Folded into the edit at the moment it lands, so nothing typed while it loaded is lost. A read
-  // landing while a save is on its way may or may not have seen that save, so it is dropped and
-  // asked again once the save has answered. What it did to the edit waits on the settings screen:
-  // it may land while the shift is on screen, where a toast would be gone before anybody came back.
+  // Fold into edit on landing, so typing during load survives. Read landing during save may or may
+  // not include save: drop, reask after save answers. Fold note waits on settings screen, not toast:
+  // may land while shift shown.
   const settingsRead = useRead<SettingsView>(
     api ? { key: SETTINGS, ask: () => api.settings() } : null,
     (next) => {
@@ -399,7 +384,7 @@ export default function Page() {
   );
   const { load: readSettings, put: putSettings, mark: markSettings } = settingsRead;
 
-  /** Reads the settings now, or once the save on its way has answered. */
+  /** Read now, or once pending save answers. */
   const loadSettings = useCallback(() => {
     if (!savingNow.current) {
       void readSettings();
@@ -415,7 +400,7 @@ export default function Page() {
     loadSettings();
   }, [tab, api, loadSettings]);
 
-  // Closing Telegram with unsaved settings asks first, the way switching tabs no longer loses them.
+  // Closing Telegram with unsaved settings asks first.
   useEffect(() => {
     const app = webApp();
     if (settingsDirty) app?.enableClosingConfirmation?.();
@@ -439,9 +424,8 @@ export default function Page() {
     changePair((current) => current && { ...current, draft: draftOf(current.settings) });
   }, [changePair]);
 
-  // Writing a booking down and moving one ask the same question, so there is one of it. A move
-  // sets its own booking aside — shifting it half an hour must not mean giving up its table first
-  // and hoping — and asks even once the booking is under way, when only its tables can change.
+  // Manual booking and move ask same question. Move ignores own booking: shifting half hour must not
+  // first give up its table. Asks even once booking started, when only tables can change.
   const moving = sheet.kind === "move" ? sheet.booking : null;
   const asksTimes = sheet.kind === "manual" || moving !== null;
   const askParty = moving ? (move.party ?? moving.party_size) : manual.partySize;
@@ -466,13 +450,9 @@ export default function Page() {
   }, [staffTimesKey, api, loadStaffTimes]);
 
   /**
-   * One action at a time.
-   *
-   * On a slow connection the button a guest just pressed looks as if nothing happened, and they
-   * press it again. For a message or a cancellation that is a second message or a confusing "not
-   * found"; for a booking, a second request racing the first. A tap dropped for that reason says so,
-   * or it reads as a button that does not work — except over a way back: replacing «Вернуть» with
-   * «Подождите» takes away the undo of the tap before, so then it only buzzes.
+   * One action at a time. Slow connection makes tap look ignored, so people tap again: second message,
+   * confusing "not found", racing booking. Dropped tap says so, else button looks broken. Except over
+   * undo toast: replacing «Вернуть» with «Подождите» loses undo, so only buzz.
    */
   const busy = useRef(false);
   const exclusive = useCallback(
@@ -493,9 +473,8 @@ export default function Page() {
     [tell],
   );
 
-  // Telegram's own back button, where there is one, rather than a second one drawn in the page. It
-  // steps back through whatever is open, innermost first — on Android the hardware back button is
-  // this button, and without it the whole app closed and took the open sheet with it.
+  // Telegram BackButton, not drawn one. Steps back innermost first. On Android hardware back is this
+  // button; without handler app closes with open sheet.
   useEffect(() => {
     const back = webApp()?.BackButton;
     if (!back) return undefined;
@@ -523,8 +502,7 @@ export default function Page() {
       </InsetFrame>
     );
   }
-  // Only a read of the session asked after it ended can bring the app back, so only that read may
-  // spin over the screen that says so.
+  // Only session read asked after end can restore app, so only it may spin over end screen.
   const blocking = sessionEnd
     ? sessionEnd.retrying
       ? null
@@ -533,8 +511,8 @@ export default function Page() {
       ? sessionRead.failure
       : null;
   if (blocking) {
-    // Retrying with the proof the server just refused refuses again. Only reopening from Telegram
-    // brings a new one, so that is the way out offered.
+    // Retry with refused proof refuses again. Only reopening from Telegram brings new proof, so offer
+    // that.
     const telegram = webApp();
     const relaunch = needsRelaunch(blocking) && telegram !== undefined;
     return (
@@ -557,14 +535,14 @@ export default function Page() {
 
   const bar = session.bar;
   const closeSheet = () => setSheet(NO_SHEET);
-  /** Closes the sheet an action was started from, and no sheet opened since. */
+  /** Closes sheet action started from, never sheet opened since. */
   const closeIfStill = (from: OpenSheet) => setSheet((current) => closedIfStill(current, from));
-  // The server's day, not the one this phone read when it opened: a shift left open overnight.
+  // Server's day, not phone's at open: shift may stay open overnight.
   const today = shiftOnScreen?.today ?? bar.today;
-  // ISO dates compare as strings. An evening that is over is read, not written into.
+  // ISO dates compare as strings. Past evening read-only.
   const isPast = shiftDate < today;
-  // The time chosen, and what booking it does, come from the answer to the question on screen: the
-  // answer drawn while another loads was for another evening or party.
+  // Chosen time and its effect come from answer to question on screen: answer drawn while another
+  // loads was for other evening or party.
   const timesOnScreen = timesRead.value;
   const chosen = chosenTime(timesOnScreen, chosenMinutes);
 
@@ -581,12 +559,12 @@ export default function Page() {
   const book = exclusive(async () => {
     if (chosen === null || timesOnScreen === null) return;
     try {
-      // What the button said this booking replaces. The server refuses rather than replace otherwise.
+      // Replace only what button said. Server refuses otherwise.
       const answer = await api.book(serviceDate, chosen, partySize, timesOnScreen.replacing);
       haptics.success();
       setTaken({ booking: answer.booking, moved: answer.replaced.length > 0 });
-      // The answer already says what was booked. Showing it does not wait on rereading the home
-      // screen, whose failure must never turn a booking that happened into an error.
+      // Answer already says what was booked. Do not wait on home reread: its failure must never turn
+      // done booking into error.
       amendSession((current) => ({
         ...current,
         bookings: heldAfter(current.bookings, answer.replaced, answer.booking),
@@ -597,14 +575,14 @@ export default function Page() {
       report(error, "guest");
       const { code } = failureOf(error);
       if (code === "booking_changed") {
-        // What the guest holds changed since the button was drawn. The picker stays as it is; the
-        // button redraws from the times as they stand now, for them to look at and press again.
+        // Guest holdings changed since button drawn. Picker stays; button redraws from current times
+        // for guest to check and press again.
         refresh(loadSession);
         refresh(loadDays);
         refresh(loadTimes);
         return;
       }
-      // Refused for what the guest already holds: the labels were drawn from bookings that changed.
+      // Refused for guest holdings: labels drawn from changed bookings.
       if (code === "already_booked_tonight") refresh(loadSession);
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
       // showing a time that no longer exists.
@@ -614,8 +592,8 @@ export default function Page() {
     }
   });
 
-  // No undo: the confirmation sheet was the protection. Booking the slot again could replace another
-  // booking the guest holds, and could never bring back one that had begun.
+  // No undo: confirmation sheet was protection. Rebooking slot could replace another held booking and
+  // never restores one already begun.
   const cancelMine = exclusive(async (from: OpenSheet, was: GuestBooking) => {
     try {
       await api.cancelMine(was.id);
@@ -655,8 +633,8 @@ export default function Page() {
   });
 
   const decision = bookingDecision(partySize, serviceDate, bar, chosen, timesOnScreen);
-  // A guest holding a plan moves it from its card; one holding only a table tonight, or nothing,
-  // books another evening from here.
+  // Guest with plan moves it from its card; with only tonight's table or nothing, books another
+  // evening here.
   const holdsPlan = session.bookings.some((held) => held.rebooking_replaces === "any_evening");
   const guestFooter =
     screen === "done" ? (
@@ -670,11 +648,9 @@ export default function Page() {
   // ---- staff actions -------------------------------------------------------------------------
 
   /**
-   * Sends a staff write and puts the evening it answered with on record for that evening.
-   *
-   * The answer is the room after the write, every booking in it, so a party the server reseated is
-   * shown where it now sits, and a sheet on a booking that is gone closes. It is numbered when the
-   * write is sent: a room of the same version read after that is fresher, one read before is not.
+   * Records answered room for its evening. Answer is full room after write: reseated party shows where
+   * it sits, sheet on gone booking closes. Numbered at send: same-version room read after is fresher,
+   * read before is not.
    */
   const writeShift = async <A extends { shift: ShiftView }>(send: () => Promise<A>): Promise<A> => {
     const sent = markShift();
@@ -684,11 +660,8 @@ export default function Page() {
   };
 
   /**
-   * One tap, applied at once, with the way back attached.
-   *
-   * The undo goes back to the attendance the server says the booking had just before the change,
-   * so taking back a mistake restores the room — even when a colleague changed it a moment earlier
-   * and this phone had not heard yet.
+   * One tap, applied at once, with undo. Undo restores attendance server says booking had just before,
+   * even when colleague changed it unseen by this phone.
    */
   const setAttendance = exclusive(
     async (booking: ShiftBooking, attendance: Attendance, undoable = true) => {
@@ -749,12 +722,12 @@ export default function Page() {
       tell(`Отправлено ${booking.guest_name}: «${text}»`);
     } catch (error) {
       report(error, "staff");
-      // The room on screen said the bot could reach the guest. Read again, it says it cannot.
+      // Room on screen said bot reaches guest; server says not, so reread.
       if (failureOf(error).code === "no_bot_chat") refresh(loadShift);
     }
   });
 
-  /** What a rearrangement did, per booking, by name — never a count of what it hoped to do. */
+  /** What rearrangement did, per booking by name, never count of intent. */
   const rearranged = (
     reconciliation: Reconciliation,
     lead: string,
@@ -766,8 +739,7 @@ export default function Page() {
   };
 
   /**
-   * Closing tables is as reversible as opening them: the way back opens exactly the tables this tap
-   * closed, as the server counted them — not one a colleague had already closed.
+   * Undo opens exactly tables this tap closed, as server counted, not ones colleague already closed.
    */
   const closeTables = exclusive(async (from: OpenSheet, closures: Closure[], number: number) => {
     closeIfStill(from);
@@ -799,7 +771,7 @@ export default function Page() {
     );
   });
 
-  /** Opening tables comes back as closures the server removed, each with the reason it had. */
+  /** Answer lists closures server removed, each with its reason. */
   const openTables = exclusive(async (from: OpenSheet, tableIds: string[], number: number) => {
     closeIfStill(from);
     try {
@@ -844,7 +816,7 @@ export default function Page() {
       tell(`Посадили за стол ${answer.booking.table_number}.`);
     } catch (error) {
       report(error, "staff");
-      // A refusal carries no room, and it usually means the room on screen is behind.
+      // Refusal carries no room and usually means shown room is behind.
       refresh(loadShift);
     }
   });
@@ -857,7 +829,7 @@ export default function Page() {
       const answer = await writeShift(() =>
         api.createStaffBooking(shiftDate, minutes, sent.partySize, sent.name, tableId),
       );
-      // A form already holding the next guest is not this one's to clear.
+      // Form already holding next guest is not this one's to clear.
       setManual((current) => (same(current, sent) ? EMPTY_MANUAL : current));
       closeIfStill(from);
       const created = answer.booking;
@@ -870,7 +842,7 @@ export default function Page() {
     }
   });
 
-  /** The report says whether the guest was told: not knowing means sending a second message. */
+  /** Report says whether guest was told: not knowing means second message. */
   const moveBooking = exclusive(
     async (
       from: OpenSheet,
@@ -917,7 +889,7 @@ export default function Page() {
       const saved = await api.saveSettings(sent);
       const meanwhile = editsDuringSave.current ?? [];
       changePair((current) => savedInto(current, saved.settings, meanwhile));
-      // On record as an answer too: a reread that failed before this save is no longer news.
+      // Record as read answer too: reread failure from before this save is stale.
       putSettings(SETTINGS, () => saved.settings, asked);
       const parts = ["Настройки сохранены.", reconciliationReport(saved.reconciliation)];
       if (saved.above_cap > 0) {
@@ -930,8 +902,8 @@ export default function Page() {
       const failure = failureOf(error);
       const refused = refusalOf(failure);
       if (refused) {
-        // Kept on the save bar. A sheet opened while the save was on its way is somebody's next
-        // decision, so the reasons wait there rather than being thrown over it.
+        // Kept on save bar. Sheet opened during save is somebody's next decision; reasons must not
+        // cover it.
         setRefusal(refused);
         if (openings.current === openedBefore) openSheet({ kind: "conflict", refusal: refused });
       } else if (failure.code === "settings_changed") {
@@ -1106,8 +1078,7 @@ export default function Page() {
             loadFailure={staffTimesRead.failure}
             timesPending={staffTimesRead.pending}
             onClose={closeSheet}
-            // A table chosen for the old party may not seat the new one, so the choice goes back to
-            // the room's own best fit.
+            // Table chosen for old party may not seat new one; reset to room's best fit.
             onPartySize={(party) => setMove((current) => ({ ...current, party, table: null }))}
             onPick={(minutes) => setMove((current) => ({ ...current, minutes }))}
             onTakenSlot={() => tell("Это время занято. Свободное — без зачёркивания.")}

@@ -1,7 +1,5 @@
-//! When a shift stops seating, on every kind of night the clocks can make.
-//!
-//! Each answer is held, minute by minute, to the wall itself: where it reads, one minute after another,
-//! rather than to the function that computes it.
+//! When shift stops seating, on every clock-change night. Checked minute by minute against wall
+//! reading, not against function under test.
 
 mod common;
 
@@ -15,20 +13,18 @@ use common::{BELGRADE, block, booking, date, force, grid, seated, table, utc};
 
 const MINUTE: TimeDelta = TimeDelta::minutes(1);
 
-/// Every minute from 20:00 UTC on `day` to 05:00 UTC the next morning: past midnight on the wall, and
-/// past the latest any shift the limits allow can run.
+/// 20:00Z to 05:00Z next morning: past midnight, past latest shift limits allow.
 fn minutes_of_the_night(day: ServiceDay) -> impl Iterator<Item = DateTime<Utc>> {
     let date = day.date();
     let dusk = utc(2026, date.month(), date.day(), 20, 0);
     (0..9 * 60).map(move |minute| dusk + TimeDelta::minutes(minute))
 }
 
-/// Where the wall stands at `instant`, in minutes into `day`.
 fn wall(day: ServiceDay, instant: DateTime<Utc>) -> i32 {
     minutes_within(day, instant, BELGRADE)
 }
 
-/// The last minute of the night at which the wall comes up to `close_minutes` from a minute before it.
+/// Last minute wall comes up to `close_minutes` from minute before.
 fn closing_by_the_wall(day: ServiceDay, close_minutes: i32) -> DateTime<Utc> {
     minutes_of_the_night(day)
         .filter(|now| wall(day, *now - MINUTE) < close_minutes && close_minutes <= wall(day, *now))
@@ -36,8 +32,7 @@ fn closing_by_the_wall(day: ServiceDay, close_minutes: i32) -> DateTime<Utc> {
         .expect("every night comes up to closing")
 }
 
-/// Every sitting the grid sells on `day`: each arrival time from opening, a step apart, up to closing
-/// less a turn, that the clocks do not skip.
+/// Grid arrivals from opening, step apart, to closing less turn, skipped ones dropped.
 fn sittings(config: &ValidConfig, day: ServiceDay) -> Vec<Interval> {
     let hours = config.week.for_service_day(day);
     let step = usize::try_from(config.slot_step_minutes).expect("a positive step");
@@ -141,9 +136,8 @@ fn today_walk_ins_their_ends_what_is_finished_and_the_hours_agree_minute_by_minu
 
 #[test]
 fn on_the_autumn_night_every_closing_minute_closes_when_the_wall_last_comes_up_to_it() {
-    // Every minute a bar may close at, the repeated hour's first and last among them, read against the
-    // wall minute by minute. The turn and step only move when the last sitting ends, which the test
-    // above crosses with fewer closings.
+    // Every closing minute, repeated hour's first and last included. Turn and step only move last
+    // sitting end, which test above crosses with fewer closings.
     let saturday = date(2026, 10, 24);
     let sunday = date(2026, 10, 25);
     for close_minutes in 1530..=1680 {
@@ -170,9 +164,8 @@ fn on_the_autumn_night_every_closing_minute_closes_when_the_wall_last_comes_up_t
 #[test]
 fn a_walk_in_is_offered_exactly_the_tables_it_would_be_seated_at_minute_by_minute_on_the_autumn_night()
  {
-    // Saturday 24 October 2026 closes at 04:00, with one-hour sittings. Both two-tops are booked at the
-    // first 02:30, from 00:30Z to 01:30Z, and the four-top is shut for the night. At 00:40Z the wall reads
-    // 02:40 for the first time, and a party seated then would sit into both bookings.
+    // Sat 24 Oct 2026 closes 04:00, one-hour sittings. Both two-tops booked at first 02:30 (00:30Z to
+    // 01:30Z); four-top shut. At 00:40Z wall first reads 02:40; party seated then overlaps both.
     let saturday = date(2026, 10, 24);
     let config = force(BarConfig {
         tables: vec![table(1, 2, "Бар"), table(2, 2, "Бар"), table(3, 4, "Зал")],
@@ -244,9 +237,8 @@ fn a_walk_in_is_offered_exactly_the_tables_it_would_be_seated_at_minute_by_minut
 
 #[test]
 fn on_the_night_the_clocks_go_back_a_bar_closing_at_two_closes_the_first_time_the_wall_reads_two() {
-    // Saturday 24 October 2026 closes at 02:00, which the wall reaches from 01:59 at 00:00Z. At 01:00Z it
-    // falls back from 02:59 to 02:00, which is not closing again: a walk-in used to be seated at 00:30Z
-    // until 01:00Z, arriving at 02:30 and leaving at 02:00.
+    // Sat 24 Oct 2026 closes 02:00, reached from 01:59 at 00:00Z. At 01:00Z wall falls back from 02:59
+    // to 02:00: not closing again.
     let config = force(grid(1560, 120, 30));
     let saturday = date(2026, 10, 24);
 

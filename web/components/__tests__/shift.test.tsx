@@ -52,8 +52,7 @@ describe("the pulse", () => {
   });
 
   it("counts the guests at the tables as the server does, not by the wall clock", () => {
-    // On the night the clocks go back a party can sit from the first 02:40 to the second, a range the
-    // wall clock reads as empty. Only the server, counting in instants, sees them.
+    // Clocks go back: party seated first 02:40 to second 02:40 is empty in wall minutes; only server, in instants, sees it.
     render(
       <Pulse
         shift={shift({

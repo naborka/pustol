@@ -1,13 +1,12 @@
 /**
- * The typed client.
+ * Typed client.
  *
- * The first call carries the payload Telegram signed; the server answers it with a session, and
- * every call after carries that. The payload is accepted for an hour and Telegram never refreshes
- * it while the app stays open. The session is held in this closure only — never in storage, never
- * in a URL.
+ * First call sends Telegram signed payload; server answers with session token, later calls send that.
+ * Payload valid one hour only, and Telegram never refreshes it while app stays open. Token lives only
+ * in this closure, never storage or URL.
  *
- * A session the server refused for a reason only reopening the app answers is ended here, for every
- * call: nothing but a read of the session asked after the end is sent until one of those answers.
+ * Session refused for reason only relaunch fixes ends here for every call: only session read asked
+ * after end is sent, until one answers.
  */
 
 import type { IsoDate } from "./format";
@@ -25,17 +24,15 @@ export type Source = "app" | "staff" | "walk";
 export type SlotState = "free" | "taken" | "past";
 
 /**
- * What a new booking would do to one the guest already holds — the server's rule, never guessed here.
+ * What new booking does to one guest already holds. Server rule, never guessed here.
  *
- * `any_evening`: a plan not yet begun, replaced by a booking on any evening, while some bookable
- * evening still has an arrival time the guest's other bookings do not hold. `same_evening`: a
- * no-show whose table is still held, replaced only by a booking on its own evening while that evening
- * still has an arrival time by the server's own clock and slot grid. `null`: no booking the guest can
- * make now replaces it — a party at the table, a held no-show with no arrival time left, a plan with
- * no evening left to move to, or a booking on an evening guests can no longer book. «Перенести» is
- * offered exactly when it is not `null`.
- *
- * It never says whether the evening is taken: that is `holds_evening`.
+ * `any_evening`: plan not begun, replaced by booking on any evening, while some bookable evening
+ * still has arrival time guest's other bookings do not hold.
+ * `same_evening`: no-show with table still held, replaced only by booking on its own evening while
+ * that evening still has arrival time by server clock and slot grid.
+ * `null`: nothing guest can book now replaces it: party at table, held no-show with no arrival time
+ * left, plan with no evening to move to, or evening guests can no longer book.
+ * «Перенести» offered exactly when not `null`. Never says whether evening taken: see `holds_evening`.
  */
 export type Rebooking = "any_evening" | "same_evening" | null;
 
@@ -46,10 +43,10 @@ export interface GuestBooking {
   end_minutes: number;
   party_size: number;
   status: BookingStatus;
-  /** Its window has begun, by the server's clock. */
+  /** Window begun, by server clock. */
   started: boolean;
   rebooking_replaces: Rebooking;
-  /** A new booking on its evening would be refused because of it. */
+  /** New booking on its evening refused because of it. */
   holds_evening: boolean;
 }
 
@@ -67,28 +64,25 @@ export interface BarView {
   last_arrival_minutes: number | null;
   /** The bar's own clock, in wall-clock minutes into today's shift. */
   now_minutes: number;
-  /** Today's opening in wall-clock minutes while it is still ahead, by the server's clock; else null. */
+  /** Today's opening in wall minutes while still ahead by server clock; else null. */
   opens_at_minutes: number | null;
-  /**
-   * Whether the bar is serving now, decided on instants by the opening and closing walk-ins go by:
-   * on the night the clocks change, wall minutes say the wrong thing.
-   */
+  /** Decided on instants by walk-in opening and closing: wall minutes wrong on clock-change night. */
   open_now: boolean;
-  /** Where a person at the bar answers, already turned into a label and a link. */
+  /** Where person at bar answers, already label and link. */
   contact: { label: string; url: string } | null;
 }
 
 export interface Session {
-  /** Sent instead of Telegram's payload from here on, which is accepted for an hour only. */
+  /** Sent instead of Telegram payload from here on; payload valid one hour only. */
   session_token: string;
   user: { id: number; first_name: string; username: string | null };
   is_staff: boolean;
   reminders: { opted_in: boolean; deliverable: boolean; should_ask: boolean };
   bar: BarView;
-  /** Every booking still holding a table for the guest, soonest first. */
+  /** Every booking still holding table for guest, soonest first. */
   bookings: GuestBooking[];
   bookable_days: IsoDate[];
-  /** The earliest time tonight still has for a new booking, or null when it has none. */
+  /** Earliest time tonight still free for new booking; null when none. */
   today_free_from_minutes: number | null;
   /** The party size that answer speaks for, and the one the picker opens on. */
   today_free_for_party: number;
@@ -100,7 +94,7 @@ export interface DayOffer {
   closed: boolean;
   /** The earliest arrival time still free for this party, null when the day holds none. */
   free_from_minutes: number | null;
-  /** The guest already holds this evening with a booking a new one would not replace. */
+  /** Guest already holds this evening with booking new one would not replace. */
   booked: boolean;
 }
 
@@ -123,28 +117,27 @@ export interface Availability {
   free_count: number;
 }
 
-/** The guest's times, with what a booking on that evening would do to the ones they hold. */
 export interface GuestAvailability extends Availability {
-  /** The bookings a booking on this evening would replace, to be sent back with it. */
+  /** Bookings a booking this evening replaces; send back with it. */
   replacing: string[];
-  /** The guest already holds this evening with a booking a new one would not replace. */
+  /** Guest already holds this evening with booking new one would not replace. */
   booked: boolean;
 }
 
 export interface StaffSlot extends Slot {
-  /** The tables free for this slot's window for this party, the booking being moved set aside. */
+  /** Tables free for slot window for this party, moved booking set aside. */
   free_table_ids: string[];
 }
 
 export interface StaffAvailability extends Availability {
   slots: StaffSlot[];
-  /** Tables free for the set-aside booking's own stored window; null when nothing is set aside. */
+  /** Tables free for set-aside booking's own stored window; null when nothing set aside. */
   kept_free_table_ids: string[] | null;
 }
 
 export interface BookingTaken {
   booking: GuestBooking;
-  /** Every booking this one replaced, soonest first. */
+  /** Soonest first. */
   replaced: string[];
 }
 
@@ -165,11 +158,11 @@ export interface ShiftBooking {
   source: Source;
   /** What staff wrote on this booking. Never shown to the guest and never sent anywhere. */
   note: string | null;
-  /** The guest has a Telegram account and the bot may write to it. */
+  /** Guest has Telegram account and bot may write to it. */
   reachable_by_bot: boolean;
-  /** Its window has begun, by the server's clock: its time is history from then on. */
+  /** Window begun by server clock; its time is history from then. */
   started: boolean;
-  /** Its hold on its table is over, by the server's clock: it can be neither moved nor cancelled. */
+  /** Table hold over by server clock; cannot be moved or cancelled. */
   finished: boolean;
 }
 
@@ -190,17 +183,14 @@ export interface ShiftDay {
 
 export interface ShiftView {
   service_date: IsoDate;
-  /** The bar's running service day by the server's clock, which a phone left open overnight is not. */
+  /** Bar's running service day by server clock; phone left open overnight is not. */
   today: IsoDate;
-  /**
-   * The bar's counter of changes, read in the same snapshot as the rest. A room with a lower version is
-   * older than the one on screen, whenever it arrives.
-   */
+  /** Bar change counter, same snapshot as rest. Lower version is older room, whenever it arrives. */
   version: number;
   hours: Hours;
   tables: ShiftTable[];
   bookings: ShiftBooking[];
-  /** `seated_now` is counted by the server in instants; null on an evening that is not running. */
+  /** `seated_now` counted by server on instants; null on evening not running. */
   stats: {
     bookings: number;
     guests: number;
@@ -209,14 +199,13 @@ export interface ShiftView {
   };
   now_minutes: number | null;
   /**
-   * When a party seated now gives its table back, in wall-clock minutes of the shift like
-   * `now_minutes`: a turn from now or the closing, whichever comes first, as the server counts it
-   * across a clock change. Null when the server takes no party at the door on this evening now.
+   * When party seated now frees table, in shift wall minutes like `now_minutes`: one turn or closing,
+   * whichever first, counted by server across clock change. Null when server takes no walk-in now.
    */
   walk_in_until_minutes: number | null;
   /**
-   * The active, unblocked tables free for the whole of the window a party seated now would get, as the
-   * server counts it on instants. Empty when the server takes no party at the door now.
+   * Active unblocked tables free for whole window of party seated now, counted by server on instants.
+   * Empty when server takes no walk-in now.
    */
   walk_in_free_table_ids: string[];
   /** The largest party the room could seat this minute; null when none fits or this is not today. */
@@ -235,8 +224,8 @@ export interface Reconciliation {
 }
 
 /**
- * Every staff write that can change the room answers with the evening as it stands after the write,
- * read inside the write's own transaction, so the phone never patches its own copy of the room.
+ * Staff write that can change room answers with evening after write, read in same transaction, so
+ * phone never patches own room copy.
  */
 interface WithShift {
   shift: ShiftView;
@@ -245,11 +234,11 @@ interface WithShift {
 export interface CancelledByStaff extends WithShift {
   booking: ShiftBooking;
   reconciliation: Reconciliation;
-  /** A notice was queued and the bot can reach the guest. */
+  /** Notice queued and bot can reach guest. */
   guest_notified: boolean;
 }
 
-/** An attendance change: the booking now, and the attendance it had just before, for an undo. */
+/** `previous`: attendance just before change, for undo. */
 export interface AttendanceChange extends WithShift {
   booking: ShiftBooking;
   previous: Attendance;
@@ -271,12 +260,12 @@ export interface Rearranged extends WithShift {
 }
 
 export interface TablesClosed extends Rearranged {
-  /** The tables this call closed; one that was already closed is not among them. */
+  /** Tables this call closed; already closed ones excluded. */
   closed: string[];
 }
 
 export interface TablesReopened extends Rearranged {
-  /** The closures this call removed, each with the reason it had. */
+  /** Closures this call removed, each with its reason. */
   reopened: { table_id: string; reason: string }[];
 }
 
@@ -295,9 +284,9 @@ export interface Limits {
   grace_minutes: Bounds;
   seats: Bounds;
   slot_step_minutes: number[];
-  /** The longest each text may be, in characters. */
+  /** Max length per text, in characters. */
   text: { name: number; address: number; message: number; reason: number };
-  /** The most items each list may hold. */
+  /** Max items per list. */
   lists: ListLimits;
 }
 
@@ -319,7 +308,7 @@ export interface SettingsTable {
 export interface SettingsView {
   name: string;
   address: string;
-  /** As the manager typed it; empty when there is none. */
+  /** As manager typed; empty when none. */
   contact: string;
   timezone: string;
   week: Hours[];
@@ -336,7 +325,7 @@ export interface SettingsView {
   staff: { username: string; bound: boolean }[];
   next_table_number: number;
   limits: Limits;
-  /** The bar's count of saves. A save names it, and is refused if anybody saved since. */
+  /** Bar save counter. Save names it; refused if anybody saved since. */
   version: number;
 }
 
@@ -346,10 +335,7 @@ export interface SavedSettings {
   above_cap: number;
 }
 
-/**
- * A table in a proposal. The app names a new table itself, so saving the same proposal twice updates
- * the table the first save made rather than adding a second.
- */
+/** App names new table itself, so saving same proposal twice updates first save's table, not adds second. */
 export interface TableDraft {
   id: string;
   seats: number;
@@ -373,22 +359,20 @@ export interface SettingsDraft {
   message_templates: string[];
   cancel_reasons: string[];
   staff: { username: string }[];
-  /** The version of the settings this proposal was made from. */
+  /** Settings version this proposal made from. */
   version: number;
 }
 
-/** Why the session ended, and whether a read of it asked since is on its way; null while it has not. */
+/** Why session ended, and whether session read asked since is in flight; null while not ended. */
 export type SessionEnd = { failure: ApiFailure; retrying: boolean } | null;
 
 /**
- * How long a call may take before the app stops waiting and says so.
- *
- * A request lost on a basement's signal otherwise leaves a spinner turning for ever. Built on a
- * timer and an `AbortController` rather than `AbortSignal.timeout`, which older iOS webviews lack.
+ * Lost request on weak signal otherwise spins forever. Timer plus `AbortController`, not
+ * `AbortSignal.timeout`: older iOS webviews lack it.
  */
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-/** The call never got an answer: the phone's connection, not the bar's server. */
+/** No answer: phone connection, not bar server. */
 function unreachable(): ApiError {
   return new ApiError(0, { code: "network", message: "the request got no answer" });
 }
@@ -417,8 +401,7 @@ async function request<T>(
     }
 
     if (!response.ok) {
-      // A failure that is not the API's own shape — a proxy error page — is still reported with a
-      // code, so no caller has to handle "undefined" as a state.
+      // Non-API body, such as proxy error page, still gets code, so callers never see undefined.
       let failure: ApiFailure = {
         code: "internal",
         message: `HTTP ${response.status}`,
@@ -451,16 +434,13 @@ function query(params: Record<string, string | number | undefined>): string {
   return search.toString();
 }
 
-/**
- * Every call the app can make, bound to one set of credentials. `onSessionEnd` hears each change to
- * whether the session has ended.
- */
+/** `onSessionEnd` hears each change to whether session ended. */
 export function client(credentials: string, onSessionEnd: (end: SessionEnd) => void = () => {}) {
   let session: string | null = null;
   const authorization = () => (session === null ? `tma ${credentials}` : `session ${session}`);
 
-  // Calls are numbered as they are asked. `at` marks the moment the session was found ended and `told`
-  // the call whose failure is said; a refusal asked before the session last came back is old news.
+  // Calls numbered as asked. `at`: when session found ended. `told`: call whose failure is shown.
+  // Refusal asked before session last resumed is old news.
   let asked = 0;
   let end: { at: number; told: number; error: ApiError } | null = null;
   let resumed = 0;
@@ -508,7 +488,7 @@ export function client(credentials: string, onSessionEnd: (end: SessionEnd) => v
     });
 
   return {
-    /** Asked whether or not the session has ended: an answer asked after the end brings it back. */
+    /** Sent even after session end: answer asked after end resumes session. */
     session: async () => {
       const number = (asked += 1);
       reading.add(number);
@@ -537,7 +517,7 @@ export function client(credentials: string, onSessionEnd: (end: SessionEnd) => v
 
     days: (partySize: number) => get<DayRail>(`/api/days?${query({ party_size: partySize })}`),
 
-    /** `replacing` is what the guest was told this booking replaces; the server refuses otherwise. */
+    /** `replacing`: what guest was told this booking replaces; server refuses mismatch. */
     book: (serviceDate: IsoDate, startMinutes: number, partySize: number, replacing: string[]) =>
       send<BookingTaken>("POST", "/api/booking", {
         service_date: serviceDate,

@@ -1,10 +1,5 @@
--- `pustol-domain` now bounds how many entries each of the bar's lists may hold, and how long a zone's
--- name may be.
---
--- The API refuses to run a bar whose stored configuration the domain would not accept, so a bar
--- already over a bound would answer every request with a server fault after this upgrade. Checked
--- once, here, so that case stops the deploy with a message instead. The numbers are the limits at the
--- time of writing; the domain, not this file, is where they live.
+-- API refuses bar config domain rejects; over-limit list stops deploy here, not every request with server fault.
+-- Numbers copy `pustol-domain` list and zone name limits at time of writing; domain owns them.
 
 do $$
 begin

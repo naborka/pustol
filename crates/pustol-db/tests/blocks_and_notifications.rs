@@ -16,8 +16,7 @@ use common::{
 
 #[tokio::test]
 async fn closing_or_opening_a_table_that_is_not_in_the_room_writes_nothing() {
-    // One that never existed, one of another bar, and one this bar retired. The first used to reach
-    // the database as a foreign key it refused; the second was accepted.
+    // Never existed, another bar's, and retired.
     let store = store().await;
     let (bar, config) = default_bar(&store).await;
     let (_, other) = default_bar(&store).await;
@@ -718,8 +717,8 @@ async fn the_reminder_prompt_is_shown_once_and_then_left_alone() {
     assert!(!opted.reminders.should_ask());
 }
 
-/// A 20:00 reminder claimed by a worker at 17:00 Belgrade, and the booking moved to 23:00 a minute
-/// later, while that worker is still waiting on Telegram.
+/// 20:00 reminder claimed at 17:00 Belgrade; booking moved to 23:00 a minute later, while worker
+/// still waits on Telegram.
 async fn reminder_claimed_then_moved(
     store: &pustol_db::Store,
 ) -> (pustol_domain::allocator::BookingId, PendingNotification) {
@@ -844,7 +843,7 @@ async fn a_message_being_delivered_is_not_handed_to_a_second_worker() {
         store.claim_due(10, morning()).await.expect("reads").len(),
         1
     );
-    // The first worker is still waiting on Telegram and has recorded nothing yet.
+    // First worker still waits on Telegram, nothing recorded.
     assert!(
         store
             .claim_due(10, morning() + Duration::seconds(30))

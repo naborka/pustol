@@ -1,9 +1,5 @@
--- `pustol-domain` now bounds how long the bar's own texts may be.
---
--- The API refuses to run a bar whose stored configuration the domain would not accept, so a bar
--- already holding a longer text would answer every request with a server fault after this upgrade.
--- Checked once, here, so that case stops the deploy with a message instead. The numbers are the
--- limits at the time of writing; the domain, not this file, is where they live.
+-- API refuses bar config domain rejects; over-limit text stops deploy here, not every request with server fault.
+-- Numbers copy `pustol-domain` text limits at time of writing; domain owns them.
 
 do $$
 begin

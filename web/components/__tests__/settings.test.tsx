@@ -16,7 +16,7 @@ afterEach(cleanup);
 
 type ScreenProps = Parameters<typeof SettingsScreen>[0];
 
-/** The page holds the open section; this stands in for it. */
+/** Stands in for page, which holds open section. */
 function Settings(props: Omit<ScreenProps, "section" | "onSection">) {
   const [section, setSection] = useState<Section | null>(null);
   return <SettingsScreen {...props} section={section} onSection={setSection} />;
@@ -101,8 +101,7 @@ describe("the index", () => {
   });
 
   it("adds a message as an empty field to fill in, not as words nobody chose", async () => {
-    // The placeholder used to be added as the message itself: «Новое сообщение» could be saved and
-    // sent to a guest.
+    // Placeholder must never become message text: «Новое сообщение» could reach guest.
     const view = settingsView();
     let current: SettingsDraft = draftOf(view);
     const draw = () => (
@@ -205,7 +204,7 @@ describe("a list at its bound", () => {
   }
 
   it("will not add one more, and adds freely below it", async () => {
-    // The fixture holds two tables, four messages, four reasons and three staff.
+    // Fixture: two tables, four messages, four reasons, three staff.
     const full = { ...LIMITS, lists: { zones: 3, tables: 2, message_templates: 4, cancel_reasons: 4, staff: 3 } };
     for (const [limits, blocked] of [
       [full, true],

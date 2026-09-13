@@ -60,7 +60,7 @@ describe("what a failure says", () => {
   });
 
   it("tells a manager somebody else saved the settings first, without asking them to type it again", () => {
-    // The screen folds the other save into the edit; «повторите» sent managers retyping what was kept.
+    // Screen merges other save into edit; «повторите» makes managers retype kept edits.
     const said = messageFor(failure("settings_changed"), "staff");
     expect(said).toMatch(/кто-то/i);
     expect(said).not.toMatch(/повторите/i);
@@ -125,7 +125,7 @@ describe("what the newest refusals say", () => {
   });
 
   it("tells staff the bot cannot write to a guest without guessing why", () => {
-    // A guest from the app who blocked the bot is refused the same way as one written down by hand.
+    // App guest who blocked bot gets same refusal as hand-written guest.
     expect(messageFor(failure("no_bot_chat"), "staff")).toBe(
       "Бот не может написать этому гостю — позвоните или откройте чат.",
     );

@@ -152,8 +152,8 @@ export function AppShell({
         paddingTop: insets.top,
         paddingLeft: insets.left,
         paddingRight: insets.right,
-        // The bottom bars pad themselves. A guest screen with neither — a booking on the home
-        // screen and no staff tabs — has only this to keep its last card off the home indicator.
+        // Bottom bars pad themselves. Guest screen with neither (home with booking, no staff tabs)
+        // needs this to keep last card off home indicator.
         paddingBottom: !staff && !footer ? insets.bottom : 0,
       }}
     >

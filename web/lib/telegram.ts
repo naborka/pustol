@@ -77,7 +77,7 @@ export interface WebApp {
    * than the room it was given and was part of why its bottom bar ended up under Telegram's chrome.
    */
   requestFullscreen?: () => void;
-  /** Bot API 6.2 and later: Telegram asks before closing while this is on. */
+  /** Bot API 6.2 and later: Telegram asks before closing while on. */
   enableClosingConfirmation?: () => void;
   disableClosingConfirmation?: () => void;
   setHeaderColor?: (color: string) => void;
@@ -133,8 +133,8 @@ export const haptics = {
 };
 
 /**
- * Opens a link: a Telegram one inside Telegram, or outside it in a new tab unless `outside` says in
- * place; any other, such as a phone number, in place, where the device hands it to the dialer.
+ * `t.me` link: Telegram inside Telegram, else new tab unless `outside` is `in_place`. Other links,
+ * such as phone, in place, so device hands them to dialer.
  */
 export function openLink(url: string, outside: "new_tab" | "in_place" = "new_tab"): void {
   if (typeof window === "undefined") return;
@@ -155,7 +155,7 @@ export function openChatWith(username: string): void {
   openLink(`https://t.me/${username}`);
 }
 
-/** Opens the bar's contact, whose link the server has already made a Telegram account or a phone. */
+/** Server already made link a Telegram account or phone. */
 export function openContact(url: string): void {
   openLink(url, "in_place");
 }

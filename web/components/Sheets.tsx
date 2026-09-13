@@ -127,8 +127,8 @@ export function BookingSheet({
   const seated = booking.table_id !== null;
   const standing = standingOf(booking, nowMinutes, graceMinutes);
   const title = booking.source === "walk" ? "Гости без брони" : booking.guest_name;
-  // A booking whose table has been given back is a record, not a plan: the server will neither move
-  // nor cancel it, so neither is offered. Its clock says so, not this phone's.
+  // Booking whose table was given back is record: server neither moves nor cancels it, so neither
+  // offered. Server clock decides, not phone's.
   const changeable = !booking.finished;
 
   return (
@@ -294,7 +294,7 @@ export function ChoiceSheet({
   title: string;
   hint: string;
   choices: string[];
-  /** What an empty list says; null when the hint already says why there is nothing to choose. */
+  /** Empty-list text; null when hint already says why nothing to choose. */
   empty?: string | null;
   onClose: () => void;
   onChoose: (choice: string) => void;
@@ -321,10 +321,8 @@ export function ChoiceSheet({
 }
 
 /**
- * Why a booking is being cancelled, chosen from the bar's own list.
- *
- * It promises the guest a message only when the bot can reach them: telling staff "the guest will
- * be told" about a guest nobody can write to is how a party turns up to a table that was given away.
+ * Cancel reason from bar's list. Promises guest message only when bot reaches guest: false "guest
+ * will be told" sends party to table given away.
  */
 export function CancelReasonSheet({
   open,
@@ -355,8 +353,8 @@ export function CancelReasonSheet({
 }
 
 /**
- * A message to the guest, chosen from the bar's own list, offered only while the bot can reach them.
- * A refresh or a refused send can say it no longer can; the sheet then says what to do instead.
+ * Guest message from bar's list, offered only while bot reaches guest. Refresh or refused send can
+ * revoke that; sheet then says what to do instead.
  */
 export function MessageSheet({
   open,
@@ -424,7 +422,7 @@ export function ConfirmSheet({
   );
 }
 
-/** Why the last settings save was refused, in the words the kind of refusal needs. */
+/** Last settings save refusal, worded per refusal kind. */
 export function ConflictSheet({
   open,
   refusal,
@@ -754,7 +752,7 @@ function TableChoiceList({
   );
 }
 
-/** The evening's times as staff read them: a spinner, why they could not be read, or `children`. */
+/** Staff times read: spinner, failure reason, or `children`. */
 function TimesRead({
   availability,
   loadFailure,
@@ -825,9 +823,8 @@ function SlotSection({
 }
 
 /**
- * The tables the times on screen name as free at `minutes`, none while those times answer a question
- * the sheet has since changed. At `keptAt`, a moved booking's own start, the tables free for its own
- * stored window, which no slot of the current grid need describe.
+ * Tables shown times list free at `minutes`; none while times answer changed question. At `keptAt`
+ * (moved booking's own start): tables free for its stored window, which current grid need not show.
  */
 function offersAt(
   shift: ShiftView,
@@ -918,7 +915,7 @@ export function ManualBookingSheet({
   chosenTableId: string | null;
   guestName: string;
   loadFailure: ApiFailure | null;
-  /** The times on screen answer the party size before the last change. */
+  /** Shown times answer party size before last change. */
   timesPending?: boolean;
   onClose: () => void;
   onPartySize: (size: number) => void;
@@ -1022,13 +1019,13 @@ export function MoveBookingSheet({
   shift: ShiftView | null;
   turnMinutes: number;
   maxParty: number;
-  /** How many are coming now. «Нас будет шесть» is the call a bar takes most. */
+  /** Current party, not booking's stored size. «Нас будет шесть» is most common call. */
   partySize: number;
   availability: StaffAvailability | null;
   chosenMinutes: number | null;
   chosenTableId: string | null;
   loadFailure: ApiFailure | null;
-  /** The times on screen answer a question the sheet has since changed. */
+  /** Shown times answer question sheet since changed. */
   timesPending?: boolean;
   onClose: () => void;
   onPartySize: (size: number) => void;

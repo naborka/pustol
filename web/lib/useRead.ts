@@ -1,10 +1,9 @@
 /**
- * The one way the app reads anything: the session, a shift, the settings, a day rail, a time grid.
+ * Only way app reads: session, shift, settings, day rail, time grid. Rule lives in `reads.ts`; this
+ * binds it to React.
  *
- * The rule itself lives in `reads.ts`; this is where it meets React. The question asked is always
- * the question on screen when the read starts, even when the call comes from a retry an older
- * render set up. Every question keeps its own answer, so what is drawn is the answer to the
- * question on screen now, never the last answer that happened to arrive.
+ * Question asked is always one on screen when read starts, even from retry set up by older render.
+ * Each question keeps own answer, so drawn answer is for question on screen now, never last arrival.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -25,25 +24,23 @@ import {
   type Order,
 } from "./reads";
 
-/** A read the screen is asking: what it is about, and how to ask it. */
 export interface Question<T> {
   key: string;
   ask: () => Promise<T>;
 }
 
-/** How many questions neither on screen nor on their way keep what was heard of them. */
+/** Questions neither on screen nor in flight that keep their record. */
 const KEPT_ASIDE = 3;
 
 export function useRead<T>(
   question: Question<T> | null,
-  /** A read's answer was put on record. A write's own answer is its writer's to act on. */
+  /** Read answer put on record. Write answer is its writer's to act on. */
   onAnswer: (answer: T) => void,
-  /** How the server orders answers to this question, when it does. */
   order?: Order<T>,
 ) {
   const [ledger, setLedger] = useState<Ledger<T>>(EMPTY_LEDGER);
   const ledgerNow = useRef<Ledger<T>>(EMPTY_LEDGER);
-  // The answer last applied while its question was on screen, drawn while a new question loads.
+  // Last answer applied while its question on screen; drawn while new question loads.
   const [lastOnScreen, setLastOnScreen] = useState<T | null>(null);
   const latest = useRef({ question, onAnswer, order });
   useEffect(() => {
@@ -64,7 +61,7 @@ export function useRead<T>(
       return number;
     };
     return {
-      /** Asks the question on screen now. */
+      /** Asks question on screen now, not at render. */
       load: async () => {
         const asking = latest.current.question;
         if (!asking) return;
@@ -89,10 +86,7 @@ export function useRead<T>(
         if (asking.key === keyNow()) setLastOnScreen(answer);
         latest.current.onAnswer(answer);
       },
-      /**
-       * Puts a write's own answer about `key` on record, made on the value there now and numbered
-       * `sent`, the mark taken when the write was sent; without one, now.
-       */
+      /** Records write answer about `key`, built on value there now, numbered `sent` (mark at send); default now. */
       put: (
         key: string,
         change: (current: T | undefined) => T | undefined,
@@ -100,7 +94,7 @@ export function useRead<T>(
       ): void => {
         commit(written(ledgerNow.current, key, sent, change, latest.current.order).ledger);
       },
-      /** A moment every read asked from now on comes after. */
+      /** Every read asked after this comes later. */
       mark,
     };
   }, []);
@@ -110,16 +104,11 @@ export function useRead<T>(
   const failure = failureOn(ledger, key);
   return {
     ...actions,
-    /** The answer on record for the question on screen, or null. */
     value,
-    /**
-     * What to draw: that answer, or while there is none yet, the one shown for the question before —
-     * never once this question has failed, since another question's answer does not stand in for it.
-     */
+    /** `value`, or while none, previous question's answer. Never after this question failed. */
     drawn: value ?? (failure ? null : lastOnScreen),
-    /** The failure of the newest read of the question on screen, once nothing else is on its way. */
+    /** Newest read failure of question on screen, only once nothing else in flight. */
     failure,
-    /** A read of the question on screen is on its way. */
     pending: pendingOn(ledger, key),
   };
 }

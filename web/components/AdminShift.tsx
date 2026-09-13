@@ -625,8 +625,8 @@ export function TablesPane({
   const orphans = byTable.get(null) ?? [];
 
   /** One booking, drawn over the hours it actually holds its table for. */
-  // A function per booking, not a component declared in here: a component defined during render is
-  // a new type every render, and React remounts every block whenever anything on the page changes.
+  // Function, not inner component: component defined in render is new type each render, so React
+  // remounts every block on any change.
   const block = (booking: ShiftBooking) => {
     const standing = standingOf(booking, shift.now_minutes, graceMinutes);
     const held = occupancyEnd(booking) - booking.start_minutes;
@@ -1034,14 +1034,13 @@ export function ShiftActions({
   onWalkIn,
   onManual,
 }: {
-  /** The server takes a party at the door on this evening now. */
+  /** Server takes walk-in party on this evening now. */
   seatsNow: boolean;
   onWalkIn: () => void;
   onManual: () => void;
 }) {
   if (!seatsNow) {
-    // Seating somebody "now" on another evening, or before the doors open, is not a state this app
-    // may offer, so the button is not there to be pressed rather than there and refused.
+    // Walk-in on another evening or before doors open is not offered: button absent, not refused.
     return <CardAction tone="primary" label="Записать гостя" onClick={onManual} />;
   }
   return (

@@ -12,7 +12,6 @@ export interface ApiFailure {
   detail?: Record<string, unknown>;
 }
 
-/** A failure that carries the API's own code, so callers can decide what to say. */
 export class ApiError extends Error {
   readonly failure: ApiFailure;
   readonly status: number;
@@ -25,7 +24,6 @@ export class ApiError extends Error {
   }
 }
 
-/** A failure as the API described it, or as close as the app can get. */
 export function failureOf(error: unknown): ApiFailure {
   return error instanceof ApiError ? error.failure : { code: "internal", message: String(error) };
 }
@@ -105,18 +103,12 @@ export function needsRelaunch(failure: ApiFailure | null): boolean {
   );
 }
 
-/**
- * Whether asking again can bring a different answer. The same request with the same proof meets the
- * same refusal, so a way to retry it would be a button that never works.
- */
+/** Same request with same proof meets same refusal; retry button would never work. */
 export function canRetry(failure: ApiFailure): boolean {
   return !needsRelaunch(failure) && failure.code !== "forbidden";
 }
 
-/**
- * What to say where a read's answer would have been: `generic` while asking again may help, and
- * the failure's own words once it cannot, which is when the reason is the only thing worth saying.
- */
+/** `generic` while retry may help; failure's own words once it cannot. */
 export function readFailureText(failure: ApiFailure, audience: Audience, generic: string): string {
   return canRetry(failure) ? generic : messageFor(failure, audience);
 }

@@ -1,7 +1,4 @@
--- The room version moves at most once per transaction.
---
--- No other transaction sees a state between two writes of one transaction, so one step is enough, and
--- a write touching many rows no longer updates the counter row once per row.
+-- Bump once per transaction: nobody sees state between its writes, and multi-row writes skip per-row counter updates.
 
 alter table room_version add column bumped_in xid8;
 

@@ -159,7 +159,7 @@ start)
   psql_ -d postgres -tc "select 1 from pg_database where datname = 'pustol'" | grep -q 1 ||
     psql_ -d postgres -c "create database pustol" >/dev/null
   # Each integration test creates a database of its own; a run killed part-way leaves them behind.
-  # They are named pustol_test_…, and were once pustol_t… with no `est_`; both are cleared.
+  # Current names pustol_test_*, older runs pustol_t*; clear both.
   psql_ -d postgres -tAc \
     "select 'drop database \"' || datname || '\"' from pg_database
      where datname like 'pustol\\_test\\_%' or datname like 'pustol\\_t%'" |

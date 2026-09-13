@@ -1,18 +1,16 @@
-//! What guests send the bot, in as much of Telegram's shape as this system reads.
+//! Subset of Telegram update shape this system reads.
 //!
-//! Everything else in an update is ignored rather than modelled, and a part that cannot be read is
-//! dropped rather than failing the batch it came in: the batch is confirmed by its highest id, so a
-//! single unreadable update would otherwise be fetched again for ever and wedge every one behind it.
+//! Unreadable part is dropped, never fails batch: batch is confirmed by highest id, so one bad
+//! update would be refetched for ever and block all after it.
 
 use chrono::TimeDelta;
-use serde::de::{DeserializeOwned, Deserializer};
 use serde::Deserialize;
+use serde::de::{DeserializeOwned, Deserializer};
 
-/// How long a claim on an update stays evidence that the update was taken in hand.
+/// How long claim on update id proves update was handled.
 ///
-/// Telegram keeps an update nobody fetched for a day, and after a week without updates counts update
-/// ids afresh from a random number. A claim younger than a day can only name an update Telegram may
-/// still send again; an older one may name a new update that happens to carry the same id.
+/// Telegram keeps unfetched update one day, and after quiet week restarts ids from random number.
+/// Claim younger than day names update Telegram may resend; older one may collide with new update.
 pub const UPDATE_RETENTION: TimeDelta = TimeDelta::days(1);
 
 #[derive(Clone, Debug, Deserialize)]
@@ -42,7 +40,6 @@ pub struct Chat {
 }
 
 impl Chat {
-    /// Whether this is somebody's own chat with the bot, rather than a group it was added to.
     #[must_use]
     pub fn is_private(&self) -> bool {
         self.kind == "private"
@@ -54,16 +51,15 @@ pub struct Sender {
     pub id: i64,
 }
 
-/// A tap on a button under one of the bot's messages.
+/// Tap on inline button under bot message.
 #[derive(Clone, Debug, Deserialize)]
 pub struct CallbackQuery {
     pub id: String,
     pub from: Sender,
-    /// The message the button was under. Telegram still names it by chat and id when the bot can
-    /// no longer read it.
+    /// Telegram names message by chat and id even when bot can no longer read it.
     #[serde(default, deserialize_with = "lenient")]
     pub message: Option<MessageRef>,
-    /// Whatever the client sent. A modified client can send anything here.
+    /// Untrusted: modified client can send anything.
     #[serde(default)]
     pub data: Option<String>,
 }

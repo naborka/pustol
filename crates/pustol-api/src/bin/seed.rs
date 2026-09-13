@@ -15,8 +15,9 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let admin = std::env::var("TELEGRAM_ADMIN_USERNAME")
-        .context("TELEGRAM_ADMIN_USERNAME must be set: without one, nobody can open the admin side")?;
+    let admin = std::env::var("TELEGRAM_ADMIN_USERNAME").context(
+        "TELEGRAM_ADMIN_USERNAME must be set: without one, nobody can open the admin side",
+    )?;
 
     let store = Store::connect(&database_url, 4).await?;
     store.migrate().await?;

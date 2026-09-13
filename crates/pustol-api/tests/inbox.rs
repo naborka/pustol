@@ -1,7 +1,4 @@
-//! What the bot does with what guests send it, against a stub Telegram.
-//!
-//! Until this existed the reminder's «Не смогу прийти» button was drawn and nothing listened for
-//! it: the guest tapped, Telegram spun, and the table stayed sold.
+//! Bot inbox against stub Telegram.
 
 mod common;
 
@@ -29,22 +26,17 @@ struct Telegram {
     base_url: String,
     calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     updates: Arc<Mutex<Vec<serde_json::Value>>>,
-    /// When set, `getUpdates` with nothing to hand over waits as Telegram does, until something
-    /// arrives or the wait asked for is over. Otherwise it answers at once, so a test that polls
-    /// once more is not held for the whole long poll.
+    /// Empty `getUpdates` waits like Telegram. Off: answers at once, so extra poll never stalls.
     long_polls: Arc<AtomicBool>,
-    /// Wakes a `getUpdates` that is waiting for something to arrive.
     arrived: Arc<Notify>,
-    /// When set, an offset past every update Telegram now has is not honoured, as after Telegram
-    /// has counted update ids afresh.
+    /// Ignore offset past newest update, as after Telegram restarts ids.
     forgets_stale_offsets: Arc<AtomicBool>,
-    /// When set, a reply to a guest is held until `release` is notified.
+    /// Hold `sendMessage` until `release` notified.
     hold_replies: Arc<AtomicBool>,
     release: Arc<Notify>,
 }
 
 impl Telegram {
-    /// What `getUpdates` hands over from `offset`.
     async fn pending(&self, offset: Option<i64>) -> Vec<serde_json::Value> {
         let updates = self.updates.lock().await;
         let id = |update: &serde_json::Value| update["update_id"].as_i64().unwrap_or(0);
@@ -62,7 +54,6 @@ impl Telegram {
             .collect()
     }
 
-    /// Hands new updates over, waking a long poll that is waiting for them.
     async fn replace_updates(&self, updates: Vec<serde_json::Value>) {
         *self.updates.lock().await = updates;
         self.arrived.notify_waiters();
@@ -78,7 +69,7 @@ impl Telegram {
             .collect()
     }
 
-    /// Who was answered, in order.
+    /// Chat ids of `sendMessage` calls, in order.
     async fn answered(&self) -> Vec<serde_json::Value> {
         self.calls_to("sendMessage")
             .await
@@ -102,8 +93,6 @@ async fn method(
         stub.release.notified().await;
     }
     if method == "getUpdates" {
-        // A long poll, as Telegram answers one: at once when something is there, otherwise when
-        // something arrives or the wait asked for is over.
         let offset = body["offset"].as_i64();
         let wait = if stub.long_polls.load(Ordering::Relaxed) {
             body["timeout"].as_u64().unwrap_or(0)
@@ -144,12 +133,11 @@ async fn stub_telegram() -> (Bot, Telegram) {
     (bot, stub)
 }
 
-/// An inbox of its own: a process of its own, as far as claiming updates goes.
+/// Each inbox acts as separate process for update claims.
 fn inbox(app: &Harness, bot: Bot) -> Inbox {
     Inbox::new(app.store.clone(), bot, app.bar, Clock::Fixed(app.now))
 }
 
-/// A tap on a button under one of the bot's messages, in the shape Telegram sends it.
 fn tap(from: i64, data: &str) -> Update {
     serde_json::from_value(serde_json::json!({
         "update_id": 1,
@@ -164,7 +152,6 @@ fn tap(from: i64, data: &str) -> Update {
     .expect("the shape Telegram sends")
 }
 
-/// A message typed into the bot's chat.
 fn said(update_id: i64, from: i64, text: &str) -> serde_json::Value {
     serde_json::json!({
         "update_id": update_id,
@@ -366,8 +353,7 @@ async fn starting_the_bot_plainly_says_where_to_go_and_who_answers() {
 
 #[tokio::test]
 async fn start_addressed_to_the_bot_by_name_is_start() {
-    // Telegram clients write `/start@PodvalBot` when a command is picked from a list, and a payload
-    // follows the name. In a private chat every message is this bot's, whatever name it carries.
+    // Clients send `/start@PodvalBot` plus payload. In private chat every message is for this bot.
     let app = harness().await;
     let welcome = messages::welcome(&app.config.name, None);
     let reminders = messages::reminders_on(app.config.remind_hours);
@@ -423,8 +409,7 @@ async fn polling_hands_each_update_over_once_and_moves_past_it() {
 
 #[tokio::test]
 async fn a_second_process_fetching_an_update_the_first_already_answered_does_not_answer_it_again() {
-    // A crash, or Telegram out of reach while stopping, leaves the next process fetching from the
-    // beginning what the last one already answered.
+    // Crash, or Telegram unreachable at stop: next process refetches updates already answered.
     let app = harness().await;
     let (bot, stub) = stub_telegram().await;
     stub.updates.lock().await.push(said(7, 77, "привет"));
@@ -490,8 +475,7 @@ async fn an_update_is_answered_once_however_many_processes_read_the_inbox() {
 #[tokio::test]
 async fn an_update_claimed_longer_ago_than_telegram_keeps_updates_does_not_silence_a_new_one_with_its_id()
  {
-    // After a quiet week Telegram counts update ids afresh from a random number, so a new update can
-    // carry the id of one answered long ago.
+    // After quiet week Telegram restarts ids from random number; new update may reuse old id.
     let app = harness().await;
     let (bot, stub) = stub_telegram().await;
     stub.updates.lock().await.push(said(900, 77, "привет"));
@@ -609,8 +593,7 @@ async fn a_stop_while_answering_still_tells_telegram_what_was_answered() {
 
 #[tokio::test]
 async fn an_update_that_cannot_be_claimed_is_left_for_the_next_fetch() {
-    // The database is gone. Answering without a claim could answer twice, and moving past the update
-    // would drop it for good; the inbox does neither and waits.
+    // Database down. Answer without claim may answer twice; skipping drops update. Inbox must wait.
     let app = harness().await;
     let (bot, stub) = stub_telegram().await;
     stub.updates.lock().await.push(said(7, 77, "привет"));
@@ -643,9 +626,8 @@ async fn an_update_that_cannot_be_claimed_is_left_for_the_next_fetch() {
 
 #[tokio::test]
 async fn after_telegram_counts_update_ids_afresh_the_next_update_is_answered_once_and_confirmed() {
-    // After a quiet week Telegram numbers updates from a random start, which can be below the offset
-    // the inbox last confirmed. An offset kept at the old high id confirms nothing Telegram now has,
-    // and the same update comes back on every poll.
+    // After quiet week ids restart, maybe below last confirmed offset. Old high offset confirms
+    // nothing, so same update returns every poll.
     let app = harness().await;
     let (bot, stub) = stub_telegram().await;
     stub.forgets_stale_offsets.store(true, Ordering::Relaxed);
@@ -693,9 +675,8 @@ async fn after_telegram_counts_update_ids_afresh_the_next_update_is_answered_onc
 
 #[tokio::test]
 async fn an_update_taken_in_hand_but_not_answered_is_answered_on_the_next_fetch_exactly_once() {
-    // The claim is written, and then the inbox cannot read what the answer needs — or the database
-    // wrote the claim and the reply saying so was lost. Nothing has been said to the guest; the claim
-    // is this inbox's own, so the next fetch takes it again and answers.
+    // Claim written, then answer data read fails, or claim ack lost. Guest got nothing; claim is
+    // this inbox's own, so next fetch retakes and answers.
     let app = harness().await;
     let (bot, stub) = stub_telegram().await;
     stub.replace_updates(vec![said(7, 77, "привет")]).await;
@@ -734,7 +715,6 @@ async fn an_update_taken_in_hand_but_not_answered_is_answered_on_the_next_fetch_
     );
 }
 
-/// A tap on a button, as `getUpdates` hands it over.
 fn tapped(update_id: i64, from: i64, data: &str) -> serde_json::Value {
     serde_json::json!({
         "update_id": update_id,
@@ -748,7 +728,7 @@ fn tapped(update_id: i64, from: i64, data: &str) -> serde_json::Value {
     })
 }
 
-/// Makes every read of the bar's configuration fail, or work again.
+/// Toggles failure of every bar config read.
 async fn set_timezone(app: &Harness, name: &str) {
     sqlx::query("update bar set timezone = $2 where id = $1")
         .bind(app.bar)
@@ -770,8 +750,8 @@ async fn eventually(what: &str, mut done: impl AsyncFnMut() -> bool) {
 
 #[tokio::test]
 async fn a_stop_after_telegram_counted_ids_afresh_confirms_an_offset_lower_than_the_last_one() {
-    // The inbox last confirmed 901. Telegram now numbers from 5: update 5 is answered and update 6
-    // cannot be yet. Stopping must hand Telegram 6, or the next process answers 5 again.
+    // Last confirmed 901; Telegram now numbers from 5. Update 5 answered, 6 not yet. Stop must
+    // confirm 6, else next process answers 5 again.
     let app = harness().await;
     let (bot, stub) = stub_telegram().await;
     stub.forgets_stale_offsets.store(true, Ordering::Relaxed);
@@ -821,8 +801,7 @@ async fn a_stop_after_telegram_counted_ids_afresh_confirms_an_offset_lower_than_
 
 #[tokio::test]
 async fn an_update_that_cannot_be_answered_is_let_go_after_its_retries_and_the_next_is_answered() {
-    // The claim is fine; reading what the answer needs fails, every time. Trying for ever would leave
-    // every update behind it unanswered for as long as the fault lasts.
+    // Claim fine; answer data read fails every time. Endless retry blocks every later update.
     let app = harness().await;
     let (bot, stub) = stub_telegram().await;
     stub.replace_updates(vec![
@@ -833,7 +812,7 @@ async fn an_update_that_cannot_be_answered_is_let_go_after_its_retries_and_the_n
     set_timezone(&app, "Mars/Olympus").await;
     let inbox = inbox(&app, bot);
 
-    // The first try and every retry but the last fail the poll; the last failure lets update 7 go.
+    // First try and every retry except last fail poll; last failure releases update 7.
     for attempt in 1..=pustol_api::inbox::ANSWER_RETRIES {
         let failed = inbox.poll_once(None).await;
         assert!(failed.is_err(), "attempt {attempt}: {failed:?}");

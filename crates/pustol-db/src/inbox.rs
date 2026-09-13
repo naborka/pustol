@@ -1,4 +1,4 @@
-//! Which updates sent to the bot have already been taken in hand.
+//! Claims on bot updates, so each update is handled once.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -7,15 +7,17 @@ use crate::Store;
 use crate::error::Result;
 
 impl Store {
-    /// Takes `update_id` of `bot` in hand for `owner` at `now`, answering how many times `owner` has
-    /// now taken it, or `None` when this call did not take it.
+    /// Claims `update_id` of `bot` for `owner`; returns `owner`'s attempt count, or `None` when
+    /// another owner holds it.
     ///
-    /// A claim made before `forgotten_before` no longer counts and is taken over, counting from one:
-    /// Telegram keeps an update for a day, and after a week without updates counts ids afresh from a
-    /// random number, so an old claim may name an update nobody has seen. A claim `owner` made itself
-    /// is handed back to it, one more time: the claim may have been written while the reply saying so
-    /// was lost, and an owner that asks again has not answered the update. Two calls racing for one
-    /// update are settled by the row they both write; exactly one of them is told it won.
+    /// Claim older than `forgotten_before` is taken over, count restarts at one: Telegram keeps
+    /// updates one day and after a week idle restarts ids from random number, so old claim may name
+    /// unseen update. Same owner reclaims with count plus one: claim may have committed while reply
+    /// was lost. Racing calls settled by shared row; exactly one wins.
+    ///
+    /// # Errors
+    ///
+    /// Database failure.
     pub async fn claim_update(
         &self,
         bot: i64,
@@ -44,7 +46,11 @@ impl Store {
         Ok(attempt)
     }
 
-    /// Clears away the claims of `bot` made before `forgotten_before`, which no longer count.
+    /// Deletes claims of `bot` older than `forgotten_before`.
+    ///
+    /// # Errors
+    ///
+    /// Database failure.
     pub async fn forget_update_claims(
         &self,
         bot: i64,

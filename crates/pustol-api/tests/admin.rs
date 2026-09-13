@@ -27,8 +27,7 @@ const SHIFT: &str = "/api/admin/shift?service_date=2026-07-30";
 
 #[tokio::test]
 async fn a_payload_signed_before_a_seat_was_offered_does_not_claim_it() {
-    // A payload is accepted for an hour, and the username in it is whatever the account was called
-    // when Telegram signed. The name may have been somebody else's by the time the seat was offered.
+    // Payload lives an hour; its username is name at signing, maybe someone else's by seat offer.
     let app = harness().await;
     let staff = manager(&app).await;
     let newcomer = Caller::new("Паша");
@@ -312,8 +311,7 @@ async fn staff_record_whether_a_party_turned_up() {
         );
     }
 
-    // A status endpoint that could also cancel would let a mis-tap free a table with no reason
-    // attached, so the value is not accepted at all.
+    // Cancel via status endpoint would let mis-tap free table with no reason, so value refused.
     let refused = app.mark(&staff, id, "cancelled").await;
     assert_eq!(refused.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 }
@@ -327,8 +325,8 @@ async fn undo_learns_what_the_booking_was_from_the_server_not_from_a_screen_that
     .await;
     let staff = manager(&app).await;
     let id = booked(&app, &staff, 1_200, "Марина").await;
-    // The bar screen saw them arrive. The door screen then marked them as not coming, and the bar
-    // screen, still showing «Пришли», marks them gone.
+    // Bar screen saw arrival; door screen then marked not coming; bar screen, still on «Пришли»,
+    // marks gone.
     app.mark(&staff, &id, "arrived").await.expect_ok();
     app.mark(&staff, &id, "no_show").await.expect_ok();
     let gone = app.mark(&staff, &id, "left").await.expect_ok().clone();
@@ -1224,7 +1222,7 @@ async fn the_times_offered_for_a_move_do_not_count_the_booking_being_moved() {
 
 #[tokio::test]
 async fn every_slot_staff_are_offered_names_the_tables_free_for_it_smallest_first() {
-    // 18:00 in Belgrade. A four-top, a two-top and a six-top; a couple on the two-top at 20:00.
+    // 18:00 Belgrade. Four-top, two-top, six-top; couple on two-top at 20:00.
     let app = harness_at(
         common::utc(2026, 7, 30, 16, 0),
         config_with(vec![
@@ -1278,7 +1276,7 @@ async fn every_slot_staff_are_offered_names_the_tables_free_for_it_smallest_firs
         "a past slot names what was free for it all the same"
     );
     assert!(couple["kept_free_table_ids"].is_null(), "{couple}");
-    // Free tables too small for the party are named too: the sheet draws them as «мало мест».
+    // Free tables too small still listed: sheet draws them as «мало мест».
     let five = offered(&app, "party_size=5".to_owned()).await;
     assert_eq!(
         tables_at(&five, 1_200),
@@ -1304,7 +1302,7 @@ async fn every_slot_staff_are_offered_names_the_tables_free_for_it_smallest_firs
 
 #[tokio::test]
 async fn a_walk_in_off_the_grid_is_offered_the_tables_free_for_its_own_window() {
-    // A party sat down at 19:07, a minute no arrival time starts at, on the two-top.
+    // Seated 19:07 on two-top, off arrival grid.
     let app = harness_at(
         common::utc(2026, 7, 30, 17, 7),
         config_with(vec![table(1, 2, "Бар"), table(2, 4, "Зал")]),
@@ -1333,7 +1331,11 @@ async fn a_walk_in_off_the_grid_is_offered_the_tables_free_for_its_own_window() 
         .await
         .expect_ok()
         .clone();
-    assert_eq!(offered["kept_free_table_ids"], serde_json::json!([two, four]), "{offered}");
+    assert_eq!(
+        offered["kept_free_table_ids"],
+        serde_json::json!([two, four]),
+        "{offered}"
+    );
     let moved = app
         .move_booking(
             &staff,
@@ -1341,7 +1343,10 @@ async fn a_walk_in_off_the_grid_is_offered_the_tables_free_for_its_own_window() 
             serde_json::json!({ "start_minutes": 1_147, "table_id": four }),
         )
         .await;
-    assert_eq!(moved.expect_ok()["booking"]["table_id"], serde_json::json!(four));
+    assert_eq!(
+        moved.expect_ok()["booking"]["table_id"],
+        serde_json::json!(four)
+    );
 }
 
 #[tokio::test]
@@ -1637,7 +1642,6 @@ async fn staff_grow_a_party_over_the_telephone_without_cancelling_anything() {
     );
 }
 
-/// The booking with this id in a shift the API answered with, if it is there.
 fn in_shift<'a>(shift: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
     shift["bookings"]
         .as_array()
@@ -1648,8 +1652,8 @@ fn in_shift<'a>(shift: &'a serde_json::Value, id: &str) -> Option<&'a serde_json
 
 #[tokio::test]
 async fn every_write_to_a_booking_answers_with_the_evening_as_it_now_stands() {
-    // A screen that reloads the shift after every tap shows the room as it was between the write and
-    // the read, and as nobody saw it; the answer to the write is the room the write left.
+    // Reload after tap shows room between write and read, state nobody saw. Write answer must be
+    // room write left.
     let app = harness_at(
         common::utc(2026, 7, 30, 16, 0),
         config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
@@ -1796,7 +1800,7 @@ async fn the_shift_says_by_the_bars_own_clock_what_has_started_what_is_over_and_
     let early = booked(&app, &staff, 1_200, "Вера").await;
     let late = booked(&app, &staff, 1_320, "Глеб").await;
 
-    // Half past eight in Belgrade.
+    // 20:30 Belgrade.
     let evening = app.at(common::utc(2026, 7, 30, 18, 30));
     let shift = evening.get(SHIFT, &staff).await.expect_ok().clone();
     assert_eq!(shift["today"], "2026-07-30");
@@ -1849,8 +1853,8 @@ async fn the_shift_says_by_the_bars_own_clock_what_has_started_what_is_over_and_
 #[tokio::test]
 async fn moving_a_booking_marked_as_not_coming_before_its_time_to_a_later_time_makes_it_a_plan_again()
  {
-    // Booked for eight, marked as not coming at seven, moved to ten. Keeping the release from the
-    // old window put it outside the new one, and the database refused the write.
+    // Booked 20:00, marked not coming 19:00, moved to 22:00. Release kept from old window falls
+    // outside new one; database check refuses that.
     let app = harness_at(
         common::utc(2026, 7, 30, 16, 0),
         config_with(vec![table(1, 4, "Бар")]),
@@ -1906,8 +1910,8 @@ async fn closing_a_table_already_shut_or_opening_one_never_shut_is_not_reported_
 
 #[tokio::test]
 async fn a_payload_stamped_within_a_minute_of_the_invitation_does_not_claim_the_seat() {
-    // Telegram's clock may be a minute ahead of this one, so a payload stamped thirty seconds after
-    // the seat was offered may have been signed before it, under a name that was not yet invited.
+    // Telegram clock may run minute ahead: payload stamped 30s after seat offer may predate it,
+    // under name not yet invited.
     let app = harness().await;
     let staff = manager(&app).await;
     let newcomer = Caller::new("Паша");
@@ -1938,7 +1942,7 @@ async fn a_payload_stamped_within_a_minute_of_the_invitation_does_not_claim_the_
 
 #[tokio::test]
 async fn text_holding_a_nul_character_is_refused_and_nothing_is_written() {
-    // PostgreSQL text cannot hold U+0000. It used to reach the database and come back as a fault.
+    // PostgreSQL text cannot hold U+0000.
     let app = harness_at(
         common::utc(2026, 7, 30, 16, 0),
         config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
@@ -2037,8 +2041,8 @@ async fn undoing_a_departure_once_the_table_has_gone_to_somebody_else_says_the_t
 
 #[tokio::test]
 async fn a_guest_the_bot_cannot_reach_is_shown_so_and_never_reported_as_told() {
-    // The bot found it cannot write to them. A notice is still queued, in case they let the bot back
-    // in before it goes, but staff are not told the guest knows: they are the ones who must call.
+    // Bot cannot write to guest. Notice still queued in case they unblock, but staff not told
+    // guest knows: staff must call.
     let app = harness_at(
         common::utc(2026, 7, 30, 16, 0),
         config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
@@ -2099,9 +2103,8 @@ async fn a_guest_the_bot_cannot_reach_is_shown_so_and_never_reported_as_told() {
 
 #[tokio::test]
 async fn a_write_whose_evening_cannot_be_read_writes_nothing_and_trying_again_writes_it_once() {
-    // The evening in the answer is read inside the write's own transaction. A failure reading it
-    // takes the write back with it, so staff are never told a booking failed that was in fact taken,
-    // and trying again cannot take it twice.
+    // Answer evening is read in write transaction. Read failure rolls write back: staff never see
+    // false failure, retry never books twice.
     let app = harness_at(
         common::utc(2026, 7, 30, 16, 0),
         config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
@@ -2122,8 +2125,7 @@ async fn a_write_whose_evening_cannot_be_read_writes_nothing_and_trying_again_wr
     let body = serde_json::json!({
         "service_date": "2026-07-30", "start_minutes": 1_200, "party_size": 2, "guest_name": "Глеб"
     });
-    // The row the evening's version is read from is gone: the booking writes, the evening cannot be
-    // read.
+    // Evening version row gone: booking writes, evening read fails.
     sqlx::query("delete from room_version where bar_id = $1")
         .bind(app.bar)
         .execute(app.store.pool())
@@ -2150,7 +2152,6 @@ async fn a_write_whose_evening_cannot_be_read_writes_nothing_and_trying_again_wr
     assert_eq!(count().await, 1);
 }
 
-/// The version of the evening the shift screen would draw now.
 async fn version(app: &common::Harness, staff: &Caller) -> i64 {
     app.get(SHIFT, staff).await.expect_ok()["version"]
         .as_i64()
@@ -2159,11 +2160,15 @@ async fn version(app: &common::Harness, staff: &Caller) -> i64 {
 
 #[tokio::test]
 async fn every_change_to_the_room_moves_the_evening_version_forward() {
-    // A screen applies an evening only when it is not older than the one it shows, whichever answer
-    // arrives first. That holds only if every change, by anybody on any path, moves the version.
+    // Screen applies evening only if not older than shown one. Holds only if every change on any
+    // path bumps version.
     let app = harness_at(
         common::utc(2026, 7, 30, 16, 0),
-        config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар"), table(3, 4, "Зал")]),
+        config_with(vec![
+            table(1, 2, "Бар"),
+            table(2, 2, "Бар"),
+            table(3, 4, "Зал"),
+        ]),
     )
     .await;
     let staff = manager(&app).await;
@@ -2211,23 +2216,73 @@ async fn every_change_to_the_room_moves_the_evening_version_forward() {
     let third = table_id(&app, &staff, 3).await;
     let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
     let staff_writes = [
-        ("a reconcile", "POST", "/api/admin/shift/reconcile".to_owned(), serde_json::json!({ "service_date": evening })),
-        ("a note", "PATCH", format!("{booking}/note"), serde_json::json!({ "note": "У окна" })),
-        ("an attendance", "PATCH", format!("{booking}/attendance"), serde_json::json!({ "attendance": "arrived" })),
-        ("a move", "PATCH", format!("{booking}/move"), serde_json::json!({ "start_minutes": 1_200, "table_id": second })),
-        ("a closed table", "POST", "/api/admin/blocks".to_owned(), serde_json::json!({ "service_date": evening, "table_ids": [third], "reason": "Дождь" })),
-        ("a reopened table", "DELETE", "/api/admin/blocks".to_owned(), serde_json::json!({ "service_date": evening, "table_ids": [third] })),
-        ("a walk-in", "POST", "/api/admin/walkins".to_owned(), serde_json::json!({ "service_date": evening, "party_size": 2 })),
-        ("a cancellation", "POST", format!("{booking}/cancel"), serde_json::json!({ "reason": "Частное мероприятие" })),
-        ("a settings save", "PUT", SETTINGS.to_owned(), draft_from(&settings)),
+        (
+            "a reconcile",
+            "POST",
+            "/api/admin/shift/reconcile".to_owned(),
+            serde_json::json!({ "service_date": evening }),
+        ),
+        (
+            "a note",
+            "PATCH",
+            format!("{booking}/note"),
+            serde_json::json!({ "note": "У окна" }),
+        ),
+        (
+            "an attendance",
+            "PATCH",
+            format!("{booking}/attendance"),
+            serde_json::json!({ "attendance": "arrived" }),
+        ),
+        (
+            "a move",
+            "PATCH",
+            format!("{booking}/move"),
+            serde_json::json!({ "start_minutes": 1_200, "table_id": second }),
+        ),
+        (
+            "a closed table",
+            "POST",
+            "/api/admin/blocks".to_owned(),
+            serde_json::json!({ "service_date": evening, "table_ids": [third], "reason": "Дождь" }),
+        ),
+        (
+            "a reopened table",
+            "DELETE",
+            "/api/admin/blocks".to_owned(),
+            serde_json::json!({ "service_date": evening, "table_ids": [third] }),
+        ),
+        (
+            "a walk-in",
+            "POST",
+            "/api/admin/walkins".to_owned(),
+            serde_json::json!({ "service_date": evening, "party_size": 2 }),
+        ),
+        (
+            "a cancellation",
+            "POST",
+            format!("{booking}/cancel"),
+            serde_json::json!({ "reason": "Частное мероприятие" }),
+        ),
+        (
+            "a settings save",
+            "PUT",
+            SETTINGS.to_owned(),
+            draft_from(&settings),
+        ),
     ];
     for (label, method, path, body) in staff_writes {
         app.send(method, &path, &staff, body).await.expect_ok();
         seen.push((label, version(&app, &staff).await));
     }
-    app.send("DELETE", &format!("/api/bookings/{plan}"), &guest, serde_json::Value::Null)
-        .await
-        .expect_ok();
+    app.send(
+        "DELETE",
+        &format!("/api/bookings/{plan}"),
+        &guest,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect_ok();
     seen.push(("a guest giving a table back", version(&app, &staff).await));
 
     for pair in seen.windows(2) {
@@ -2240,15 +2295,15 @@ async fn every_change_to_the_room_moves_the_evening_version_forward() {
     }
 }
 
-/// `date` written into a query string, where a `+` would otherwise read as a space.
+/// Encodes `date` for query string: raw `+` reads as space.
 fn in_query(date: &str) -> String {
     date.replace('+', "%2B")
 }
 
 #[tokio::test]
 async fn a_date_outside_the_calendar_is_refused_as_an_invalid_date_wherever_it_is_written() {
-    // PostgreSQL holds no year before 4713 BC and refused -5000-01-01 as a server fault. Years 1 to
-    // 9999 are the dates this API reads; anything else in a date is refused before storage sees it.
+    // PostgreSQL holds no year before 4713 BC. API reads years 1 to 9999 only; rest refused
+    // before storage.
     let app = harness().await;
     let staff = manager(&app).await;
     let guest = Caller::new("Вера");
@@ -2369,9 +2424,8 @@ async fn closing_or_opening_a_table_the_room_does_not_have_is_not_found_and_writ
 
 #[tokio::test]
 async fn a_party_seated_late_holds_its_table_only_until_its_shift_stops_running() {
-    // Thursday closes at 02:00 with two-hour sittings, so it stops running at midnight UTC. Seated at
-    // half past one and held two hours, the party ran into Friday: Friday's screen, reading Friday's
-    // bookings, called the table free, and the room refused it to the next party at the door.
+    // Thursday closes 02:00, two-hour sittings, so stops running at midnight UTC. Party seated
+    // 01:30 holds table into Friday; Friday screen must not call table free.
     let app = harness_at(
         common::utc(2026, 7, 30, 23, 30),
         config_with(vec![table(1, 2, "Бар")]),
@@ -2413,7 +2467,7 @@ async fn a_party_seated_late_holds_its_table_only_until_its_shift_stops_running(
         .expect_ok();
 }
 
-/// One two-top, open 10:00 to `close_minutes` every day, with sittings of `turn_minutes`.
+/// One two-top, open 10:00 to `close_minutes` daily.
 fn open_until(close_minutes: i32, turn_minutes: i32) -> pustol_domain::BarConfig {
     let mut config = config_with(vec![table(1, 2, "Бар")]);
     config.turn_minutes = turn_minutes;
@@ -2428,23 +2482,58 @@ fn open_until(close_minutes: i32, turn_minutes: i32) -> pustol_domain::BarConfig
 #[tokio::test]
 async fn a_walk_in_ends_where_the_shift_says_walk_ins_end_and_is_refused_where_it_says_there_are_none()
  {
-    // Closing, turn, the moment, the running shift, and where the shift says a party seated then
-    // holds its table until: absent when nobody may be seated.
+    // Closing, turn, moment, running shift, and seated-party hold end (absent when nobody may sit).
     let cases = [
-        // A summer evening: a whole turn.
-        (1560, 120, common::utc(2026, 7, 30, 18, 7), "2026-07-30", Some(1327)),
-        // Closing at 03:30 on the night the clocks jump from 02:00 to 03:00, at 01:00Z: seated at the
-        // jump, a party has the half hour until the wall reads closing, not the hour of a sitting.
-        (1650, 60, common::utc(2026, 3, 29, 1, 0), "2026-03-28", Some(1650)),
-        // Closing at 02:00, a time that night skips: seated at 01:00, until the jump, read as 03:00.
-        (1560, 60, common::utc(2026, 3, 29, 0, 0), "2026-03-28", Some(1620)),
-        // Closing at 03:00 with two-hour sittings, half an hour after the wall read 03:00: the last
-        // sitting still holds its table, so Saturday is running, and nobody new is seated.
-        (1620, 120, common::utc(2026, 3, 29, 1, 30), "2026-03-28", None),
-        // Closing at 03:00 on the night the clocks go back from 03:00 to 02:00, at the second 02:30.
-        (1620, 120, common::utc(2026, 10, 25, 1, 30), "2026-10-24", Some(1620)),
-        // Half past two on a summer night: Friday is running and has not opened.
-        (1560, 120, common::utc(2026, 7, 31, 0, 30), "2026-07-31", None),
+        // Summer evening: whole turn.
+        (
+            1560,
+            120,
+            common::utc(2026, 7, 30, 18, 7),
+            "2026-07-30",
+            Some(1327),
+        ),
+        // Closing 03:30 on spring-forward night (02:00 to 03:00), at 01:00Z: seated at jump, party
+        // gets half hour to closing, not full sitting.
+        (
+            1650,
+            60,
+            common::utc(2026, 3, 29, 1, 0),
+            "2026-03-28",
+            Some(1650),
+        ),
+        // Closing 02:00, skipped that night: seated 01:00, holds until jump, read as 03:00.
+        (
+            1560,
+            60,
+            common::utc(2026, 3, 29, 0, 0),
+            "2026-03-28",
+            Some(1620),
+        ),
+        // Closing 03:00, two-hour sittings, 03:30 wall: last sitting still holds table, so Saturday
+        // running, nobody new seated.
+        (
+            1620,
+            120,
+            common::utc(2026, 3, 29, 1, 30),
+            "2026-03-28",
+            None,
+        ),
+        // Closing 03:00 on fall-back night (03:00 to 02:00), at second 02:30.
+        (
+            1620,
+            120,
+            common::utc(2026, 10, 25, 1, 30),
+            "2026-10-24",
+            Some(1620),
+        ),
+        // 02:30 summer night: Friday running, not opened.
+        (
+            1560,
+            120,
+            common::utc(2026, 7, 31, 0, 30),
+            "2026-07-31",
+            None,
+        ),
     ];
     for (close_minutes, turn_minutes, now, running, until) in cases {
         let what = format!("closing {close_minutes}, turn {turn_minutes}, at {now}");
@@ -2506,7 +2595,7 @@ async fn a_walk_in_ends_where_the_shift_says_walk_ins_end_and_is_refused_where_i
             minutes,
             "{what}"
         );
-        // And the hours that seated the party never call it outside them.
+        // Hours that seated party never call it outside them.
         let settings = at.get(SETTINGS, &staff).await.expect_ok().clone();
         let saved = at
             .send("PUT", SETTINGS, &staff, draft_from(&settings))
@@ -2535,8 +2624,8 @@ async fn the_shift_counts_the_guests_seated_this_minute_by_the_bars_own_clock() 
         .clone();
     assert!(tomorrow["stats"]["seated_now"].is_null(), "{tomorrow}");
 
-    // The night the clocks go back, at the first 02:40 with one-hour sittings: the party holds its
-    // table until the second 02:40, which the wall clock cannot tell from the minute it sat down.
+    // Fall-back night, first 02:40, one-hour sittings: party holds table until second 02:40, same
+    // wall reading as seat minute.
     let app = harness_at(common::utc(2026, 10, 24, 10, 0), open_until(1680, 60)).await;
     let staff = manager(&app).await;
     let at = app.at(common::utc(2026, 10, 25, 0, 40));
@@ -2563,8 +2652,7 @@ async fn the_shift_counts_the_guests_seated_this_minute_by_the_bars_own_clock() 
 
 #[tokio::test]
 async fn once_the_shift_has_ended_nobody_can_be_seated_now_and_the_shift_says_so() {
-    // Closing at 23:00 with two-hour sittings: at half past eleven Thursday is still the calendar's
-    // today, and its last sitting is over.
+    // Closing 23:00, two-hour sittings: at 23:30 Thursday still calendar today, last sitting over.
     let mut config = config_with(vec![table(1, 2, "Бар")]);
     config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
         open_minutes: 600,
@@ -2595,9 +2683,9 @@ async fn once_the_shift_has_ended_nobody_can_be_seated_now_and_the_shift_says_so
 #[tokio::test]
 async fn on_the_night_the_clocks_go_back_the_shift_offers_a_walk_in_only_the_tables_the_door_seats_it_at()
  {
-    // Saturday 24 October 2026 closes at 04:00, with one-hour sittings, and both two-tops are booked at
-    // the first 02:30, from 00:30Z to 01:30Z. At 00:40Z the wall reads 02:40 for the first time: a party
-    // seated then would sit into both bookings, and the sheet, counting in wall minutes, offered them.
+    // Saturday 24 October 2026 closes 04:00, one-hour sittings; both two-tops booked at first 02:30
+    // (00:30Z to 01:30Z). At 00:40Z wall first reads 02:40: party seated then overlaps both
+    // bookings, so sheet must not offer them, as wall-minute count would.
     let mut config = open_until(1680, 60);
     config.tables = vec![table(1, 2, "Бар"), table(2, 2, "Бар")];
     let app = harness_at(common::utc(2026, 10, 24, 10, 0), config).await;
@@ -2682,9 +2770,9 @@ async fn on_the_night_the_clocks_go_back_the_shift_offers_a_walk_in_only_the_tab
 #[tokio::test]
 async fn the_guest_is_told_the_bar_is_open_exactly_while_the_door_seats_a_party_minute_by_minute_through_the_repeated_hour()
  {
-    // Saturday 24 October 2026 closes at 02:30. The wall reads 02:30 at 00:30Z, falls back from 02:59 to
-    // 02:00 at 01:00Z, and comes up to 02:30 again at 01:30Z, when the bar closes. The guest's screen
-    // compared wall minutes, and called the bar shut from 00:30Z while the door still seated parties.
+    // Saturday 24 October 2026 closes 02:30. Wall reads 02:30 at 00:30Z, falls back 02:59 to 02:00
+    // at 01:00Z, reads 02:30 again at 01:30Z, real closing. Wall-minute compare calls bar shut from
+    // 00:30Z while door still seats.
     let app = harness_at(common::utc(2026, 10, 24, 10, 0), open_until(1590, 60)).await;
     let staff = manager(&app).await;
     let guest = Caller::new("Вера");
@@ -2761,7 +2849,7 @@ async fn a_message_to_a_guest_the_bot_cannot_reach_is_refused_and_nothing_is_que
 
 #[tokio::test]
 async fn a_settings_save_answers_with_the_settings_exactly_as_reading_them_again_does() {
-    // The roster is read back in username order; the save used to answer in the order it was sent.
+    // Roster reads back in username order; save answer must match, not send order.
     let app = harness().await;
     let staff = manager(&app).await;
     let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
@@ -2812,8 +2900,7 @@ async fn a_settings_save_in_the_shapes_the_previous_app_sent_is_still_understood
 
 #[tokio::test]
 async fn a_settings_save_keeping_more_guest_messages_than_a_bar_may_is_refused_by_name() {
-    // Forty messages of 991 characters: the body was larger than the API read, and the refusal came
-    // back as a line of plain text the app could not read a code out of.
+    // Forty 991-character messages exceed body limit; refusal must still be JSON with code.
     let app = harness().await;
     let staff = manager(&app).await;
     let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
@@ -2842,10 +2929,9 @@ async fn a_settings_save_keeping_more_guest_messages_than_a_bar_may_is_refused_b
     );
 }
 
-/// The largest save the limits the settings screen is given allow: every list as long as it may be,
-/// and every text as long as it may be, in characters as wide in JSON as `unit`. The texts of one
-/// list are told apart by which of `unit` and `other`, of the same width, each of their first places
-/// holds.
+/// Largest save settings limits allow: every list and text at max length, characters as wide in
+/// JSON as `unit`. Texts in one list differ by which of `unit` and `other` (same width) fills each
+/// leading position.
 fn largest_draft(settings: &serde_json::Value, unit: char, other: char) -> serde_json::Value {
     let limits = &settings["limits"];
     let bound = |group: &str, name: &str| {
@@ -2874,7 +2960,7 @@ fn largest_draft(settings: &serde_json::Value, unit: char, other: char) -> serde
     let mut draft = draft_from(settings);
     draft["name"] = serde_json::json!(text(0, bound("text", "name")));
     draft["address"] = serde_json::json!(text(0, bound("text", "address")));
-    // The longest contact is a Telegram username, which that rule keeps to thirty-two letters.
+    // Longest contact: Telegram username, max 32 letters.
     draft["contact"] = serde_json::json!(format!("@a{}", "b".repeat(31)));
     draft["message_templates"] = serde_json::json!(texts("message_templates", "message"));
     draft["cancel_reasons"] = serde_json::json!(texts("cancel_reasons", "reason"));
@@ -2897,8 +2983,7 @@ fn largest_draft(settings: &serde_json::Value, unit: char, other: char) -> serde
     draft
 }
 
-/// `json` with every character past U+FFFF written as the escaped pair of surrogates JSON allows for
-/// it: twelve bytes, where UTF-8 takes four.
+/// `json` with every character past U+FFFF as escaped surrogate pair: 12 bytes, UTF-8 takes 4.
 fn escaped_as_surrogates(json: &str) -> String {
     use std::fmt::Write as _;
 
@@ -2919,8 +3004,7 @@ fn escaped_as_surrogates(json: &str) -> String {
 async fn the_largest_settings_save_the_limits_allow_is_read_and_saved() {
     let app = harness().await;
     let staff = manager(&app).await;
-    // Four bytes a character, as UTF-8 writes the widest; six, as JSON escapes a control character; and
-    // twelve, as JSON escapes a character past U+FFFF, the widest form any character a text may hold takes.
+    // Widest forms: 4 bytes UTF-8, 6 as JSON control escape, 12 as JSON escape past U+FFFF.
     for (unit, other, escaped) in [
         ('🍺', '🍷', false),
         ('\u{1}', '\u{2}', false),
@@ -2992,7 +3076,7 @@ async fn a_body_larger_than_the_api_reads_is_refused_as_json_whether_or_not_it_s
 
 #[tokio::test]
 async fn hours_and_turns_at_the_ends_of_the_integers_are_refused_as_invalid_settings() {
-    // They used to overflow: a panic in a debug build, and a wrapped-round number in a release one.
+    // Overflow risk: panic in debug build, wraparound in release.
     let app = harness().await;
     let staff = manager(&app).await;
     let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();

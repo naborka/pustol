@@ -317,8 +317,8 @@ export function SlotGrid({
   fontSize?: number;
   gap?: number;
   /**
-   * These times answer the question before the last change, and a new answer is on its way. Kept
-   * on screen so the page does not jump, and not tappable so nobody books the old question.
+   * Times answer question before last change; new answer pending. Kept so page does not jump,
+   * untappable so nobody books old question.
    */
   stale?: boolean;
 }) {
@@ -340,7 +340,7 @@ export function SlotGrid({
           <Chip
             key={slot.start_minutes}
             label={label}
-            // The strike-through is invisible to a screen reader, so the name says it.
+            // Strike-through invisible to screen reader, so name says it.
             {...(taken ? { ariaLabel: `${label}, занято` } : {})}
             height={height}
             fontSize={fontSize}
@@ -704,10 +704,9 @@ export function Sheet({
 }) {
   const panel = useRef<HTMLDivElement>(null);
 
-  // Once, on opening. Kept apart from the key listener, which has to track the current `onClose`
-  // — sharing an effect meant every keystroke stole the focus and shut the phone keyboard.
-  // Focus goes back to whatever opened the sheet once it closes, so a keyboard or screen reader is
-  // not left at the top of the page.
+  // Once on open. Separate from key listener, which tracks current `onClose`: shared effect steals
+  // focus each keystroke and shuts phone keyboard. On close focus returns to opener, so keyboard or
+  // screen reader user not left at page top.
   useEffect(() => {
     if (!open) return undefined;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -913,7 +912,7 @@ export function Toast({ message }: { message: ToastMessage | null }) {
         left: SPACE[3],
         right: SPACE[3],
         bottom: SPACE[2],
-        // Above the sheet's backdrop and panel, so a failure reported from inside a sheet is seen.
+        // Above sheet backdrop and panel, so failure reported from inside sheet stays visible.
         zIndex: LAYER.toast,
         background: "var(--txt)",
         borderRadius: RADIUS.md,
@@ -1005,8 +1004,8 @@ export function Empty({ title, detail }: { title: string; detail?: string }) {
 }
 
 /**
- * What is on screen could not be read again. Said where it is shown, never as a toast: a read nobody
- * is looking at any more has nobody to tell.
+ * Reread of shown data failed. Said where data is shown, never as toast: toast for read nobody watches
+ * tells nobody.
  */
 export function StaleNotice({
   failure,
@@ -1030,7 +1029,7 @@ export function StaleNotice({
   );
 }
 
-/** A read failed: why, and a way to ask again where asking again can help. */
+/** Read failed: why, plus retry where retry can help. */
 export function ReadFailed({
   failure,
   audience,
@@ -1040,7 +1039,7 @@ export function ReadFailed({
 }: {
   failure: ApiFailure;
   audience: Audience;
-  /** What to say while asking again may help. */
+  /** Text while retry may help. */
   generic: string;
   retryLabel?: string;
   onRetry: () => void;
@@ -1054,8 +1053,7 @@ export function ReadFailed({
 }
 
 /**
- * A read's answer, however far it has got: a spinner until there is one, why it failed while there
- * is none, and once there is one, the answer with a notice over it when reading it again failed.
+ * Read state: spinner until answer, failure while none, then answer with notice when reread failed.
  */
 export function ReadView<T>({
   value,
@@ -1070,12 +1068,12 @@ export function ReadView<T>({
   value: T | null;
   failure: ApiFailure | null;
   audience: Audience;
-  /** What a failure with nothing on screen says while asking again may help. */
+  /** Failure text with nothing shown, while retry may help. */
   generic: string;
-  /** What the spinner says it is reading. */
+  /** Spinner text. */
   loading: string;
   onRetry: () => void;
-  /** Around the failure and the notice, for an answer that sets its own padding. */
+  /** Wraps failure and notice, for answer that sets own padding. */
   padding?: string;
   children: (value: T) => ReactNode;
 }) {

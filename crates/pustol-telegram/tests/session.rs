@@ -1,5 +1,3 @@
-//! The session a fresh Telegram payload is exchanged for, attacked the way the payload is.
-
 use chrono::{DateTime, TimeDelta, Utc};
 use pustol_telegram::init_data::{BotToken, TelegramUser, VerifyError, verify};
 use pustol_telegram::session::{issue, verify_session};
@@ -44,8 +42,15 @@ fn a_session_this_bot_issued_names_its_account_until_it_ends() {
 
 #[test]
 fn a_session_another_bot_issued_is_refused() {
-    let session = issue(&user(7), now() + TimeDelta::hours(1), &BotToken::new("999:other"));
-    assert_eq!(verify_session(&session, &token(), now()), Err(VerifyError::BadSignature));
+    let session = issue(
+        &user(7),
+        now() + TimeDelta::hours(1),
+        &BotToken::new("999:other"),
+    );
+    assert_eq!(
+        verify_session(&session, &token(), now()),
+        Err(VerifyError::BadSignature)
+    );
 }
 
 #[test]
@@ -55,12 +60,14 @@ fn changing_a_session_in_any_way_invalidates_it() {
     let (_, their_signature) = session.split_once('.').expect("two parts");
     let (their_claims, _) = forged.split_once('.').expect("two parts");
     let swapped = format!("{their_claims}.{their_signature}");
-    assert_eq!(verify_session(&swapped, &token(), now()), Err(VerifyError::BadSignature));
+    assert_eq!(
+        verify_session(&swapped, &token(), now()),
+        Err(VerifyError::BadSignature)
+    );
 }
 
 #[test]
 fn a_session_and_a_telegram_payload_cannot_stand_in_for_each_other() {
-    // Different keys for different proofs: neither can be replayed as the other.
     let session = issue(&user(7), now() + TimeDelta::hours(1), &token());
     assert!(verify(&session, &token(), now(), TimeDelta::hours(1)).is_err());
     assert!(verify_session("auth_date=1&hash=00", &token(), now()).is_err());
@@ -95,6 +102,9 @@ fn a_session_signed_with_the_key_telegram_payloads_use_is_refused() {
 #[test]
 fn nonsense_is_refused_without_panicking() {
     for nonsense in ["", ".", "zz.zz", "abc", "7b7d.", ".00"] {
-        assert!(verify_session(nonsense, &token(), now()).is_err(), "{nonsense:?}");
+        assert!(
+            verify_session(nonsense, &token(), now()).is_err(),
+            "{nonsense:?}"
+        );
     }
 }

@@ -28,15 +28,12 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
-# `raw_value` keeps a request body as it was sent while it is checked, so it is read into its type
-# from the very bytes that arrived.
+# `raw_value`: body checked and parsed from same raw bytes.
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-# `fs` serves the app's static build, `set-status` turns the 404 page into an actual 404,
-# `set-header` carries the cache policy and security headers, and compression shrinks the app's
-# bundles for a phone on a basement's signal. The workspace line holds what every user of
-# tower-http needs; these are wanted here and nowhere else.
+# Only this crate needs these: `fs` static build, `set-status` real 404, `set-header` cache and
+# security headers, compression for app bundles on weak mobile signal.
 tower-http = { workspace = true, features = ["fs", "set-status", "set-header", "compression-gzip", "compression-br"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

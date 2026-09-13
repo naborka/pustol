@@ -56,7 +56,7 @@ export type NumericSetting =
   | "remind_hours"
   | "grace_minutes";
 
-/** Length as the server counts it: characters, where JavaScript counts an emoji as two. */
+/** Length as server counts: characters, not UTF-16 units; JavaScript counts emoji as two. */
 export function characters(text: string): number {
   return [...text].length;
 }
@@ -66,14 +66,13 @@ function within(value: number, bounds: Bounds): boolean {
 }
 
 /**
- * A text as the server keeps it: Rust's `str::trim`, which strips Unicode White_Space.
- *
- * `String.prototype.trim` strips a different set — it takes a byte-order mark and leaves U+0085.
+ * Rust `str::trim`: strips Unicode White_Space. `String.prototype.trim` differs: strips byte-order
+ * mark, keeps U+0085.
  */
 export function trimmed(text: string): string {
   let start = 0;
   let end = text.length;
-  // Every White_Space character is one UTF-16 unit, so stepping by units steps by characters.
+  // Every White_Space character is one UTF-16 unit, so unit steps are character steps.
   while (start < end && WHITE_SPACE.test(text.charAt(start))) start += 1;
   while (end > start && WHITE_SPACE.test(text.charAt(end - 1))) end -= 1;
   return text.slice(start, end);
@@ -86,14 +85,14 @@ export function isTelegramUsername(candidate: string): boolean {
   return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(candidate);
 }
 
-/** Who a username names: Telegram ignores its case. */
+/** Telegram ignores username case. */
 export function usernameKey(username: string): string {
   return username.toLowerCase();
 }
 
 const PHONE_MAX_CHARS = 32;
 
-/** A phone number or a Telegram username: `Contact::parse` in `pustol-domain`, advisory here. */
+/** Phone number or Telegram username. Advisory mirror of `Contact::parse` in `pustol-domain`. */
 export function isContact(text: string): boolean {
   const contact = trimmed(text);
   if (isTelegramUsername(contact.startsWith("@") ? contact.slice(1) : contact)) return true;
@@ -111,7 +110,7 @@ function isBlank(text: string): boolean {
 }
 
 function longerThan(text: string, limit: number): boolean {
-  // A character is one or two UTF-16 units, so a text of no more units than the limit fits.
+  // Character is one or two UTF-16 units, so text within limit in units fits.
   if (text.length <= limit) return false;
   let count = 0;
   for (const _character of trimmed(text)) {
@@ -123,10 +122,7 @@ function longerThan(text: string, limit: number): boolean {
 
 const LISTS = ["zones", "tables", "message_templates", "cancel_reasons", "staff"] as const satisfies readonly (keyof ListLimits)[];
 
-/**
- * Whether `list` stays within its bound with `adding` more items. Asked on its own rather than
- * through `wouldBeLegal`: an add button must not grey out because something else is wrong.
- */
+/** Separate from `wouldBeLegal`: add button must not grey out because something else is wrong. */
 export function roomFor(
   draft: SettingsDraft,
   limits: Limits,
@@ -274,13 +270,7 @@ export function wouldBeLegal(
   return isLegal(edited(draft, change), limits);
 }
 
-/**
- * The proposal with `change` made, on a copy.
- *
- * Changes rather than finished proposals are what the screen hands up, so an edit typed while a
- * save is on its way can be made again on top of what the save stored — including tables the save
- * has just given ids to, which a copy of the old proposal would add a second time.
- */
+/** Screen hands up changes, not finished proposals, so edit typed during save replays on what save stored. */
 export function edited(draft: SettingsDraft, change: Edit): SettingsDraft {
   const next = copyDraft(draft);
   change(next);
@@ -307,7 +297,7 @@ export function shortestShiftMinutes(draft: SettingsDraft): number | null {
   );
 }
 
-/** Whether two plain JSON values are equal. */
+/** Equality of plain JSON values only. */
 export function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }

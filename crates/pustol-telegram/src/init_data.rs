@@ -33,12 +33,10 @@ const HASH_FIELD: &str = "hash";
 /// here — that check exists for parties who do *not* hold the bot token, and we do.
 const SIGNATURE_FIELD: &str = "signature";
 
-/// How far Telegram's clock may be from this server's, either way.
+/// Allowed drift between Telegram clock (`auth_date`) and this server, either way.
 ///
-/// `auth_date` comes from Telegram's clock. Two synchronised clocks still drift by seconds, and a
-/// payload dated a moment "in the future" is a guest who cannot open the app, not a forgery. The
-/// same bound says how early a payload may really have been signed: anything that must have happened
-/// after some moment on this server's clock is judged against `auth_date` less this.
+/// Payload slightly "in future" is drift, not forgery. Check that payload was signed after some
+/// server moment must compare against `auth_date` minus this.
 pub const CLOCK_SKEW: TimeDelta = TimeDelta::minutes(1);
 
 /// A Telegram account, as Telegram describes it.
@@ -107,10 +105,8 @@ pub struct BotToken {
     /// carries Telegram's newer signature field. Deriving it at construction keeps the verifier's
     /// per-request work to the one HMAC that actually depends on the payload.
     signing_key: [u8; 32],
-    /// `HMAC-SHA256("PustolSession", token)`: the key sessions are signed with.
-    ///
-    /// A salt of its own, so that nothing signed as a session can pass for Telegram's signature
-    /// and nothing Telegram signed can pass for a session.
+    /// `HMAC-SHA256("PustolSession", token)`. Own salt: session and Telegram signature never
+    /// pass for each other.
     pub(crate) session_key: [u8; 32],
 }
 
@@ -134,8 +130,7 @@ impl BotToken {
         &self.token
     }
 
-    /// The bot's own account id: the part of the token before the colon, which stays the same when
-    /// the token is revoked and issued again. `None` for a token not in the shape Telegram issues.
+    /// Token part before colon; survives token reissue. `None` when token not in Telegram shape.
     #[must_use]
     pub fn bot_id(&self) -> Option<i64> {
         self.token
@@ -247,10 +242,13 @@ fn hmac_matches(data: &str, token: &BotToken, expected_hex: &str) -> bool {
 /// malformed escape — would reject every genuine payload, and one that differed the other way
 /// would accept forged ones.
 fn form_urlencoded_pairs(input: &str) -> impl Iterator<Item = (String, String)> + '_ {
-    input.split('&').filter(|pair| !pair.is_empty()).map(|pair| {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (percent_decode(key), percent_decode(value))
-    })
+    input
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
 }
 
 fn percent_decode(input: &str) -> String {

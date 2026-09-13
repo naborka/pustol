@@ -44,6 +44,10 @@ pub struct Store {
 impl Store {
     /// Opens a pool. `max_connections` is a deployment decision, so it is asked for rather than
     /// guessed at.
+    ///
+    /// # Errors
+    ///
+    /// Database unreachable or refuses connection.
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
@@ -63,13 +67,16 @@ impl Store {
     }
 
     /// Brings the database up to date.
+    ///
+    /// # Errors
+    ///
+    /// Migration fails or database failure.
     pub async fn migrate(&self) -> Result<()> {
         MIGRATOR.run(&self.pool).await?;
         Ok(())
     }
 
-    /// A read-only transaction that sees the database as it was at its first statement, for a reading
-    /// whose parts have to describe one moment.
+    /// Read-only repeatable-read transaction: every read in it sees one moment.
     pub(crate) async fn snapshot(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
         Ok(self
             .pool

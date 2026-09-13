@@ -1,5 +1,3 @@
-//! What a guest can do: see the bar, see their bookings, take one, give one back.
-
 use axum::extract::State;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -122,11 +120,8 @@ async fn days(
     }))
 }
 
-/// Arrival times for a party on one shift, and what booking on it would do to what the guest holds.
-///
-/// A guest changing an existing booking must still see their own time as free, or the only way to
-/// move from 20:00 to 20:30 would be to give up 20:00 first and hope. What is set aside is exactly
-/// what a booking on that shift would replace — never a table they are sitting at.
+/// Guest's own replaceable bookings count as free, else moving 20:00 to 20:30 means cancel first
+/// and hope. Only what booking would replace is set aside, never table they sit at.
 async fn availability(
     State(state): State<AppState>,
     caller: Authenticated,
@@ -147,7 +142,6 @@ async fn availability(
     }))
 }
 
-/// The caller's own running bookings, which every offer made to them weighs by the rebooking rule.
 async fn own_bookings(
     state: &AppState,
     caller: &Authenticated,
@@ -164,8 +158,7 @@ async fn own_bookings(
 #[derive(Debug, serde::Serialize)]
 pub struct BookingTaken {
     pub booking: GuestBooking,
-    /// Every booking this one replaced, soonest first, so the app can say so rather than appear to
-    /// have lost them.
+    /// Soonest first; app says so, not appear to lose them.
     pub replaced: Vec<Uuid>,
 }
 
@@ -176,8 +169,7 @@ async fn book(
 ) -> ApiResult<Json<BookingTaken>> {
     let now = state.now();
     let service_day = request.service_date.day()?;
-    // The account has to exist before a booking can point at it, and the name the booking is filed
-    // under is the one stored for it rather than whatever a session remembered.
+    // Account row must exist first; booking name from stored account, not stale session profile.
     let viewer = caller.viewer(&state).await?;
 
     let created = state
@@ -219,8 +211,6 @@ pub(crate) fn word_reminder(config: &ValidConfig, window: Interval, party_size: 
     messages::reminder(&config.name, window.start(), config.timezone, party_size)
 }
 
-/// A guest gives one of their tables back.
-///
 /// No reason is recorded and nothing is sent: they know why, and a bar that messages somebody about
 /// a cancellation they just made themselves looks broken.
 async fn cancel(
@@ -233,7 +223,7 @@ async fn cancel(
         .store
         .cancel_booking_of_guest(state.bar, caller.user_id(), BookingId(id), now)
         .await?;
-    // Nothing replaces a cancelled booking, whatever else the guest holds.
+    // Cancelled booking is never replaced, so other bookings irrelevant.
     Ok(Json(GuestBooking::of(
         &cancelled.record,
         &[],

@@ -1,4 +1,4 @@
-//! One evening as the shift screen draws it, read as one moment of the room.
+//! Shift screen evening, read as one snapshot of the room.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use pustol_domain::config::ValidConfig;
@@ -13,42 +13,36 @@ use crate::error::Result;
 use crate::ids::BarId;
 use crate::records::{BlockRecord, BookingRecord};
 
-/// How far ahead the staff day sheet reaches.
-///
-/// The widest booking horizon the bar could ever set for guests, so staff can always see at least
-/// as far as the guests they are answering the phone for — and, as the docs promise, a month out.
+/// Staff day sheet reach: widest guest horizon bar may ever set, so staff always see at least as
+/// far as guests, and a month out as docs promise.
 pub const STAFF_REACH_DAYS: i32 = LIMITS.horizon_days.max;
 
-/// One evening, and everything the shift screen draws around it, as one moment of the room.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Evening {
-    /// The moment it was read for, which "now", "started" and "over" are judged by.
+    /// Moment read for; judges "now", "started" and "over".
     pub now: DateTime<Utc>,
     pub day: ServiceDay,
-    /// The shift running at `now`, by `config`.
+    /// Shift running at `now`, by `config`.
     pub today: ServiceDay,
-    /// The configuration in force when it was read.
     pub config: ValidConfig,
-    /// The evening's bookings, cancelled ones left out.
+    /// Cancelled ones left out.
     pub bookings: Vec<BookingRecord>,
-    /// The tables shut on this evening and no other.
+    /// Tables shut on this evening only.
     pub blocks: Vec<BlockRecord>,
-    /// How many bookings each day of the staff day sheet holds, from `today` onwards.
+    /// Staff day sheet counts, from `today` onwards.
     pub days: Vec<DayCount>,
-    /// How far the bar's room had moved on when this was read. Any later change to a booking, a
-    /// closure, a table or the bar reads higher.
+    /// Room version. Any later change to booking, closure, table or bar reads higher.
     pub version: i64,
 }
 
-/// One row of the staff day sheet.
+/// Staff day sheet row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DayCount {
     pub day: ServiceDay,
     pub bookings: usize,
 }
 
-/// One evening's bookings, cancelled ones left out, and its closures, as [`load_shift`] and
-/// [`load_blocks_on`] order them.
+/// Cancelled bookings left out; order as [`load_shift`] and [`load_blocks_on`] give.
 pub(crate) struct ShiftRows {
     pub(crate) day: ServiceDay,
     pub(crate) bookings: Vec<BookingRecord>,
@@ -56,11 +50,12 @@ pub(crate) struct ShiftRows {
 }
 
 impl Store {
-    /// One evening as it stands at `now`.
+    /// Read on one snapshot: version read after rest would call older room newer, and screen
+    /// keeping newest evening would keep that one.
     ///
-    /// Read on one snapshot, so the bookings, the closures, the day sheet and the version describe
-    /// the same moment. A version read a moment after the rest would call an older room newer than
-    /// it is, and a screen keeping the newest evening would keep that one.
+    /// # Errors
+    ///
+    /// `NotFound` for unknown bar, stored config refusals, database errors.
     pub async fn evening(
         &self,
         bar: BarId,
@@ -75,11 +70,8 @@ impl Store {
     }
 }
 
-/// Reads one evening on a transaction that has already read the configuration in force.
-///
-/// Every write that changes the room calls this, or [`evening_around`] with rows it already holds,
-/// before it commits, under the bar's lock: nothing else changes the room in between, so the answer
-/// is the room exactly as that write left it, and a failure to read it takes the write back with it.
+/// Every room write calls this, or [`evening_around`], before commit under bar lock: answer is room
+/// exactly as write left it, and read failure rolls write back.
 pub(crate) async fn read_evening(
     connection: &mut PgConnection,
     bar: BarId,
@@ -91,7 +83,6 @@ pub(crate) async fn read_evening(
     evening_around(connection, bar, config, rows, now).await
 }
 
-/// `day`'s bookings and closures.
 pub(crate) async fn read_shift(
     connection: &mut PgConnection,
     bar: BarId,
@@ -104,7 +95,6 @@ pub(crate) async fn read_shift(
     })
 }
 
-/// The evening `rows` are, with the day sheet and the version read around them.
 pub(crate) async fn evening_around(
     connection: &mut PgConnection,
     bar: BarId,
@@ -127,7 +117,6 @@ pub(crate) async fn evening_around(
     })
 }
 
-/// How many bookings sit on each of `days`, and the room's version, in one round trip.
 async fn day_counts_and_version(
     connection: &mut PgConnection,
     bar: BarId,

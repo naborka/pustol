@@ -1,17 +1,5 @@
--- How far each bar's room has moved on.
---
--- The shift screen draws an evening from whichever answer arrives, and answers arrive out of order: a
--- read sent before a write can land after the write's own answer and put back the room as it was.
--- Every change to what an evening shows — a booking, a table taken out of service, a table, the bar's
--- own row — now moves one counter forward, and a screen keeps the newest evening it has.
---
--- Moved by triggers rather than by the code that writes, so no write path, present or future, can
--- change the room without moving it. One row per bar, locked by the transaction that moves it until
--- that transaction ends, so two writers never hand out the same number.
---
--- The bar's own trigger is an `after` trigger that writes only here. `bar_advance_version` sets
--- `updated_at` before the row is written and knows nothing of this table, and nothing here writes
--- `bar`, so neither can fire the other.
+-- Answers arrive out of order; screen keeps highest room version. Triggers bump it so no write path skips; row lock stops duplicate numbers.
+-- `bar` trigger is `after` and writes only here; `bar_advance_version` never touches this table, so no trigger loop.
 
 create table room_version (
   bar_id uuid primary key references bar (id) on delete cascade,

@@ -1,13 +1,5 @@
--- Which updates sent to the bot have already been taken in hand.
---
--- Progress lived only in the running process. A crash, or Telegram out of reach while stopping, left
--- the next process asking from the start and answering every guest a second time, and two processes
--- polling at once could both answer the same tap.
---
--- One row per update, claimed before it is answered: whoever inserts the row answers, and nobody
--- else does. Keyed by the bot's own id, because update ids are counted per bot. `claimed_at` says
--- whether a row still counts: Telegram keeps an update for a day, and after a quiet week counts ids
--- afresh from a random number, so an old claim could name an update nobody has seen.
+-- Durable claim per update, so restart or two pollers never answer twice. Whoever inserts row answers. Keyed by bot id: update ids count per bot.
+-- `claimed_at` expires claims: Telegram keeps update one day, restarts ids from random number after quiet week.
 
 create table bot_update (
   bot_id bigint not null,

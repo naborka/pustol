@@ -1,6 +1,4 @@
-/**
- * Settings that change under a manager's edits: what reaches the screen, and what is kept.
- */
+/** Settings changing under manager edits: what reaches screen, what is kept. */
 
 import { describe, expect, it } from "vitest";
 
@@ -92,8 +90,7 @@ describe("settings that arrive", () => {
   });
 
   it("of the same version change nothing, whatever order they list the staff in", () => {
-    // A save answered in the order it was sent while reads listed the staff sorted: taking the reread
-    // made the manager's untouched roster look like an edit.
+    // Save answers in sent order, reads sort staff; taking reread must not make untouched roster look edited.
     const shown = settingsView({
       version: v2.version,
       staff: [
@@ -139,7 +136,7 @@ describe("settings that arrive", () => {
   });
 
   it("take a save of one's own the server trimmed as saved, with nothing left to save", () => {
-    // The save committed and its answer was lost: the reread holds the name as the server trimmed it.
+    // Save committed, answer lost: reread holds name as server trimmed it.
     const current = editing(v1, (draft) => {
       draft.name = "Чердак ";
     });
@@ -225,8 +222,7 @@ describe("a save that answers", () => {
   });
 
   it("makes an edit typed while it was on its way on the item that edit named, whatever order it lists them in", () => {
-    // The server lists staff by username and tables by number: a position taken before the save
-    // named somebody else after it.
+    // Server sorts staff by username, tables by number: index from before save names someone else after.
     const sent: SettingsDraft = {
       ...draftOf(v1),
       staff: [{ username: "marina" }, { username: "nastya" }, { username: "pavel" }, { username: "aaron_bar" }],

@@ -1,18 +1,16 @@
 /**
- * The changes the settings screen makes to an item already in a list, each naming the item by what
- * it is rather than by where it stands.
+ * Edits to existing list items, naming item by identity, not position.
  *
- * An edit made while a save is on its way is made again on top of what the save stored, and the
- * server lists staff by username and tables by number, not in the order they were sent: a position
- * taken before the answer names another item after it. Messages and cancel reasons are kept in the
- * order they were sent, so their edits may go by position.
+ * Edit made during save replays on what save stored, and server lists staff by username and tables
+ * by number, not send order: position taken before answer names other item after. Messages and
+ * cancel reasons keep send order, so their edits may use position.
  */
 
 import type { Edit } from "./settingsRules";
 
 /**
- * By the username as the row spells it. Two rows one case apart are both on screen until a save
- * refuses them, and the server stores the case it was sent, so the tapped row is the one that goes.
+ * Matches exact spelling. Rows one case apart both show until save refuses them; server stores sent
+ * case, so tapped row goes.
  */
 export function removeStaff(username: string): Edit {
   return (draft) => {

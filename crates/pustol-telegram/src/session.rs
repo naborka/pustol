@@ -1,13 +1,9 @@
-//! What a fresh Telegram payload is exchanged for.
+//! Day-long session traded for fresh Telegram payload.
 //!
-//! Telegram hands the app its signed payload once, when it opens, and never again while it stays
-//! open. The payload is accepted for an hour, because it travels in the launch URL and is copied
-//! wherever that URL is. A shift is longer than an hour, so the first request trades a fresh payload
-//! for a session: the same account, signed by this server, ending a day after Telegram signed the
-//! payload. The session lives in the app's memory and in a header, and nowhere a URL goes.
+//! Telegram gives signed payload only once, at app open. Payload rides launch URL, so accepted one
+//! hour only; shift is longer. Session is kept in app memory and header, never in URL.
 //!
-//! Written as `claims.signature`, both hex. The signature covers the claims exactly as sent, so there
-//! is no second encoding to disagree with.
+//! Format `claims.signature`, both hex. Signature covers claims bytes as sent: no second encoding.
 
 use chrono::{DateTime, Utc};
 use hmac::{KeyInit, Mac};
@@ -15,7 +11,6 @@ use subtle::ConstantTimeEq;
 
 use crate::init_data::{BotToken, HmacSha256, TelegramUser, VerifyError};
 
-/// A session this server issued, verified.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Session {
     pub user: TelegramUser,
@@ -25,11 +20,10 @@ pub struct Session {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Claims {
     user: TelegramUser,
-    /// When the session ends, as a unix timestamp.
+    /// Unix timestamp.
     exp: i64,
 }
 
-/// Signs a session for `user` that ends at `expires_at`.
 #[must_use]
 pub fn issue(user: &TelegramUser, expires_at: DateTime<Utc>, token: &BotToken) -> String {
     let claims = Claims {
@@ -41,7 +35,10 @@ pub fn issue(user: &TelegramUser, expires_at: DateTime<Utc>, token: &BotToken) -
     format!("{claims}.{signature}")
 }
 
-/// Verifies a session and returns who it is for.
+/// # Errors
+///
+/// `BadSignature` when not signed by this token, `SessionEnded` at or past expiry, `MalformedUser`
+/// or `MalformedAuthDate` when claims do not parse.
 pub fn verify_session(
     text: &str,
     token: &BotToken,
@@ -52,7 +49,7 @@ pub fn verify_session(
     if !bool::from(sign(claims, token).as_slice().ct_eq(&signature)) {
         return Err(VerifyError::BadSignature);
     }
-    // Signed by this server, so a claim that does not read is a bug here rather than an attack.
+    // Signature valid, so unreadable claims mean bug here, not attack.
     let claims: Claims = hex::decode(claims)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())

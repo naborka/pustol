@@ -95,18 +95,17 @@ impl Booking {
         Interval::new(self.window.start(), end).ok()
     }
 
-    /// Whether the window promised has begun by `now`.
+    /// By promised window, not occupancy.
     #[must_use]
     pub fn has_started(&self, now: DateTime<Utc>) -> bool {
         self.window.start() <= now
     }
 
-    /// Whether this booking is the record of an evening rather than a table still held.
+    /// Table no longer held at `now`, per [`Self::occupancy`].
     ///
-    /// **The one rule for "over".** Whether staff may still move or cancel it, whether it is still
-    /// the guest's, whether the room may re-seat it and whether a screen draws it as done are all
-    /// this question, answered by [`Self::occupancy`]: a party that went home or never came is over
-    /// from the minute its table went back, whatever window was promised.
+    /// **One rule for "over".** Staff move or cancel, guest ownership, re-seating and screen done
+    /// state all ask this. Party gone home or never came is over once table went back, whatever
+    /// window promised.
     #[must_use]
     pub fn has_finished(&self, now: DateTime<Utc>) -> bool {
         self.occupancy().is_none_or(|held| held.end() <= now)
@@ -159,8 +158,7 @@ pub struct Request<'a> {
     /// window can outlast midnight; this function does not filter by service day.
     pub bookings: &'a [Booking],
     pub blocks: &'a [TableBlock],
-    /// Bookings set aside: one being moved, which must not block its own new place, or the ones a
-    /// guest's booking again would replace.
+    /// Bookings that block nothing: one being moved, or ones guest's new booking replaces.
     pub ignoring: &'a [BookingId],
 }
 
@@ -179,8 +177,7 @@ pub fn free_tables<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
         .collect()
 }
 
-/// Every table free for the request's window whatever the party: [`free_tables`] before the seats are
-/// asked. What a sheet draws, the tables too small for the party among them.
+/// [`free_tables`] for any party size: sheet draws too-small tables too.
 #[must_use]
 pub fn open_tables_for<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
     open_tables(
@@ -193,9 +190,7 @@ pub fn open_tables_for<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
     )
 }
 
-/// Every table the room could put a party of any size at for `window` on `service_day`: live, open
-/// that evening, and held by no booking outside `ignoring` for any part of it. Smallest first, ties by
-/// printed number.
+/// Live, not blocked, free for `window` except `ignoring`. Smallest first, ties by number.
 fn open_tables<'a>(
     tables: &'a [BarTable],
     service_day: ServiceDay,
@@ -232,9 +227,8 @@ fn is_blocked(table_id: TableId, service_day: ServiceDay, blocks: &[TableBlock])
         .any(|block| block.table_id == table_id && block.service_day == service_day)
 }
 
-/// Whether no booking outside `ignoring` holds `table_id` at any moment of `window`.
-///
-/// The one test of "this table is free then", which every list of free tables is filtered by.
+/// No booking outside `ignoring` holds `table_id` during `window`. Every free-table list filters by
+/// this.
 #[must_use]
 pub fn free_during(
     table_id: TableId,
@@ -247,18 +241,17 @@ pub fn free_during(
         .any(|booking| !ignoring.contains(&booking.id) && booking.holds(table_id, window))
 }
 
-/// What the room offers a party walking in.
+/// Offer for party walking in.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WalkIn<'a> {
-    /// The window a party sitting down now holds: [`ValidConfig::walk_in_window`].
+    /// [`ValidConfig::walk_in_window`].
     pub window: Interval,
-    /// Every table free for all of `window`, whatever the party: live, open tonight, and held by nobody
-    /// for any part of it. Smallest first, ties by printed number.
+    /// Free for all of `window`, any party size. Smallest first, ties by number.
     pub tables: Vec<&'a BarTable>,
 }
 
 impl<'a> WalkIn<'a> {
-    /// The tables that seat `party_size`: [`free_tables`] for this window, in the same order.
+    /// [`free_tables`] for this window, same order.
     #[must_use]
     pub fn tables_for(&self, party_size: i32) -> Vec<&'a BarTable> {
         self.tables
@@ -268,11 +261,9 @@ impl<'a> WalkIn<'a> {
             .collect()
     }
 
-    /// The largest party of at most `max_party` a table on offer seats, or `None` when none is on
-    /// offer.
+    /// Largest party up to `max_party` a table on offer seats; `None` when nothing on offer.
     ///
-    /// The shift's "who fits" line. A table that seats a party seats every smaller one, so the
-    /// largest party that fits is the most seats on offer.
+    /// Table seating party seats every smaller one, so answer is most seats on offer.
     #[must_use]
     pub fn largest_party(&self, max_party: i32) -> Option<i32> {
         self.tables
@@ -282,11 +273,10 @@ impl<'a> WalkIn<'a> {
     }
 }
 
-/// What the room offers a party walking in on `day` at `now`, or `None` when `day` seats nobody new
-/// now: it is not the running shift, or it is not [open](ValidConfig::is_open).
+/// `None` unless `day` is running shift and [open](ValidConfig::is_open).
 ///
-/// **The one rule for walk-ins.** Seating a party at the door and the tables the shift offers one are
-/// both this, so the shift never offers a table the door then refuses.
+/// **One rule for walk-ins.** Door seating and shift's offer both use it, so offer never names table
+/// door refuses.
 #[must_use]
 pub fn walk_in<'a>(
     config: &'a ValidConfig,
@@ -404,8 +394,7 @@ mod tests {
             }
         }
 
-        /// The largest party of at most `max_party` the walk-in offer for `window` seats, held to the
-        /// allocator's own answer: the largest size from the cap down it assigns a table to.
+        /// Asserts walk-in answer equals allocator's: largest size from cap down that gets a table.
         fn largest_party(&self, window: Interval, max_party: i32) -> Option<i32> {
             let offer = WalkIn {
                 window,

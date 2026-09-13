@@ -1,11 +1,9 @@
 /**
- * When a booking holds its table — the screen's half of the one occupancy rule.
+ * When booking holds its table: screen half of the one occupancy rule.
  *
- * The server answers the same question for free-now, for the arrival times, for the tables free at
- * each of them and for the walk-in offer, from the same interval, and sends those answers.
- * Everything a staff screen still works out from the bookings derives from [`occupancyEnd`] and from
- * nothing else, so a block on the timeline, the seated-guest count and the shift's own occupancy
- * figure cannot disagree about a party that went home at 21:20.
+ * Server answers free-now, arrival times, free tables per time and walk-in offer from same interval.
+ * What staff screen still derives from bookings goes only through [`occupancyEnd`], so timeline
+ * block and shift occupancy figures never disagree about party that left at 21:20.
  */
 
 import type { ShiftBooking, ShiftTable, ShiftView, StaffSlot } from "./api";
@@ -51,15 +49,12 @@ export interface TableOffer {
 }
 
 /**
- * The tables of `shift` the server names as free, as offers: the ones that fit the party first, each
- * half smallest first, ties by printed number.
+ * Server-named free tables as offers: fitting first, each half smallest first, ties by number.
  *
- * The same order the allocator uses, so the top is the table the room would have chosen: smallest
- * that fits, because a couple at a six-top is how a Friday runs out of six-tops. The server checks
- * again inside the transaction and has the last word.
+ * Allocator order, so top is table room would pick: smallest that fits, since couple at six-top is
+ * how Friday runs out of six-tops. Server rechecks in transaction, has last word.
  *
- * The rest are free tables this party is too large for, drawn rather than dropped: an empty room
- * under «свободного стола нет» reads like a broken app, and the reason is the answer.
+ * Too-small tables drawn, not dropped: empty room under «свободного стола нет» reads as broken app.
  */
 export function offersOf(
   shift: ShiftView,
@@ -74,19 +69,12 @@ export function offersOf(
   return [...offers.filter((offer) => offer.fits), ...offers.filter((offer) => !offer.fits)];
 }
 
-/**
- * The tables a party at the door can be put at: the ones the server names as free for the whole
- * window it would give now. Never worked out here: on the night the clocks change, wall minutes give
- * the wrong window.
- */
+/** Tables server names free for walk-in window now. Never computed here: wall minutes wrong on clock-change night. */
 export function walkInOffers(shift: ShiftView, partySize: number): TableOffer[] {
   return offersOf(shift, shift.walk_in_free_table_ids, partySize);
 }
 
-/**
- * The tables a booking at `startMinutes` can be put at: the ones the server names as free for that
- * slot's window, none when the answer has no such slot.
- */
+/** Tables server names free for slot at `startMinutes`; none when answer lacks that slot. */
 export function slotOffers(
   shift: ShiftView,
   slots: readonly StaffSlot[],

@@ -64,7 +64,7 @@ type Ask = (change: Edit) => boolean;
 interface Context {
   draft: SettingsDraft;
   settings: SettingsView;
-  /** How many of the evening's bookings each table holds, by table id; null until it is read. */
+  /** Evening booking count per table id; null until read. */
   bookingsByTable: ReadonlyMap<string, number> | null;
   limits: Limits;
   editedWeekday: number;
@@ -95,7 +95,6 @@ export function sectionValue(section: Section, draft: SettingsDraft, weekday: nu
   }
 }
 
-/** How many of an evening's bookings each table holds, by table id. */
 function bookingsByTableOf(room: ShiftView): Map<string, number> {
   const counts = new Map<string, number>();
   for (const booking of room.bookings) {
@@ -118,22 +117,21 @@ export function SettingsScreen({
 }: {
   settings: SettingsView;
   draft: SettingsDraft;
-  /** The evening on screen, whose bookings each table's count is of; null until it is read. */
+  /** Shown evening, source of per-table counts; null until read. */
   room: ShiftView | null;
   editedWeekday: number;
   onEdit: (change: Edit) => void;
   onEditWeekday: (weekday: number) => void;
   /**
-   * The open section, or the index. Held by the page, so that a look at the shift comes back to
-   * the section being edited and Telegram's back button can close it.
+   * Open section, or index. Page holds it so shift detour returns to section and Telegram back button
+   * can close it.
    */
   section: Section | null;
   onSection: (section: Section | null) => void;
 }) {
   const limits = settings.limits;
 
-  // One notion of "an edit", handed to every section: a change is described once and then both asked
-  // about and made, rather than written out twice in two shapes.
+  // One edit shape for every section: change described once, then both asked about and applied.
   const context: Context = {
     draft,
     settings,
@@ -572,8 +570,8 @@ function RoomSection({ ctx }: { ctx: Context }) {
         label="+ Добавить стол"
         disabled={!roomFor(draft, limits, "tables", 1)}
         onClick={() => {
-          // Named outside the edit: an edit made while a save is on its way is made again on top of
-          // what the save stored, and must add the same table.
+          // Id outside edit: edit made during save replays on top of stored save and must add same
+          // table.
           const id = uuid();
           edit((next) => {
             next.tables.push({ id, seats: 4, zone: next.zones[0] ?? "Зал" });
@@ -691,7 +689,6 @@ function ListSection({
   title: string;
   addLabel: string;
   items: string[];
-  /** The list has room for one more. */
   canAdd: boolean;
   placeholder: string;
   onChange: (items: string[]) => void;
@@ -735,8 +732,8 @@ function ListSection({
 }
 
 /**
- * The username, and which of the rows spelled that way this is: the roster may hold one name twice
- * until a save refuses it, and an index alone would hand a removed row's focus to the next member.
+ * Username plus occurrence among same-spelled rows: roster may hold duplicate until save refuses, and
+ * index alone would hand removed row's focus to next member.
  */
 function staffRowKey(staff: { username: string }[], index: number): string {
   const username = staff[index]?.username ?? "";
@@ -800,7 +797,6 @@ function AddStaff({
   canAdd,
   onAdd,
 }: {
-  /** The roster has room for one more. */
   canAdd: boolean;
   onAdd: (username: string) => void;
 }) {
@@ -845,8 +841,8 @@ function AddStaff({
  *
  * Only then: a save button that is always there and usually inert teaches people to ignore it. When
  * the draft is illegal the button is inert and the line beside it names the first reason, so the
- * refusal arrives before the request rather than after it. A save the server refused says so here
- * until the next edit or save, with its reasons one tap away, whatever sheet came and went meanwhile.
+ * refusal arrives before the request rather than after it. Server refusal stays here until next edit
+ * or save, reasons one tap away, whatever sheet came and went.
  */
 export function SaveBar({
   reason,
@@ -859,7 +855,7 @@ export function SaveBar({
   saving: boolean;
   onSave: () => void;
   onRevert: () => void;
-  /** Opens why the last save was refused; null when it was not. */
+  /** Opens last save refusal; null when none. */
   onWhy: (() => void) | null;
 }) {
   return (

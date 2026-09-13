@@ -161,12 +161,7 @@ export function contrastRatio(foreground: string, background: string): number | 
 /** The smallest contrast this app will ship: WCAG AA for ordinary text. */
 export const MIN_CONTRAST = 4.5;
 
-/**
- * The first colour that can be read on every one of `grounds`.
- *
- * A colour whose contrast cannot be computed — not a hex value — is taken on trust rather than
- * replaced: there is no evidence it is unreadable.
- */
+/** First candidate readable on every ground. Non-hex colour taken on trust: no evidence unreadable. */
 function readableOn(candidates: (string | undefined)[], grounds: string[]): string | undefined {
   return candidates.find(
     (color) =>
@@ -208,9 +203,8 @@ export function paletteFrom(
     bg,
     sec,
     txt,
-    // The user's own hint colour where it can be read, and otherwise the nearest one that can.
-    // Telegram's default dark hint is under 4.5:1 on its own card colour, and half the small text
-    // in this app is drawn in it.
+    // User hint colour if readable, else nearest readable. Telegram default dark hint is under 4.5:1
+    // on its own card colour, and half of small text uses it.
     hint: readableOn([theme.hint_color, base.hint, txt], [bg, sec]) ?? base.hint,
     btn,
     buttonText: theme.button_text_color ?? base.buttonText,

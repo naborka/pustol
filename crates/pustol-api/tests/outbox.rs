@@ -206,7 +206,6 @@ async fn a_rate_limit_waits_exactly_as_long_as_telegram_asked() {
     assert_eq!(stub.calls.load(Ordering::Relaxed), 2);
 }
 
-/// A guest with a booking at 20:00 and one of the bar's messages queued for them this morning.
 async fn booked_with_a_staff_message(app: &common::Harness) -> Caller {
     let guest = Caller::new("Катя");
     let id = booking_id(
@@ -233,7 +232,7 @@ fn booking_id(body: &serde_json::Value) -> String {
     body["booking"]["id"].as_str().expect("an id").to_owned()
 }
 
-/// Staff move a booking to another time, letting the room choose the table.
+/// `table_id` null: room picks table.
 async fn move_to(app: &common::Harness, staff: &Caller, id: &str, start_minutes: i32) {
     app.move_booking(
         staff,
@@ -246,7 +245,7 @@ async fn move_to(app: &common::Harness, staff: &Caller, id: &str, start_minutes:
 
 #[tokio::test]
 async fn a_server_fault_is_retried_ever_more_patiently_and_eventually_given_up_on() {
-    // A fixed two-minute wait gave up on a cancellation notice after a ten-minute outage.
+    // Outage can outlast fixed two-minute backoff.
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     booked_with_a_staff_message(&app).await;
     let failures = (0..20)
@@ -342,7 +341,7 @@ async fn nothing_is_sent_about_an_evening_that_is_already_over() {
     let stub = Telegram::accepting();
     let (bot, _) = stub_telegram(stub.clone()).await;
 
-    // The 20:00 booking would have ended at 22:00 Belgrade. Calling it off after that is noise.
+    // 20:00 booking ended 22:00 Belgrade; cancel notice after that is noise.
     assert_eq!(drain(&app.store, &bot, utc(2026, 7, 30, 20, 1)).await, 0);
     assert_eq!(stub.calls.load(Ordering::Relaxed), 0);
 }
@@ -371,7 +370,7 @@ async fn a_message_staff_send_after_the_evening_still_reaches_the_guest() {
     let stub = Telegram::accepting();
     let (bot, _) = stub_telegram(stub.clone()).await;
 
-    // Staff were told it was sent, so it is.
+    // Staff were told it was sent.
     assert_eq!(drain(&app.store, &bot, utc(2026, 7, 30, 20, 30)).await, 1);
     assert_eq!(stub.seen.lock().await[0]["chat_id"], guest.id);
 }

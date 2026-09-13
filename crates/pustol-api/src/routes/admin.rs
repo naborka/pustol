@@ -3,11 +3,9 @@
 //! Every handler here takes [`Staff`], so a guest cannot reach any of them by guessing a URL: the
 //! check is in the signature rather than in a line of code somebody could omit.
 //!
-//! Every write that can change the room answers with the evening as that write left it: read by the
-//! store inside the write's own transaction, before it commits, and drawn by [`ShiftView::of`], the
-//! same drawing `GET /shift` uses. A screen that reloaded the shift itself would draw whatever a
-//! colleague did in between as if this write had done it, and a read after the commit could fail and
-//! report a write that went through as one that did not.
+//! Room writes answer with evening read inside write's own transaction, drawn by [`ShiftView::of`]
+//! like `GET /shift`. Reload after commit would show colleague's change as this write's, and failed
+//! read would report committed write as failed.
 
 use axum::extract::State;
 use axum::routing::{get, patch, post};
@@ -16,9 +14,9 @@ use pustol_db::bar::Settings;
 use pustol_db::bookings::{Attendance, Channel, MoveTo, MoveWords, NewBooking};
 use pustol_db::evening::Evening;
 use pustol_db::records::BookingRecord;
+use pustol_domain::allocator::open_tables_for;
 use pustol_domain::config::ValidConfig;
 use pustol_domain::draft::Draft;
-use pustol_domain::allocator::open_tables_for;
 use pustol_domain::slots::{open_tables_at, slot_list};
 use pustol_domain::{BarTable, BlockReason, BookingId, GuestName, TableId};
 use pustol_telegram::messages;
@@ -65,13 +63,11 @@ async fn shift(
     Ok(Json(ShiftView::of(&evening)))
 }
 
-/// A booking as the evening a write left draws it, by that evening's configuration and clock.
 fn drawn_in(record: &BookingRecord, evening: &Evening) -> ShiftBooking {
     ShiftBooking::of(record, &evening.config, evening.now)
 }
 
-/// Arrival times for a party on one shift, each with the tables free for it, a booking being moved
-/// set aside, and the tables free for that booking's own window.
+/// Moved booking set aside; also tables free for its own stored window.
 async fn availability(
     State(state): State<AppState>,
     _staff: Staff,
@@ -101,7 +97,6 @@ fn table_ids(tables: &[&BarTable]) -> Vec<Uuid> {
     tables.iter().map(|table| table.id.0).collect()
 }
 
-/// A booking staff just wrote, and the evening it is on.
 #[derive(Debug, serde::Serialize)]
 pub struct BookedView {
     pub booking: ShiftBooking,
@@ -143,9 +138,8 @@ async fn create_booking(
 /// Whether a party turned up, sat, or went home.
 ///
 /// The room is re-seated inside the same transaction, so a table given back by a party that left
-/// is offered straight to anybody the room could not seat. Nothing is reported about it here: the
-/// evening in the answer simply has the `Без стола` group shorter, which is the honest amount of
-/// noise for something that fixed itself.
+/// is offered straight to anybody the room could not seat. Not reported: answer's evening just
+/// shows shorter `Без стола` group.
 async fn set_attendance(
     State(state): State<AppState>,
     _staff: Staff,
@@ -166,9 +160,7 @@ async fn set_attendance(
 #[derive(Debug, serde::Serialize)]
 pub struct AttendanceView {
     pub booking: ShiftBooking,
-    /// What the booking recorded just before this change, which is what undo puts back. Read by
-    /// the server in the same transaction, because the screen's own copy may be one a colleague has
-    /// changed since.
+    /// For undo; read in same transaction, since screen copy may be stale after colleague edit.
     pub previous: Attendance,
     pub shift: ShiftView,
 }
@@ -203,8 +195,7 @@ pub struct MovedView {
     pub booking: ShiftBooking,
     /// Whatever the table they left let the room settle.
     pub reconciliation: ReconciliationView,
-    /// Whether the guest will hear about it. Only a time change is theirs to hear about, and only a
-    /// guest the bot can reach will.
+    /// Only time change notifies, and only guest bot can reach.
     pub guest_notified: bool,
     pub shift: ShiftView,
 }
@@ -279,8 +270,7 @@ pub struct CancelledView {
     pub booking: ShiftBooking,
     /// Whatever the freed table let the room put right.
     pub reconciliation: ReconciliationView,
-    /// Whether the guest will be told. False for a booking with no account behind it, and for a
-    /// guest the bot has found it cannot reach: exactly when staff have to pick up the telephone.
+    /// False for door booking without account or guest bot cannot reach: staff must phone.
     pub guest_notified: bool,
     pub shift: ShiftView,
 }
@@ -345,7 +335,7 @@ async fn send_message(
 #[derive(Debug, serde::Serialize)]
 pub struct ClosedView {
     pub reconciliation: ReconciliationView,
-    /// The tables this request closed. One already shut is not among them.
+    /// Excludes tables already shut.
     pub closed: Vec<Uuid>,
     pub shift: ShiftView,
 }
@@ -379,8 +369,7 @@ async fn block(
 #[derive(Debug, serde::Serialize)]
 pub struct ReopenedView {
     pub reconciliation: ReconciliationView,
-    /// The closures this request removed, with the reason each had. A table that was not shut is
-    /// not among them.
+    /// Excludes tables not shut.
     pub reopened: Vec<ReopenedTableView>,
     pub shift: ShiftView,
 }
@@ -458,7 +447,6 @@ async fn save_settings(
     }))
 }
 
-/// The settings screen.
 fn view_of(settings: &Settings) -> SettingsView {
     let config = &settings.config;
     SettingsView {

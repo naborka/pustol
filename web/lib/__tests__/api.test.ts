@@ -1,9 +1,4 @@
-/**
- * What a call carries to prove who is making it.
- *
- * Telegram's payload is accepted for an hour and never refreshed while the app stays open, so a
- * client that kept sending it locked a bartender out of the shift every hour.
- */
+/** Call credentials. Telegram payload valid one hour, never refreshed while app open; resending it locks staff out hourly. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 

@@ -90,8 +90,7 @@ fn an_added_table_is_given_the_next_number_that_has_never_been_used() {
 
 #[test]
 fn a_table_in_the_shapes_the_previous_app_sent_is_still_understood() {
-    // An app opened before the upgrade keeps sending what it sent: a kind beside every table, and no
-    // identity on a table it is adding.
+    // App opened before upgrade still sends `kind` on every table, no id on added ones.
     let current = default_config();
     let existing = current.tables[4].id.0;
     for shape in [
@@ -253,8 +252,7 @@ fn a_retired_table_named_again_comes_back_with_its_own_number() {
 
 #[test]
 fn a_proposal_saved_again_after_it_took_effect_adds_no_second_table() {
-    // The answer to a save can be lost on the way back. The app sends the same rows again, and the
-    // table it added the first time is by then simply a table the bar has.
+    // Save answer lost; app resends same rows, table added first time now existing.
     let current = default_config();
     let mut draft = draft_of(&current);
     draft.tables.push(TableDraft {

@@ -28,9 +28,8 @@ body {
 
 body {
   /*
-   * Telegram's script writes the user's theme as `--tg-theme-*` before the app paints; the app's
-   * own palette arrives only after it has hydrated. Falling back to Telegram's colours first is what
-   * keeps a light-theme user from a dark flash on every launch.
+   * Telegram writes `--tg-theme-*` before paint; app palette arrives after hydration. Telegram
+   * colours as fallback stop dark flash for light-theme users on launch.
    */
   background: var(--bg, var(--tg-theme-bg-color, #17212b));
   color: var(--txt, var(--tg-theme-text-color, #fff));
@@ -56,7 +55,7 @@ input {
   font: inherit;
 }
 
-/* Where the keyboard is, shown to whoever is using one. A tap draws nothing. */
+/* Focus ring for keyboard only; tap draws nothing. */
 :focus-visible {
   outline: 2px solid var(--link, #6ab7ff);
   outline-offset: 2px;

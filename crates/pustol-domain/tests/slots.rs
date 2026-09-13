@@ -11,8 +11,7 @@ use pustol_domain::slots::{
 use pustol_domain::{WeekSchedule, bookable_days};
 
 use common::{
-    DEFAULT_HOURS, at, block, booking, default_config, force, in_force, table, thursday,
-    utc, zone,
+    DEFAULT_HOURS, at, block, booking, default_config, force, in_force, table, thursday, utc, zone,
 };
 
 /// Early morning on the Thursday, before any of the fixture bookings.

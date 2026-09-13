@@ -1,5 +1,3 @@
-//! What a failure tells the caller.
-
 mod common;
 
 use axum::http::StatusCode;
@@ -19,5 +17,8 @@ async fn a_server_fault_names_its_code_and_nothing_about_the_schema() {
     assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(answer.error_code(), Some("internal"));
     let body = answer.body.to_string();
-    assert!(!body.contains("bar_hours"), "the body leaks the schema: {body}");
+    assert!(
+        !body.contains("bar_hours"),
+        "the body leaks the schema: {body}"
+    );
 }

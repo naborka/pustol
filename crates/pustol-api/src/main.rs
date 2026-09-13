@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         .await
         .context("the server stopped unexpectedly")?;
 
-    // Let the outbox finish the batch it is on rather than dropping a message mid-flight.
+    // Let outbox and inbox finish work in hand, not drop message or tap mid-flight.
     let _ = shutdown_tx.send(true);
     let _ = outbox.await;
     let _ = inbox.await;

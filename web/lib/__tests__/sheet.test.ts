@@ -36,8 +36,6 @@ describe("an open sheet when the shift is read again", () => {
   });
 
   it("closes a sheet whose booking or table the shift no longer has", () => {
-    // A cancelled booking's sheet left open was a way to seat, move or message a booking that no
-    // longer exists.
     for (const kind of ["booking", "templates", "cancelBooking", "move"] as const) {
       const gone: OpenSheet = { kind, booking: shiftBooking({ id: "elsewhere" }), opened: 1 };
       expect(refreshedSheet(gone, fresh)).toEqual(NO_SHEET);

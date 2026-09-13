@@ -1,27 +1,23 @@
-//! The data behind the bot's buttons.
-//!
-//! Written and read in one place. The worker draws the button and the inbox answers it, and two
-//! spellings of one string are a button that does nothing.
+//! Bot button callback data; one module writes and reads it so worker and inbox never disagree.
 
 use pustol_domain::BookingId;
 use uuid::Uuid;
 
 const CANCEL_BOOKING: &str = "cancel_booking";
 
-/// What a button asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Callback {
     /// «Не смогу прийти», under a reminder.
     CancelBooking(BookingId),
 }
 
-/// The data for a button that gives this booking's table back. 51 bytes, within Telegram's 64.
+/// 51 bytes; Telegram caps callback data at 64.
 #[must_use]
 pub fn cancel_booking(booking: BookingId) -> String {
     format!("{CANCEL_BOOKING}:{}", booking.0)
 }
 
-/// What a tap asks for, or `None` for data this system never wrote.
+/// `None` for data this system never wrote.
 #[must_use]
 pub fn parse(data: &str) -> Option<Callback> {
     let (kind, rest) = data.split_once(':')?;

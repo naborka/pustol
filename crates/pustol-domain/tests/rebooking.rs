@@ -1,5 +1,3 @@
-//! What a guest's screen may offer to do with a booking they hold.
-
 mod common;
 
 use chrono::{NaiveDate, TimeDelta};
@@ -11,8 +9,7 @@ use pustol_domain::slots::has_arrival_after;
 
 use common::{booking, force, grid, thursday, utc};
 
-/// A party due at midnight that staff marked as not coming before it was due, so the table is held
-/// for them through the grace period.
+/// Due midnight, marked no-show before due, so table held through grace.
 fn held_no_show(turn_minutes: i32) -> Booking {
     let due = booking(1, thursday(), 1440, 2, None, turn_minutes);
     Booking {
@@ -24,8 +21,8 @@ fn held_no_show(turn_minutes: i32) -> Booking {
 
 #[test]
 fn a_held_no_show_is_not_offered_a_move_when_its_evening_has_no_arrival_time_left() {
-    // Last arrival by the hours is 00:30 (close less a ninety-minute turn), but the hourly grid's
-    // last arrival is midnight. At 00:10 the grid has nothing left, whatever closing less a turn says.
+    // Hours say last arrival 00:30 (close less 90-minute turn); hourly grid's last is midnight.
+    // At 00:10 grid has nothing left.
     let config = force(grid(1560, 90, 60));
     let absent = held_no_show(90);
     let now = utc(2026, 7, 30, 22, 10);
@@ -72,7 +69,7 @@ fn a_plan_is_offered_a_move_to_any_evening_whatever_its_own_evening_has_left() {
 
 #[test]
 fn a_booking_holds_its_evening_exactly_when_a_new_booking_on_it_is_refused() {
-    // Half past eight on Thursday, with two-hour sittings from eight.
+    // Thursday 20:30, two-hour sittings from 20:00.
     let during = utc(2026, 7, 30, 18, 30);
     let eight = |sequence, status| Booking {
         status,
@@ -120,10 +117,9 @@ fn a_booking_holds_its_evening_exactly_when_a_new_booking_on_it_is_refused() {
 
 #[test]
 fn a_held_no_show_on_an_evening_the_guest_may_no_longer_book_is_not_offered_a_move() {
-    // Booked for Sunday under a four-day horizon; the manager lowered it to two, and staff marked the
-    // party as not coming before it was due. Only a booking on Sunday takes its place, and Sunday is
-    // refused to guests now. A plan on Sunday is still replaced by a booking on any evening, so the
-    // screen still says so: the app names what it replaces from this.
+    // Sunday booked under four-day horizon, horizon lowered to two, no-show marked before due. Only
+    // Sunday booking replaces it, and Sunday now refused. Sunday plan still replaced by any evening;
+    // app names what it replaces from this.
     let config = force(BarConfig {
         horizon_days: 2,
         ..grid(1560, 120, 30)
@@ -155,9 +151,8 @@ fn a_held_no_show_on_an_evening_the_guest_may_no_longer_book_is_not_offered_a_mo
 
 #[test]
 fn a_plan_is_offered_a_move_only_while_an_evening_is_left_that_the_guest_could_book() {
-    // Twenty past eight on Thursday. The guest's eight o'clock table has begun and holds Thursday, and
-    // they have a plan for Sunday. Under a four-day horizon Friday and Saturday are there to move it to.
-    // Under a horizon of one only Thursday may be booked, and Thursday is theirs already.
+    // Thursday 20:20. Guest's 20:00 table started, holds Thursday; plan for Sunday. Horizon four:
+    // Friday and Saturday open for move. Horizon one: only Thursday, already theirs.
     let during = utc(2026, 7, 30, 18, 20);
     let horizon = |horizon_days| {
         force(BarConfig {
@@ -184,7 +179,7 @@ fn a_plan_is_offered_a_move_only_while_an_evening_is_left_that_the_guest_could_b
         "Thursday is free to them and has arrival times left"
     );
 
-    // Ten past midnight on an hourly grid of ninety-minute sittings: Thursday has no arrival time left.
+    // 00:10, hourly grid, 90-minute sittings: Thursday has no arrival left.
     let late = force(BarConfig {
         horizon_days: 1,
         ..grid(1560, 90, 60)
@@ -199,8 +194,8 @@ fn a_plan_is_offered_a_move_only_while_an_evening_is_left_that_the_guest_could_b
 
 #[test]
 fn an_arrival_time_the_clocks_skip_is_not_one_left() {
-    // Saturday 28 March 2026 in Belgrade: 02:00 and 02:30 on Sunday never happen, and they are the
-    // grid's last two arrivals. At 01:45 closing less a turn is still ahead; no arrival is.
+    // Sat 28 Mar 2026, Belgrade: Sunday 02:00 and 02:30 never happen, and are grid's last two
+    // arrivals. At 01:45 closing less turn still ahead; no arrival is.
     let mut config = grid(1560, 60, 30);
     config.week = WeekSchedule::uniform(DayHours {
         open_minutes: 600,

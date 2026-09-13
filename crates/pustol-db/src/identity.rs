@@ -7,21 +7,18 @@ use crate::error::Result;
 use crate::ids::{BarId, TelegramUserId};
 use crate::{Store, lock_bar};
 
-/// When Telegram signed a payload, as far as this server can know it.
+/// When Telegram signed payload, as far as server can know.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Signature {
-    /// The second Telegram stamped on the payload, by Telegram's clock.
+    /// Whole second, by Telegram clock.
     pub stamped_at: DateTime<Utc>,
-    /// How far Telegram's clock may be from this server's.
-    ///
-    /// Assumed, not measured: nothing in a payload says what time Telegram thought it was. Every
-    /// guarantee that a payload was signed after some moment on this server's clock holds only while
-    /// the two clocks are within this of each other.
+    /// Assumed max gap between Telegram and server clocks, never measured: payload carries no clock
+    /// reading. Every signed-after guarantee holds only within it.
     pub clock_skew: TimeDelta,
 }
 
 impl Signature {
-    /// The earliest moment on this server's clock the payload can have been signed.
+    /// Earliest server-clock moment payload can have been signed.
     #[must_use]
     pub fn earliest(self) -> DateTime<Utc> {
         self.stamped_at - self.clock_skew
@@ -72,13 +69,16 @@ pub struct Viewer {
 }
 
 impl Store {
-    /// Records an account from a payload Telegram signed, and works out what it is allowed to do.
+    /// Records account from signed payload and decides its access.
     ///
-    /// The profile in a payload is a snapshot from when it was signed, which can be some time before
-    /// `now`. It rewrites the stored profile only when no later snapshot is stored, and only a
-    /// payload that did rewrite it may claim a seat by its username — see [`bind_staff_seat`]. An
-    /// account known only from a session goes to [`Self::recognise`]. The account in the answer is
-    /// the one stored.
+    /// Payload profile is snapshot from signing, maybe well before `now`. Rewrites stored profile
+    /// only when no later snapshot stored; only payload that rewrote it may claim seat by username,
+    /// see [`bind_staff_seat`]. Session-only accounts use [`Self::recognise`]. Answer holds stored
+    /// account.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     pub async fn identify(
         &self,
         bar: BarId,
@@ -87,9 +87,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Viewer> {
         let mut transaction = self.pool().begin().await?;
-        // The bar's lock, when a seat may be claimed, is taken before any row is: every other
-        // transaction that takes it does so first, and one lock order is what keeps two from waiting
-        // on each other for ever.
+        // Bar lock before any row lock, same order as every other transaction, else deadlock.
         let offered = seat_offered(&mut transaction, bar, account).await?;
         if offered {
             lock_bar(&mut transaction, bar).await?;
@@ -110,11 +108,14 @@ impl Store {
         })
     }
 
-    /// Works out what an account known from a session is allowed to do.
+    /// Decides access for account known from session.
     ///
-    /// A session carries the profile as Telegram signed it, up to a day ago, and its username may
-    /// have passed to somebody else since. So it rewrites no profile and claims no seat; it only
-    /// records an account never seen before. The account in the answer is the one stored.
+    /// Session profile may be a day old and username may have passed to someone else. So no profile
+    /// rewrite, no seat claim; only records unseen account. Answer holds stored account.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     pub async fn recognise(
         &self,
         bar: BarId,
@@ -136,10 +137,13 @@ impl Store {
 
     /// Records what the guest decided about reminders and reports where that leaves them.
     ///
-    /// An account never seen before is recorded in the same transaction as the choice. Requiring
-    /// the caller to have created the row first would make this method correct only when called in
-    /// a particular order — a rule no signature expresses and every new caller has to be told. A
-    /// known account's profile is left alone: only a fresh payload rewrites it.
+    /// Unseen account recorded in same transaction as choice: requiring caller to create row first
+    /// would be call-order rule no signature expresses. Known profile untouched: only fresh payload
+    /// rewrites it.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     pub async fn choose_reminders(
         &self,
         account: &TelegramAccount,
@@ -194,14 +198,13 @@ pub enum ReminderChoice {
     NotNow,
 }
 
-/// An account as stored once noted, with when the stored profile was signed.
 struct NotedAccount {
     account: TelegramAccount,
     profile_signed_at: Option<DateTime<Utc>>,
     profile_contested: bool,
 }
 
-/// Records an account never seen before and returns the account as stored.
+/// Inserts unseen account; known one keeps stored profile. Locks row, returns stored account.
 async fn note_account(
     connection: &mut PgConnection,
     account: &TelegramAccount,
@@ -230,23 +233,19 @@ async fn note_account(
     })
 }
 
-/// The account as stored after a payload was recorded, and whether that payload's profile is it.
 struct RecordedProfile {
     account: TelegramAccount,
     rewritten: bool,
 }
 
-/// Stores the profile a payload signed at `signed_at` carries, unless one signed later is stored
-/// already, and returns the account as stored.
+/// Stores payload profile unless later-signed one already stored; returns stored account.
 ///
-/// Telegram stamps whole seconds, so two payloads of one second can carry two profiles, and nothing
-/// says which is the newer. Neither rewrites the other, and that second is marked contested. A
-/// payload of a contested second counts as recorded even when its profile is the one stored: sent
-/// again once a seat opens, it would claim that seat under a username the account may have given up
-/// within the very second. Only a payload of a later second settles it.
+/// Telegram stamps whole seconds: two payloads of one second may carry two profiles, order unknown.
+/// Neither rewrites other; second marked contested. Contested-second payload never counts as
+/// rewrite, even when its profile matches stored: resent once seat opens, it would claim seat under
+/// username account may have dropped within that second. Only later second settles it.
 ///
-/// Read and written under the row lock [`note_account`] takes, so two payloads of one account are
-/// settled one after the other.
+/// Runs under row lock [`note_account`] takes, so two payloads of one account settle in turn.
 async fn record_profile(
     connection: &mut PgConnection,
     account: &TelegramAccount,
@@ -307,14 +306,13 @@ fn account_from(row: &sqlx::postgres::PgRow) -> Result<TelegramAccount> {
     })
 }
 
-/// A seat of bar `$1` under username `$2`, whatever its case, that no account has claimed.
+/// SQL filter: unclaimed seat of bar `$1` under username `$2`, any case.
 macro_rules! unclaimed_seat {
     () => {
         "bar_id = $1 and telegram_user_id is null and username_lower = lower($2)"
     };
 }
 
-/// Whether the roster has an unclaimed seat under the payload's username.
 async fn seat_offered(
     connection: &mut PgConnection,
     bar: BarId,
@@ -342,15 +340,12 @@ async fn seat_offered(
 /// A username released by one member of staff and picked up by a stranger therefore grants the
 /// stranger nothing.
 ///
-/// Only by a payload signed after the seat was offered. The username in a payload is what the
-/// account was called when Telegram signed it; whoever held the name before the offer is not who was
-/// invited. Telegram stamps the second by its own clock, so the offer is compared with the earliest
-/// moment the payload can have been signed on this server's clock; a payload stamped within the
-/// clock skew of the offer claims the seat on a later visit instead.
+/// Only by payload signed after seat offered: payload username is name at signing, and whoever held
+/// it before offer was not invited. Offer compared with [`Signature::earliest`]; payload stamped
+/// within clock skew of offer claims seat on later visit instead.
 ///
-/// Only by an account that holds no seat yet, so one person is never two members of staff. Called
-/// under the bar's lock, so two payloads of one account claiming two seats at once are settled one
-/// after the other and the second finds the first.
+/// Only by account holding no seat yet, so one person never two staff. Runs under bar lock, so one
+/// account claiming two seats at once settles in turn and second finds first.
 async fn bind_staff_seat(
     connection: &mut PgConnection,
     bar: BarId,

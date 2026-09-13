@@ -1,13 +1,7 @@
-//! Who is asking.
+//! Authentication in extractors: handler type only built from signed Telegram payload or session.
 //!
-//! Authentication is cryptographic and happens in an extractor: a handler cannot run without a
-//! payload Telegram signed, or a session one was exchanged for, because the type it needs cannot be
-//! built any other way.
-//!
-//! Authorisation is a separate step, deliberately. It asks the database, by numeric account id,
-//! whether this person is on the bar's admin roster — never the username in the payload, which its
-//! owner can release for a stranger to claim. A session changes nothing about that: it proves who is
-//! asking, and the roster is read on every request.
+//! Authorisation separate: roster checked by numeric id every request, never by username, which
+//! owner can release for stranger to claim.
 
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
@@ -23,46 +17,32 @@ use crate::body::nul_refused;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// How long a signed payload stays usable.
-///
-/// Telegram never expires `initData`, and it travels in the URL the app is launched with, so it is
-/// copied wherever that URL goes — a shared screenshot, a proxy log, a browser history. This bound
-/// is what stops such a copy authenticating its owner for ever. The app trades the payload for a
-/// session on its first request, so an hour costs nobody anything.
+/// Telegram never expires `initData` and it leaks with launch URL (screenshots, proxy logs,
+/// history); this bound stops leaked copy working forever. App swaps it for session at once.
 pub const MAX_INIT_DATA_AGE: TimeDelta = TimeDelta::hours(1);
 
-/// How long a session lasts, counted from when Telegram signed the payload it came from.
-///
-/// Longer than the longest bar day the settings allow — open at 08:00, closed at 04:00 — so a shift
-/// never ends in "open the app again". A session is kept in the app's memory and sent in a header;
-/// anything that can read it there can read a fresh payload just as well.
+/// Counted from payload signing time. Exceeds longest allowed bar day (08:00 to 04:00), so no
+/// re-login mid-shift. Session lives in app memory; whoever reads it there reads fresh payload too.
 pub const SESSION_LIFETIME: TimeDelta = TimeDelta::hours(24);
 
 /// The scheme Telegram Mini App backends conventionally use.
 const PAYLOAD_SCHEME: &str = "tma ";
 
-/// The scheme for a session this server issued.
 const SESSION_SCHEME: &str = "session ";
 
-/// How a caller proved who they are.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Proof {
-    /// A payload Telegram signed at `signed_at`, within [`MAX_INIT_DATA_AGE`]: its profile is as it
-    /// was then, which may be that long ago.
+    /// Profile as of `signed_at`, up to [`MAX_INIT_DATA_AGE`] old.
     Telegram { signed_at: DateTime<Utc> },
-    /// A session this server issued: its profile is as it was when Telegram signed, up to
-    /// [`SESSION_LIFETIME`] ago.
+    /// Server-issued; profile up to [`SESSION_LIFETIME`] old.
     Session,
 }
 
-/// A caller whose identity Telegram signed, directly or through a session.
-///
-/// Says nothing about what they may do. That is [`Staff`]'s job.
+/// Identity only, no permissions; see [`Staff`].
 #[derive(Clone, Debug)]
 pub struct Authenticated {
     user: TelegramUser,
     proof: Proof,
-    /// When the proof this caller holds stops being accepted.
     expires_at: DateTime<Utc>,
 }
 
@@ -72,11 +52,11 @@ impl Authenticated {
         TelegramUserId(self.user.id)
     }
 
-    /// The account as storage knows it, and what it may do.
+    /// Only payload may rewrite stored profile or claim staff seat by username; session never.
     ///
-    /// The one way a handler learns about the caller beyond their id. Only a payload may rewrite the
-    /// stored profile or claim a staff seat by username, and only as of when Telegram signed it; a
-    /// session does neither.
+    /// # Errors
+    ///
+    /// Database failure.
     pub async fn viewer(&self, state: &AppState) -> Result<Viewer, ApiError> {
         let account = TelegramAccount {
             id: self.user_id(),
@@ -101,10 +81,7 @@ impl Authenticated {
         })
     }
 
-    /// A session for this caller, ending when their current proof does.
-    ///
-    /// Issued again from a session it comes out the same, so no chain of sessions outlives the
-    /// payload the first one was exchanged for.
+    /// Ends when current proof ends, so reissued sessions never outlive original payload.
     #[must_use]
     pub fn session(&self, token: &BotToken) -> String {
         issue(&self.user, self.expires_at, token)
@@ -153,11 +130,9 @@ impl FromRequestParts<AppState> for Authenticated {
     }
 }
 
-/// Refuses a profile the account row cannot hold, as `text_invalid`: an id that is not positive, a
-/// first name that is blank, or U+0000 in any of its strings, which `PostgreSQL` text cannot hold.
+/// Refuses what account row cannot hold: id not positive, blank first name, U+0000 in any string.
 ///
-/// Blank is judged by every Unicode space, more than the row's own check trims, so the row's check
-/// is never the one that refuses.
+/// `trim` strips every Unicode space, more than row check, so database check never fires first.
 fn refuse_unstorable(user: &TelegramUser) -> Result<(), ApiError> {
     if user.id <= 0 {
         return Err(ApiError::bad_request(

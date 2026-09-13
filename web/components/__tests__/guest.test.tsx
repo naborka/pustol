@@ -66,7 +66,7 @@ describe("the guest's home screen", () => {
   });
 
   it("says open or shut as the server decided on its own clock, not by comparing wall minutes", () => {
-    // The night the clocks go back, the wall clock passes the same minutes twice.
+    // Clocks go back: wall clock passes same minutes twice.
     home({ bar: { ...bar, open_now: false } });
     expect(screen.getByText("Закрыт")).toBeDefined();
     cleanup();
@@ -126,8 +126,7 @@ describe("the guest's home screen", () => {
   });
 
   it("offers a move exactly when the server says a new booking would replace this one, and always a cancel", () => {
-    // The server says what a new booking would do to each, by its own clock and its own slot grid;
-    // the card never works it out again. A held no-show with no arrival time left tonight is `null`.
+    // Server decides by own clock and slot grid; card never recomputes. Held no-show past last arrival tonight is `null`.
     const cases: [string, GuestBooking, typeof bar, boolean][] = [
       ["a plan not yet begun", booking, bar, true],
       ["a no-show whose table is still held", heldNoShow, bar, true],
@@ -384,7 +383,7 @@ describe("the evening the picker opens on", () => {
   });
 
   it("is never an evening the guest already holds while another is open", () => {
-    // A guest at the table tonight tapping «Забронировать стол» is booking another evening.
+    // Guest seated tonight tapping «Забронировать стол» books another evening.
     expect(pickerStart(session({ bookings: [seated] }))).toBe("2026-09-12");
   });
 
@@ -407,8 +406,7 @@ describe("the evening the picker opens on", () => {
 
 describe("an evening the guest already holds", () => {
   it("is the server's word on each booking, never worked out from what a new booking would replace", () => {
-    // A no-show on an evening guests can no longer book: nothing the guest can do replaces it, and
-    // nothing about it stops a booking on its evening.
+    // No-show on evening no longer bookable: guest cannot replace it, and it blocks no booking that evening.
     const outOfReach: GuestBooking = { ...heldNoShow, rebooking_replaces: null, holds_evening: false };
     expect(heldOn([outOfReach], "2026-09-11")).toBe(false);
     expect(heldOn([seated], "2026-09-11")).toBe(true);
@@ -480,7 +478,7 @@ describe("reaching a person at the bar", () => {
   });
 
   it("points nowhere when the bar gave nowhere to point", () => {
-    // The bot's chat is read by nobody. A link into it was a promise nobody kept.
+    // Nobody reads bot chat; link into it promises reply nobody sends.
     home();
     expect(screen.queryByText(/Написать бару|Связаться/)).toBeNull();
     expect(screen.getByText(/Компания больше 6/)).toBeDefined();
@@ -540,8 +538,7 @@ describe("the time grid, for a screen reader and a slow phone", () => {
   });
 
   it("keeps the last answer on screen while it asks again, but will not take a tap on it", async () => {
-    // Blanking the grid to a spinner on every change made the page jump; taking a tap on times for
-    // the party the guest just stopped bringing would book the wrong question.
+    // Spinner on every change makes page jump; tap on times for old party size books wrong question.
     const onPick = vi.fn();
     render(
       <BookScreen

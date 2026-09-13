@@ -607,8 +607,7 @@ async fn a_table_the_app_adds_keeps_the_identity_the_app_gave_it() {
 
 #[tokio::test]
 async fn the_same_proposal_saved_twice_adds_its_table_once() {
-    // The answer to the first save was lost, and the app sends the same rows again, made from the
-    // settings as they now are.
+    // First save's answer lost; app resends same rows, made from settings as they now stand.
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let named = uuid::Uuid::new_v4();
@@ -949,7 +948,7 @@ async fn a_contact_for_guests_is_saved_cleared_and_checked() {
     );
 }
 
-/// Offers seats under these usernames at `at`, keeping everybody already on the roster.
+/// Offers seats at `at`, keeping current roster.
 async fn invite(
     store: &pustol_db::Store,
     bar: pustol_db::BarId,
@@ -978,9 +977,8 @@ async fn holder_of(store: &pustol_db::Store, bar: pustol_db::BarId, username: &s
 
 #[tokio::test]
 async fn a_payload_stamped_within_the_clock_skew_after_an_invitation_claims_nothing() {
-    // Telegram stamps a payload by its own clock. One stamped thirty seconds after the seat was
-    // offered, by a clock that may be a minute ahead, may have been signed before the offer, under a
-    // name that was somebody else's then.
+    // Stamped thirty seconds after offer by Telegram clock maybe a minute ahead: may be signed before
+    // offer, under name someone else held then.
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let offered = morning() + chrono::TimeDelta::hours(1);
@@ -1065,9 +1063,8 @@ async fn an_older_payload_claims_nothing_under_a_name_the_account_has_moved_on_f
 #[tokio::test]
 async fn a_payload_of_the_same_second_as_the_stored_profile_rewrites_it_only_when_it_says_the_same()
 {
-    // Telegram stamps whole seconds. The account was renamed within the second, and the payload
-    // still carrying the old name is not known to be the older one; it must not claim a seat under a
-    // name the server has already seen the account give up.
+    // Renamed within stamped second: old-name payload not known older, so must not claim seat under
+    // name server saw account give up.
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     invite(&store, bar, &["pavel_bar"], morning()).await;
@@ -1109,10 +1106,8 @@ async fn a_payload_of_the_same_second_as_the_stored_profile_rewrites_it_only_whe
 
 #[tokio::test]
 async fn a_second_that_carried_two_profiles_claims_nothing_until_a_newer_payload_settles_it() {
-    // Two payloads of one second name the account pavel_bar and renamed_v, and nothing says which came
-    // last. The first could not claim pavel_bar because the account already held a seat. Once that
-    // seat is gone, sending the first again must not claim pavel_bar under a name the account may
-    // have given up within that very second.
+    // One second carried pavel_bar and renamed_v, order unknown. First could not claim pavel_bar:
+    // account already held seat. Once seat gone, resending first must still claim nothing.
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     invite(&store, bar, &["pavel_bar", "own_seat"], morning()).await;
@@ -1177,8 +1172,6 @@ async fn a_second_that_carried_two_profiles_claims_nothing_until_a_newer_payload
 
 #[tokio::test]
 async fn a_save_answers_with_the_settings_as_storage_holds_them_at_its_version() {
-    // Storage reads the roster back in username order. A save answering in the order the screen sent
-    // it named one order for a version whose every later reading names another.
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let mut draft = draft_of(&store, bar).await;

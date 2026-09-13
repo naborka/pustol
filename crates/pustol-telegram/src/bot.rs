@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::init_data::BotToken;
 use crate::updates::Update;
 
-/// Where a call to Telegram failed, and whether trying again could help.
+/// Telegram call failure, classed by whether retry can help.
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     /// The guest has blocked the bot, deleted their account, or never started a chat. No number of
@@ -24,9 +24,8 @@ pub enum SendError {
     /// Something transient: a network blip, a 5xx.
     #[error("telegram could not be reached: {0}")]
     Transient(String),
-    /// A request Telegram refused on its merits — a malformed message, a bad token, another process
-    /// already polling this bot. Retrying sends the same request again, so it is terminal, but it
-    /// is a bug or a deployment fact rather than a fact about the guest.
+    /// Telegram refused request itself: malformed message, bad token, other process polling bot.
+    /// Retry resends same request, so terminal. Bug or deploy fault, not fact about guest.
     #[error("telegram refused the request: {description}")]
     Refused { description: String },
 }
@@ -61,20 +60,13 @@ pub struct Bot {
     timeout: Duration,
 }
 
-/// How long one call to Telegram may take before it counts as a transient failure.
-///
-/// Without a bound, one connection a proxy holds open and never answers stalls the outbox, and
-/// the shutdown that waits for the outbox with it.
+/// Unbounded, one proxy connection that never answers stalls outbox and shutdown waiting on it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// How long establishing a connection may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Bot {
-    /// Builds a client against Telegram.
-    ///
-    /// The HTTP client is built here rather than handed in, so that no caller can forget the
-    /// timeouts that keep a silent network from hanging the process.
+    /// Builds own HTTP client so no caller can skip timeouts.
     pub fn new(token: BotToken) -> Self {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -88,7 +80,6 @@ impl Bot {
         }
     }
 
-    /// Bounds each call by `timeout` instead of the default.
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -103,7 +94,7 @@ impl Bot {
         self
     }
 
-    /// The bot's own account id, from its token.
+    /// Bot account id, parsed from token.
     #[must_use]
     pub fn id(&self) -> Option<i64> {
         self.token.bot_id()
@@ -129,12 +120,16 @@ impl Bot {
                 "inline_keyboard": [buttons],
             });
         }
-        self.call("sendMessage", &body, self.timeout).await.map(drop)
+        self.call("sendMessage", &body, self.timeout)
+            .await
+            .map(drop)
     }
 
-    /// Waits up to `wait` for what has been sent to the bot from `offset` on.
+    /// Long-polls up to `wait`. `offset` past last handled id confirms those to Telegram.
     ///
-    /// Asking with the id after the last one handled is what tells Telegram those are done.
+    /// # Errors
+    ///
+    /// [`SendError`] when Telegram is unreachable, refuses, rate limits, or sends unreadable body.
     pub async fn get_updates(
         &self,
         offset: Option<i64>,
@@ -150,7 +145,11 @@ impl Bot {
         Ok(reply.result)
     }
 
-    /// Answers a tap on a button. Telegram shows the tap as pending until this is sent.
+    /// Telegram shows tap as pending until answered.
+    ///
+    /// # Errors
+    ///
+    /// [`SendError`] when Telegram is unreachable, refuses, or rate limits.
     pub async fn answer_callback_query(&self, query_id: &str, text: &str) -> Result<(), SendError> {
         let body = serde_json::json!({ "callback_query_id": query_id, "text": text });
         self.call("answerCallbackQuery", &body, self.timeout)
@@ -158,7 +157,9 @@ impl Bot {
             .map(drop)
     }
 
-    /// Takes the buttons away from a message whose buttons can do nothing more.
+    /// # Errors
+    ///
+    /// [`SendError`] when Telegram is unreachable, refuses, or rate limits.
     pub async fn remove_buttons(&self, chat_id: i64, message_id: i64) -> Result<(), SendError> {
         let body = serde_json::json!({
             "chat_id": chat_id,
@@ -202,7 +203,7 @@ impl Bot {
     }
 }
 
-/// The URL carries the token, and this text ends up stored in the outbox.
+/// Drops URL: it carries token, and this text is stored in outbox.
 fn transient(error: reqwest::Error) -> SendError {
     SendError::Transient(error.without_url().to_string())
 }

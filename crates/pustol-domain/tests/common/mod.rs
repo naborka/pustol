@@ -107,12 +107,11 @@ pub fn thursday() -> ServiceDay {
     date(2026, 7, 30)
 }
 
-/// The shift of a calendar date.
 pub fn date(year: i32, month: u32, day: u32) -> ServiceDay {
     ServiceDay::new(NaiveDate::from_ymd_opt(year, month, day).expect("valid date"))
 }
 
-/// The fixture bar open 10:00 to `close_minutes` every day, with this turn and time step.
+/// Fixture bar open 10:00 to `close_minutes` daily.
 pub fn grid(close_minutes: i32, turn_minutes: i32, slot_step_minutes: i32) -> BarConfig {
     BarConfig {
         week: WeekSchedule::uniform(DayHours {
@@ -126,7 +125,7 @@ pub fn grid(close_minutes: i32, turn_minutes: i32, slot_step_minutes: i32) -> Ba
     }
 }
 
-/// A party seated for `window` on `day`, as a walk-in is.
+/// Arrived booking for `window`, like walk-in.
 pub fn seated(day: ServiceDay, window: Interval) -> Booking {
     Booking {
         window,

@@ -1,6 +1,4 @@
-/**
- * Changes to an item already in a list, named by what the item is rather than where it stands.
- */
+/** Edits name list item by identity, never position. */
 
 import { describe, expect, it } from "vitest";
 
@@ -13,7 +11,7 @@ const base = draftOf(settingsView());
 
 describe("a change to a member of staff", () => {
   it("names the member by the username of the row tapped, as it was typed, wherever the list has them", () => {
-    // Two rows one case apart are two rows until the save refuses them; a tap on one removes that one.
+    // Rows differing only by case stay two rows until save refuses; tap removes only tapped one.
     const sorted = {
       ...base,
       staff: [{ username: "aaron_bar" }, { username: "marina" }, { username: "pavel" }, { username: "Pavel" }],

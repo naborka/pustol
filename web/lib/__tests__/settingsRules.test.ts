@@ -334,7 +334,7 @@ describe("how long a text may be", () => {
   });
 
   it("counts characters the way the server does, not UTF-16 halves", () => {
-    // One emoji is one character to the server and two code units to JavaScript.
+    // Emoji: one character on server, two code units in JavaScript.
     expect(kinds(draft({ name: "🍺".repeat(LIMITS.text.name) }))).toEqual([]);
   });
 

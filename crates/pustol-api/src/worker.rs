@@ -27,17 +27,12 @@ const IN_FLIGHT: usize = 5;
 /// How long to wait between passes when there was nothing to do.
 const IDLE_PAUSE: Duration = Duration::from_secs(20);
 
-/// How long to wait after the first transient failure. Each one after it waits twice as long.
+/// Doubles per failure after first.
 const FIRST_BACKOFF: TimeDelta = TimeDelta::minutes(2);
 
-/// The longest wait between two attempts.
 const MAX_BACKOFF: TimeDelta = TimeDelta::hours(1);
 
-/// After this many attempts a message is abandoned: about three hours of waiting in all.
-///
-/// Without a ceiling a message Telegram keeps refusing for a reason nobody anticipated is retried
-/// for ever, and a queue that never drains hides every later message behind it. The ceiling is long
-/// enough that an outage of a few minutes gives up on nothing.
+/// About three hours of waits total: short outage drops nothing, endless refusal never clogs queue.
 pub const MAX_ATTEMPTS: i32 = 8;
 
 fn backoff(attempts: i32) -> TimeDelta {
@@ -169,8 +164,7 @@ async fn deliver(
     Ok(())
 }
 
-/// A guest who can cancel in one tap does, and the bar gets the table back — which is the entire
-/// argument for reminding anybody about anything. [`crate::inbox`] answers the tap.
+/// One-tap cancel frees table for bar; [`crate::inbox`] answers tap.
 fn reminder_buttons(message: &PendingNotification) -> Vec<CallbackButton> {
     if message.kind == NotificationKind::Reminder {
         vec![CallbackButton {

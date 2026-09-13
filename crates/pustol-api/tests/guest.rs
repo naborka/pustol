@@ -67,7 +67,7 @@ async fn the_first_screen_arrives_in_one_request() {
 
 #[tokio::test]
 async fn the_bar_says_when_it_opens_only_while_opening_is_still_ahead() {
-    // 08:00 in Belgrade, and the bar opens at 10:00.
+    // 08:00 Belgrade; bar opens 10:00.
     let app = harness().await;
     let guest = Caller::new("Алексей");
     let before = app.get("/api/session", &guest).await.expect_ok().clone();
@@ -166,8 +166,7 @@ async fn booking_again_replaces_the_earlier_booking() {
 
 #[tokio::test]
 async fn a_body_holding_a_nul_character_anywhere_is_refused_as_text_the_bar_cannot_keep() {
-    // Keys included: an unknown key is otherwise ignored, and it is still text in a request that
-    // storage would have to be trusted to refuse.
+    // Keys too: unknown key is ignored, yet still text storage would have to refuse.
     let app = harness().await;
     let guest = Caller::new("Вера");
     let refused = app
@@ -194,8 +193,7 @@ async fn a_body_holding_a_nul_character_anywhere_is_refused_as_text_the_bar_cann
 
 #[tokio::test]
 async fn a_body_that_is_not_json_of_the_right_shape_is_refused_with_a_code_the_app_can_read() {
-    // The statuses are axum's own. The body used to be a line of plain text, which the app, reading a
-    // code out of JSON, reported as a failure to parse.
+    // Statuses are axum's own; body must be JSON with code, not plain text.
     let app = harness().await;
     let guest = Caller::new("Вера");
     let cases = [
@@ -247,8 +245,7 @@ async fn a_body_that_is_not_json_of_the_right_shape_is_refused_with_a_code_the_a
 
 #[tokio::test]
 async fn a_path_or_a_query_the_api_cannot_read_is_refused_with_a_code_the_app_can_read() {
-    // A malformed identifier, a value that is not a number, and a missing field came back as a line of
-    // plain text, which the app, reading a code out of JSON, reported as a failure to parse.
+    // Malformed id, non-number value, missing field: refusal must be JSON with code.
     let app = harness().await;
     let guest = Caller::new("Вера");
     let staff = Caller::manager();
@@ -716,8 +713,7 @@ async fn an_unknown_api_path_fails_the_way_the_api_fails() {
 
 #[tokio::test]
 async fn a_wrong_method_or_the_bare_api_root_fails_the_way_the_api_fails() {
-    // An app opened before a method was removed still sends it, and `api.ts` can only tell the guest
-    // to reopen the app when the refusal carries a code.
+    // Old app still sends removed method; `api.ts` says reopen only when refusal has code.
     use axum::http::StatusCode;
     let app = harness().await;
     for (method, path, status, code) in [
@@ -840,7 +836,7 @@ async fn a_day_with_nothing_left_says_so_before_it_is_tapped() {
     assert!(session["today_free_from_minutes"].is_null());
 }
 
-/// One table, busy from opening to closing for whoever holds it.
+/// One table, held open to close.
 fn one_table_one_sitting() -> pustol_domain::BarConfig {
     let mut config = config_with(vec![table(1, 2, "Бар")]);
     config.horizon_days = 2;
@@ -855,9 +851,8 @@ fn one_table_one_sitting() -> pustol_domain::BarConfig {
 
 #[tokio::test]
 async fn a_guest_holding_tonights_only_table_is_not_told_tonight_is_full() {
-    // Booking again replaces their own booking, so it frees exactly the time it holds. The card
-    // that says tonight is sold out, shown to the one guest who could take it, reads as the app
-    // having lost their table the moment they cancel it.
+    // Rebooking replaces own booking, freeing exactly its time. Sold-out card shown to only guest
+    // who could take table reads as table lost on cancel.
     let app = harness_at(morning(), one_table_one_sitting()).await;
     let guest = Caller::new("Тимур");
     app.book(
@@ -913,7 +908,7 @@ async fn the_first_screen_says_when_tonight_opens_up() {
     );
 }
 
-/// A booking for two that expects to replace exactly the bookings `replacing` names.
+/// Party of two, expecting to replace exactly `replacing`.
 fn book_replacing(service_date: &str, start_minutes: i32, replacing: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "service_date": service_date, "start_minutes": start_minutes, "party_size": 2,
@@ -975,7 +970,7 @@ async fn an_evening_nobody_marked_as_over_does_not_stop_the_guest_booking_again(
                 .expect_ok();
         }
 
-        // 20:00 to 22:00 Belgrade is over at 22:30, whatever staff did or did not press.
+        // 20:00 to 22:00 Belgrade is over at 22:30, whatever staff pressed.
         let after = app.at(utc(2026, 7, 30, 20, 30));
         let session = after.get("/api/session", &guest).await.expect_ok().clone();
         assert_eq!(
@@ -990,7 +985,7 @@ async fn an_evening_nobody_marked_as_over_does_not_stop_the_guest_booking_again(
     }
 }
 
-/// The bookings staff see on the fixture Thursday under this guest's username.
+/// Staff view of fixture Thursday bookings under guest username.
 async fn live_bookings_of(
     app: &common::Harness,
     staff: &Caller,
@@ -1037,8 +1032,7 @@ async fn a_guest_whose_table_is_still_held_through_the_grace_period_books_again_
 
 #[tokio::test]
 async fn a_guest_marked_as_not_coming_before_their_time_can_book_a_later_one() {
-    // They telephoned at seven to say eight is off. Staff pressed «Не пришли» there and then, and
-    // the bar holds the table until a quarter past eight whatever happens.
+    // Called at 19:00 to cancel 20:00. Staff pressed «Не пришли» then; table held until 20:15.
     let app = harness().await;
     let guest = Caller::new("Стас");
     let id = app
@@ -1100,7 +1094,7 @@ async fn a_party_marked_gone_cannot_be_held_again_while_the_guest_has_another_ta
         .await
         .expect_ok();
 
-    // A no-show is held until the grace period ends, a quarter past.
+    // No-show held until grace ends, 20:15.
     let answer = early.mark(&staff, &first, "no_show").await;
     assert_eq!(
         answer.status,
@@ -1127,15 +1121,14 @@ async fn staff_can_correct_an_evening_that_is_over_while_the_guest_sits_at_anoth
         .await
         .expect_ok();
 
-    // They did come after all. Recording it holds nothing: that booking ended at 22:00.
+    // They came after all. Recording it holds nothing: booking ended 22:00.
     app.at(utc(2026, 7, 30, 20, 30))
         .mark(&staff, &first, "arrived")
         .await
         .expect_ok();
 }
 
-/// A guest's plan for Thursday at eight, marked as not coming at seven when they telephoned, and the
-/// plan for Friday they then made; with the staff who marked it.
+/// Thursday 20:00 plan marked not coming at 19:00 by phone, then Friday plan; plus marking staff.
 async fn not_coming_tonight_with_a_plan_for_friday(
     app: &common::Harness,
     guest: &Caller,
@@ -1230,10 +1223,9 @@ async fn booking_again_without_naming_the_plan_it_would_replace_is_refused_and_n
 
 #[tokio::test]
 async fn a_promise_read_before_the_plan_began_is_refused_once_it_has_begun() {
-    // At 19:59 the app reads that booking again replaces the eight o'clock plan and says
-    // «Перенести». The guest taps at 20:01: the plan is under way and nothing replaces it any more,
-    // so a booking on Friday would not be the move the button promised. One tonight could not be taken
-    // whatever it promised, because the plan under way holds tonight, and it says so.
+    // At 19:59 app sees rebooking replaces 20:00 plan, shows «Перенести». Tap at 20:01: plan under
+    // way, nothing replaces it, so Friday booking is not promised move. Tonight refused regardless:
+    // plan under way holds tonight, and refusal says so.
     let app = harness().await;
     let guest = Caller::new("Лев");
     let plan = app
@@ -1281,10 +1273,9 @@ async fn a_promise_read_before_the_plan_began_is_refused_once_it_has_begun() {
 
 #[tokio::test]
 async fn a_booking_that_could_not_be_taken_anyway_says_why_before_its_promise_is_compared() {
-    // The guest holds a plan for eight, which a booking of theirs anywhere replaces. Each request here
-    // could not be taken whatever it promised to replace, and says why. Refused as a changed booking
-    // instead, the app would read the bookings again and ask again, to be told the reason only then,
-    // or never, when what it read offered it nothing to name.
+    // Guest holds 20:00 plan, which any own booking replaces. Each request fails whatever it
+    // promises to replace, and says why. As changed-booking refusal, app would reload and retry,
+    // learning reason late or never.
     let app = harness_at(morning(), config_with(vec![table(1, 2, "Бар")])).await;
     let guest = Caller::new("Нина");
     let plan = app
@@ -1433,7 +1424,6 @@ fn book_on(service_date: &str, start_minutes: i32) -> serde_json::Value {
     serde_json::json!({ "service_date": service_date, "start_minutes": start_minutes, "party_size": 2 })
 }
 
-/// The ids of the bookings in a list the API answered with.
 fn ids_of(list: &serde_json::Value) -> Vec<String> {
     list.as_array()
         .expect("a list")
@@ -1451,8 +1441,7 @@ async fn a_guest_whose_table_is_held_tonight_books_another_evening_and_tonight_s
         .book(&guest, book_on("2026-07-30", 1200))
         .await
         .booking_id();
-    // Seven in the evening: they telephoned to say eight is off, and the table is held until a
-    // quarter past.
+    // 19:00: called to cancel 20:00; table held until 20:15.
     let phoned = app.at(utc(2026, 7, 30, 17, 0));
     phoned.mark(&staff, &tonight, "no_show").await.expect_ok();
 
@@ -1484,9 +1473,8 @@ async fn a_guest_whose_table_is_held_tonight_books_another_evening_and_tonight_s
 
 #[tokio::test]
 async fn a_no_show_is_offered_a_move_to_tonight_only_while_tonight_has_an_arrival_time_left() {
-    // Ninety-minute sittings: by the hours the last arrival is 00:30. On an hourly grid it is
-    // midnight, so at ten past there is nothing to move to; on a half-hourly grid 00:30 is still
-    // ahead.
+    // Ninety-minute sittings: last arrival by hours 00:30. Hourly grid: midnight, so at 00:10
+    // nothing to move to; half-hourly grid: 00:30 still ahead.
     for (step, offered) in [
         (60, serde_json::Value::Null),
         (30, serde_json::json!("same_evening")),
@@ -1523,7 +1511,7 @@ async fn a_no_show_is_offered_a_move_to_tonight_only_while_tonight_has_an_arriva
     }
 }
 
-/// A guest seated at tonight's only table, with a plan for the same table on Friday.
+/// Guest seated at tonight's only table, with Friday plan for same table.
 async fn seated_tonight_with_a_plan_for_friday(
     app: &common::Harness,
     guest: &Caller,
@@ -1557,8 +1545,7 @@ async fn a_seated_guest_is_refused_tonight_and_told_so_before_they_tap_it() {
     let guest = Caller::new("Лёва");
     let (seated, _, friday) = seated_tonight_with_a_plan_for_friday(&app, &guest).await;
 
-    // The app says what booking tonight would replace — their Friday plan — and tonight is still
-    // refused, because they are sitting at its table.
+    // App shows tonight would replace Friday plan; tonight still refused, guest sits at its table.
     let refused = seated
         .book(&guest, book_replacing("2026-07-30", 1080, &[&friday]))
         .await;
@@ -1634,8 +1621,8 @@ async fn a_seated_guest_sees_both_bookings_and_friday_sets_their_own_plan_aside(
 #[tokio::test]
 async fn a_no_show_on_an_evening_the_manager_took_off_the_horizon_is_offered_nothing_and_holds_nothing()
  {
-    // Booked for Sunday under a four-day horizon. The manager lowers it to two, and staff mark the
-    // party as not coming before it is due: only a Sunday booking replaces it, and Sunday is refused.
+    // Booked Sunday under four-day horizon. Manager lowers to two; staff mark party not coming
+    // early: only Sunday booking replaces it, and Sunday is refused.
     let app = harness().await;
     let guest = Caller::new("Стас");
     let manager = Caller::manager();
@@ -1673,8 +1660,8 @@ async fn a_no_show_on_an_evening_the_manager_took_off_the_horizon_is_offered_not
 
 #[tokio::test]
 async fn a_plan_is_not_offered_a_move_once_no_evening_is_left_to_move_it_to() {
-    // At twenty past eight the guest sits at tonight's table and holds a plan for Sunday. The manager
-    // lowers the horizon to one day: tonight is the only evening a guest may book, and it is theirs.
+    // 20:20: guest sits at tonight's table, holds Sunday plan. Manager lowers horizon to one day:
+    // tonight only bookable evening, and it is theirs.
     let app = harness().await;
     let guest = Caller::new("Лёва");
     let manager = Caller::manager();
@@ -1724,8 +1711,8 @@ async fn a_plan_is_not_offered_a_move_once_no_evening_is_left_to_move_it_to() {
 #[tokio::test]
 async fn a_no_show_on_an_evening_with_no_arrival_time_left_holds_nothing_and_a_booking_there_replaces_it()
  {
-    // Ninety-minute sittings on an hourly grid closing at 02:00: the last arrival is midnight. The
-    // midnight party is marked as not coming, and at ten past the table is still held for them.
+    // Ninety-minute sittings, hourly grid, closing 02:00: last arrival midnight. Midnight party
+    // marked not coming; at 00:10 table still held.
     let mut config = config_with(common::default_tables());
     config.turn_minutes = 90;
     config.slot_step_minutes = 60;
@@ -1761,8 +1748,8 @@ async fn a_no_show_on_an_evening_with_no_arrival_time_left_holds_nothing_and_a_b
     assert_eq!(rail["days"][0]["service_date"], "2026-07-30", "{rail}");
     assert_eq!(rail["days"][0]["booked"], false, "{rail}");
 
-    // Midnight has gone, whatever the booking names as replaced. Refused as a changed booking, the app
-    // read the bookings again, found nothing offered, sent the same request, and was refused again.
+    // Midnight gone, whatever booking names as replaced. Changed-booking refusal would loop: app
+    // reloads, finds nothing, resends, refused again.
     let naming_it = ten_past
         .book(&guest, book_replacing("2026-07-30", 1440, &[&id]))
         .await;
@@ -1786,10 +1773,9 @@ async fn a_no_show_on_an_evening_with_no_arrival_time_left_holds_nothing_and_a_b
 
 #[tokio::test]
 async fn on_the_night_the_clocks_go_forward_tonight_is_saturday_until_its_last_sitting_is_over() {
-    // Saturday 28 March 2026 closes at 03:00, and at 02:00 the clocks jump to 03:00. The last
-    // sitting, arriving at 01:00, holds its table two real hours: to 04:00 on the wall. Until then
-    // tonight is Saturday; from then on it is Sunday, and the guest's plan for Sunday at 10:00 is
-    // what a booking tonight replaces.
+    // Saturday 28 March 2026 closes 03:00; at 02:00 clocks jump to 03:00. Last sitting (01:00)
+    // holds table two real hours, to 04:00 wall. Until then tonight is Saturday; after, Sunday, and
+    // booking tonight replaces guest's Sunday 10:00 plan.
     let mut config = config_with(vec![table(1, 2, "Бар")]);
     config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
         open_minutes: 600,

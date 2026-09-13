@@ -1,11 +1,9 @@
 //! A proposed change to the bar's configuration, before identities have been settled.
 //!
 //! The settings screen edits a list of tables in which some rows exist and some have only just
-//! been tapped into being. The app names every row, the new ones included, so a save that is sent
-//! twice — its answer lost on the way back — names the same tables both times and adds nothing the
-//! second time. What an identity means is settled here: one of this bar's tables, live or retired,
-//! or a table the room does not have yet. An identity that belongs to another bar is refused where
-//! the rooms of every bar can be seen, in storage.
+//! been tapped into being. App names every row, new ones too, so save sent twice (answer lost)
+//! adds nothing second time. Here identity resolves to this bar's table, live or retired, or new
+//! table. Another bar's identity refused in storage, which sees every bar.
 //!
 //! Resolution is also where "removed" is turned into "retired". A table the proposal does not
 //! mention keeps its number, its seats and its history, and simply stops being part of the live
@@ -19,15 +17,13 @@ use uuid::Uuid;
 use crate::config::{BarConfig, DayHours, StaffMember, WeekSchedule};
 use crate::schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 
-/// A table in a proposal, named by the identity the app gave it.
+/// Table in proposal, under identity app gave it.
 ///
-/// One shape for a table the bar has and one it is adding, because the app cannot know which a row
-/// is by the time a save arrives: the first attempt at a save may already have added it.
+/// One shape for existing and added tables: by time save arrives, earlier attempt may have added it.
 ///
-/// The previous app's shapes are read too, because an app opened before an upgrade keeps sending
-/// them: `kind: "existing"` beside an identity means the identity alone, and `kind: "new"` with no
-/// identity is a table the server names. That app never named the tables it added, so its save sent
-/// twice adds two, as it always did.
+/// Old app shapes still read, since app opened before upgrade keeps sending them: `kind: "existing"`
+/// with id means id alone; `kind: "new"` without id gets server-made id, so old app's save sent twice
+/// still adds two.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "TableShape")]
 pub struct TableDraft {
@@ -36,7 +32,7 @@ pub struct TableDraft {
     pub zone: String,
 }
 
-/// A table in any shape an app sends one in, before it is settled into a [`TableDraft`].
+/// Any shape apps send, before settling into [`TableDraft`].
 #[derive(Deserialize)]
 struct TableShape {
     #[serde(default)]
@@ -94,8 +90,8 @@ pub struct StaffDraft {
 /// projections, so a field added to this struct cannot accidentally appear in a guest's payload.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Draft {
-    /// The version of the settings this proposal was made from. Saving it over any other version
-    /// would quietly put back whatever changed in between, so that is refused.
+    /// Settings version proposal was made from. Saving over other version would undo changes in
+    /// between, so refused.
     pub version: i64,
     pub name: String,
     pub address: String,
@@ -113,7 +109,7 @@ pub struct Draft {
     pub message_templates: Vec<String>,
     pub cancel_reasons: Vec<String>,
     pub staff: Vec<StaffDraft>,
-    /// Empty when the bar gives guests no contact.
+    /// Empty: no contact.
     #[serde(default)]
     pub contact: String,
 }
@@ -136,6 +132,10 @@ impl Draft {
     /// The result is a [`BarConfig`] — a proposal, not yet in force. Whether it is *legal* is a
     /// separate question, asked by [`crate::config::ValidConfig::new`], so that the two failure
     /// modes stay distinguishable to whoever has to fix them.
+    ///
+    /// # Errors
+    ///
+    /// [`DraftError`] on unknown timezone, repeated table or blank zone.
     pub fn resolve(&self, current: &BarConfig) -> Result<BarConfig, DraftError> {
         let timezone: Tz = self
             .timezone
@@ -183,8 +183,7 @@ impl Draft {
 
     /// Settles which tables the room has, and which have left it.
     ///
-    /// A table the bar has keeps its number, and one it had retired comes back under it. Any other
-    /// identity is a table being added, under exactly that identity.
+    /// Known table, live or retired, keeps its number. Any other identity added as is.
     fn resolve_tables(&self, current: &BarConfig) -> Result<Vec<BarTable>, DraftError> {
         let mut tables = Vec::with_capacity(self.tables.len());
         let mut mentioned = Vec::new();

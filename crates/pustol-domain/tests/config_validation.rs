@@ -120,8 +120,7 @@ fn a_closed_day_is_not_asked_to_fit_a_turn() {
 
 #[test]
 fn hours_and_turns_at_the_ends_of_the_integers_are_refused_rather_than_overflowed() {
-    // A settings save carries whatever integers its body holds. Subtracting them in `i32` panicked
-    // in a debug build and wrapped round in a release one.
+    // Save body carries any integers; `i32` subtraction would overflow.
     let cases = [
         (600, i32::MIN, 1),
         (i32::MAX, i32::MIN, 120),
@@ -811,16 +810,15 @@ fn a_day_off_yesterday_cannot_be_the_running_shift() {
     );
 }
 
-/// The bar open 10:00 to `close_minutes` every day, with two-hour sittings.
+/// Two-hour sittings, 30-minute step.
 fn closing_at(close_minutes: i32) -> pustol_domain::config::ValidConfig {
     force(grid(close_minutes, 120, 30))
 }
 
 #[test]
 fn on_the_night_the_clocks_go_back_the_shift_runs_until_the_wall_last_reads_closing() {
-    // Saturday 24 October 2026 closes at 02:30. At 03:00 on Sunday the clocks go back to 02:00, so
-    // 02:30 happens twice: at 00:30Z and again at 01:30Z. The bar is open until the wall reads it for
-    // the last time, and once Sunday is running it never goes back to Saturday.
+    // Sat 24 Oct 2026 closes 02:30. Sunday 03:00 clocks go back to 02:00, so 02:30 happens at 00:30Z
+    // and 01:30Z. Open until last reading; once Sunday runs, never back to Saturday.
     let config = closing_at(1590);
     let saturday = date(2026, 10, 24);
     let sunday = date(2026, 10, 25);
@@ -840,8 +838,8 @@ fn on_the_night_the_clocks_go_back_the_shift_runs_until_the_wall_last_reads_clos
 
 #[test]
 fn on_the_night_the_clocks_go_forward_the_shift_runs_until_its_last_sitting_ends() {
-    // Saturday 28 March 2026 closes at 03:00, and at 02:00 on Sunday the clocks jump to 03:00. The
-    // last sitting arrives at 01:00 (00:00Z) and holds its table two real hours, to 02:00Z.
+    // Sat 28 Mar 2026 closes 03:00; Sunday 02:00 clocks jump to 03:00. Last sitting arrives 01:00
+    // (00:00Z), holds table two real hours, to 02:00Z.
     let config = closing_at(1620);
     let saturday = date(2026, 3, 28);
     let read = [
@@ -857,9 +855,8 @@ fn on_the_night_the_clocks_go_forward_the_shift_runs_until_its_last_sitting_ends
 
 #[test]
 fn the_shift_runs_while_its_last_sitting_holds_its_table_and_until_the_wall_last_reads_closing() {
-    // "Today" and "finished" agree about a close after midnight: a shift whose last sitting still
-    // holds its table is running. It stops at the later of that sitting's end and the last moment the
-    // wall reads closing, which is later only when the clocks go back.
+    // Shift stops at later of last sitting end and last wall reading of closing; later only when
+    // clocks go back.
     let minute = chrono::TimeDelta::minutes(1);
     for (close_minutes, day, stops) in [
         (1560, thursday(), utc(2026, 7, 31, 0, 0)),
@@ -892,10 +889,9 @@ fn the_shift_runs_while_its_last_sitting_holds_its_table_and_until_the_wall_last
 
 #[test]
 fn on_the_night_the_clocks_skip_the_last_arrival_the_shift_ends_with_the_last_sitting_there_is() {
-    // Saturday 28 March 2026 closes at 03:00, with one-hour sittings every half hour. The latest
-    // arrival closing allows, 02:00, never happens: at 01:00Z the clocks jump from 02:00 to 03:00, and
-    // the wall reads closing at once. The grid's last sitting arrives at 01:30 and is over at 01:30Z,
-    // and the shift runs exactly that long: no sitting runs later, and the wall has read closing.
+    // Sat 28 Mar 2026 closes 03:00, one-hour sittings every half hour. Latest allowed arrival 02:00
+    // never happens: clocks jump at 01:00Z, wall reads closing at once. Last grid sitting arrives
+    // 01:30, over at 01:30Z; shift runs exactly that long.
     let config = force(grid(1620, 60, 30));
     let saturday = date(2026, 3, 28);
     let last = booking(1, saturday, 1530, 2, None, 60);
@@ -913,9 +909,8 @@ fn on_the_night_the_clocks_skip_the_last_arrival_the_shift_ends_with_the_last_si
 
 #[test]
 fn a_party_seated_now_holds_its_table_no_later_than_its_shift_runs() {
-    // Thursday closes at 02:00 with two-hour sittings, so it stops running at midnight UTC. A party
-    // seated at half past one holds its table until then: holding it to half past three would run it
-    // into Friday, whose screen reads only Friday's bookings and would call the table free.
+    // Thursday closes 02:00, two-hour sittings, stops at 00:00Z. Party seated 01:30 held until then:
+    // to 03:30 would run into Friday, whose screen reads only Friday bookings and calls table free.
     let config = force(default_config());
     let friday = thursday().checked_add_days(1).expect("in range");
 
@@ -961,9 +956,8 @@ fn a_party_seated_now_holds_its_table_no_later_than_its_shift_runs() {
 #[test]
 fn on_the_night_the_clocks_go_forward_a_party_seated_now_holds_its_table_until_the_wall_reads_closing()
  {
-    // Saturday 28 March 2026 closes at 03:30, with one-hour sittings. At 01:00Z the clocks jump from
-    // 02:00 to 03:00, and the wall reads 03:30 half an hour later. A party seated at the jump holds its
-    // table that half hour, and the hours that seated it do not call it outside them.
+    // Sat 28 Mar 2026 closes 03:30, one-hour sittings. Clocks jump 02:00 to 03:00 at 01:00Z; wall
+    // reads 03:30 half hour later. Party seated at jump holds table that half hour, within hours.
     let config = force(grid(1650, 60, 30));
     let saturday = date(2026, 3, 28);
     let jump = utc(2026, 3, 29, 1, 0);
@@ -985,9 +979,8 @@ fn on_the_night_the_clocks_go_forward_a_party_seated_now_holds_its_table_until_t
 
 #[test]
 fn nobody_is_seated_now_once_the_wall_has_read_closing_though_the_last_sitting_runs_on() {
-    // Saturday 28 March 2026 closes at 03:00 with two-hour sittings. The wall reads 03:00 at 01:00Z,
-    // when the clocks jump; the last sitting, arriving at 01:00, holds its table until 02:00Z. At
-    // 01:30Z Saturday is still the running shift, and nobody new is seated on it or on Sunday.
+    // Sat 28 Mar 2026 closes 03:00, two-hour sittings. Wall reads 03:00 at 01:00Z jump; last sitting
+    // (01:00) holds table to 02:00Z. At 01:30Z Saturday still runs; nobody new seated either day.
     let config = closing_at(1620);
     let (saturday, sunday) = (date(2026, 3, 28), date(2026, 3, 29));
     let now = utc(2026, 3, 29, 1, 30);
@@ -1005,9 +998,8 @@ fn nobody_is_seated_now_once_the_wall_has_read_closing_though_the_last_sitting_r
 
 #[test]
 fn on_the_night_the_clocks_go_back_a_party_is_seated_until_the_wall_last_reads_closing() {
-    // Saturday 24 October 2026 closes at 03:00. At 01:00Z the wall goes back from 03:00 to 02:00, so
-    // it reads 03:00 only at 02:00Z. At 01:30Z it reads 02:30 for the second time: Saturday seats a
-    // party until 02:00Z, and Sunday has not begun.
+    // Sat 24 Oct 2026 closes 03:00. At 01:00Z wall goes back from 03:00 to 02:00, reads 03:00 only at
+    // 02:00Z. At 01:30Z reads 02:30 second time: Saturday seats until 02:00Z; Sunday not begun.
     let config = closing_at(1620);
     let (saturday, sunday) = (date(2026, 10, 24), date(2026, 10, 25));
     let second_pass = utc(2026, 10, 25, 1, 30);
@@ -1021,8 +1013,8 @@ fn on_the_night_the_clocks_go_back_a_party_is_seated_until_the_wall_last_reads_c
     );
     assert_eq!(config.walk_in_window(sunday, second_pass), None);
 
-    // Seated on the first pass through the repeated hour, a party holds its table longer than the
-    // wall says, and the hours that seated it still do not call it outside them.
+    // Seated on first pass through repeated hour: holds table longer than wall says, still within
+    // hours.
     let first_pass = utc(2026, 10, 25, 0, 30);
     let early = config
         .walk_in_window(saturday, first_pass)
@@ -1052,9 +1044,9 @@ fn nobody_is_seated_now_on_a_day_off() {
 
 #[test]
 fn the_last_arrival_on_the_spring_clock_change_is_not_a_conflict_with_the_hours_that_sold_it() {
-    // Saturday 28 March 2026: at 02:00 on Sunday the clocks jump to 03:00. A two-hour booking at
-    // 01:00 ends at 04:00 on the wall, past a 03:00 closing, yet 01:00 is the last arrival the
-    // grid itself offered. Reading that as a conflict froze every settings save that week.
+    // Sat 28 Mar 2026: Sunday 02:00 clocks jump to 03:00. Two-hour booking at 01:00 ends 04:00 on
+    // wall, past 03:00 closing, yet grid offered 01:00 as last arrival. Conflict here would refuse
+    // every save that week.
     let saturday = ServiceDay::new(chrono::NaiveDate::from_ymd_opt(2026, 3, 28).expect("valid"));
     let mut config = common::default_config();
     config.week = WeekSchedule::uniform(DayHours {
@@ -1075,8 +1067,7 @@ fn the_last_arrival_on_the_spring_clock_change_is_not_a_conflict_with_the_hours_
 
 #[test]
 fn texts_the_bar_writes_stay_short_enough_to_send_and_to_show() {
-    // A template longer than Telegram carries is refused on every send and silently given up on;
-    // a thousand-character bar name breaks every screen it is drawn on.
+    // Template longer than Telegram carries fails every send; huge bar name breaks every screen.
     let mut config = default_config();
     config.name = "б".repeat(LIMITS.text.name + 1);
     config.address = "в".repeat(LIMITS.text.address + 1);

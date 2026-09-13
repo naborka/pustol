@@ -33,24 +33,14 @@ pub use state::{AppState, Clock};
 
 use crate::error::ApiError;
 
-/// The largest request body this API reads, in bytes: room for the largest settings save the limits
-/// allow.
-///
-/// A settings save is the biggest thing anybody sends, and every legal one has to fit, or a bar whose
-/// settings grew to the limits could never save them again. Counted from [`LIMITS`], each character
-/// as wide as JSON ever writes one a text may hold, so widening a limit widens this with it. Without
-/// a bound, one request can make the process allocate until it dies.
-///
-/// Enforced by the extractor that reads the body, so a body over it is refused as `body_invalid`
-/// JSON like every other body refusal, whether or not the request said how long it was.
+/// Fits largest legal settings save, derived from [`LIMITS`] at worst-case JSON width; else a bar
+/// at limits could never save again. Unbounded body lets one request exhaust memory.
 fn max_body_bytes() -> usize {
-    /// The most bytes JSON writes one character of a text in: `\ud83c\udf7a`, a character past U+FFFF
-    /// escaped as its pair of surrogates.
+    /// Worst JSON escape of one character: `\ud83c\udf7a`, surrogate pair past U+FFFF.
     const WIDEST_CHARACTER: usize = 12;
-    /// Room around one entry of a list: quotes, keys, an identity, a number, punctuation.
+    /// Per list entry overhead: quotes, keys, id, number, punctuation.
     const ENTRY: usize = 128;
-    /// Room for everything else a save carries: the week, the numbers, the version, the timezone and
-    /// the contact.
+    /// Week, numbers, version, timezone, contact.
     const REST: usize = 16 * 1024;
     let (text, lists) = (LIMITS.text, LIMITS.lists);
     let username = usize::try_from(LIMITS.staff_username_length.max).unwrap_or(usize::MAX);
@@ -63,16 +53,12 @@ fn max_body_bytes() -> usize {
         + entries(lists.staff, username)
 }
 
-/// Who may show the app in a frame: this origin and Telegram's web clients.
-///
-/// Not `X-Frame-Options: DENY`, which would break the app inside web.telegram.org.
-const FRAME_ANCESTORS: HeaderValue =
-    HeaderValue::from_static("frame-ancestors 'self' https://web.telegram.org https://*.telegram.org");
+/// Not `X-Frame-Options: DENY`: app must load in frame inside web.telegram.org.
+const FRAME_ANCESTORS: HeaderValue = HeaderValue::from_static(
+    "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
+);
 
-/// Builds the whole process: the API, and the app's build when there is one to serve.
-///
-/// Composed in one place so that what every answer carries — compression, the headers below, the
-/// access log — covers the API and the app's files alike, rather than whichever was wired first.
+/// API plus app build when given; one place so compression, headers, access log cover both.
 pub fn router(state: AppState, assets: Option<Assets>) -> Router {
     let api = Router::new()
         .route("/health", get(health))
@@ -94,8 +80,7 @@ pub fn router(state: AppState, assets: Option<Assets>) -> Router {
         )
         .layer(DefaultBodyLimit::max(max_body_bytes()))
         .with_state(state);
-    // Routes win over a fallback, so `/health` and everything under `/api` keep answering as the
-    // API however the app's build is laid out.
+    // Routes beat fallback: `/health` and `/api` stay API whatever app build contains.
     let app = match assets {
         Some(assets) => api.fallback_service(assets.into_router()),
         None => api,
@@ -133,8 +118,7 @@ async fn no_such_endpoint() -> ApiError {
     ApiError::not_found("endpoint")
 }
 
-/// A path under `/api` that exists, asked with a method it does not take — usually an app opened
-/// before that method was removed, which can only be told to reopen when the refusal carries a code.
+/// JSON code lets stale app, opened before method removal, tell user to reopen.
 async fn wrong_method() -> ApiError {
     ApiError::new(
         axum::http::StatusCode::METHOD_NOT_ALLOWED,

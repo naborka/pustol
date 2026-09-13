@@ -41,22 +41,19 @@ pub struct StrandedBooking {
     pub guest_name: String,
 }
 
-/// The settings in force, as the settings screen draws them.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Settings {
     pub config: ValidConfig,
-    /// Which settings these are: one more on every write of the bar's row. A proposal made from any
-    /// other version is refused.
+    /// Bumped on every write of bar row. Proposal from any other version refused.
     pub version: i64,
-    /// The number a table added next would be given, so the settings screen can label a row it has
-    /// only just created.
+    /// Lets settings screen label table row it just added.
     pub next_table_number: i32,
 }
 
 /// What a settings save actually did.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SavedSettings {
-    /// The settings as storage holds them once saved, read back before the save committed.
+    /// Read back from storage before commit.
     pub settings: Settings,
     /// Bookings the change forced to move, and any it could not place.
     pub reconciliation: crate::bookings::Reseated,
@@ -72,7 +69,10 @@ impl Store {
         load_config(&mut connection, bar).await
     }
 
-    /// The settings in force at one bar, for the screen that edits them.
+    /// # Errors
+    ///
+    /// `NotFound` for unknown bar, `StoredConfigInvalid` or `CorruptRow` for bad stored rows,
+    /// database errors.
     pub async fn settings(&self, bar: BarId) -> Result<Settings> {
         let mut connection = self.pool().acquire().await?;
         load_settings(&mut connection, bar).await
@@ -87,10 +87,10 @@ impl Store {
 
     /// Applies everything the settings screen sent, or refuses the lot.
     ///
-    /// A proposal made from settings another save has replaced since is refused before anything
-    /// else is asked of it: saving it would quietly put back whatever that save changed.
+    /// Proposal from settings another save replaced is refused first: saving it would silently
+    /// revert that save.
     ///
-    /// Beyond that, refusal comes in three flavours, deliberately distinguishable: the proposal makes no sense
+    /// Otherwise refusal comes in three flavours, deliberately distinguishable: the proposal makes no sense
     /// (an unknown table, an unknown timezone), the proposal is illegal (a party cap no table can
     /// seat), or the proposal would strand bookings the bar has already promised. Only the last
     /// needs a human to move bookings first, and only the last is worth interrupting them for.
@@ -98,6 +98,11 @@ impl Store {
     /// Inventory changes are applied and the bookings reconciled rather than refused: the screen
     /// describes the room as it now physically is, and a system that will not record that just
     /// gets worked around.
+    ///
+    /// # Errors
+    ///
+    /// `SettingsChanged`, `UnusableProposal`, `ProposedConfigInvalid`, `WouldStrandBookings`,
+    /// `NotFound` for unknown bar, database errors.
     pub async fn save_settings(
         &self,
         bar: BarId,
@@ -133,9 +138,8 @@ impl Store {
         write_tables(&mut transaction, bar, &proposed).await?;
         write_staff(&mut transaction, bar, &proposed, now).await?;
 
-        // Read back, not answered from the proposal: storage decides the order of the roster and the
-        // room, and an answer in the order the screen sent them would describe this version
-        // differently from every reading of it after.
+        // Read back, not echoed from proposal: storage orders roster and room, and screen order
+        // would describe this version differently from every later read.
         let saved = load_settings(&mut transaction, bar).await?;
 
         // The room may have shrunk. Anything that no longer fits goes through the same allocator
@@ -162,11 +166,8 @@ pub(crate) async fn load_config(connection: &mut PgConnection, bar: BarId) -> Re
     Ok(load_settings(connection, bar).await?.config)
 }
 
-/// The configuration in force, its version, and the number a new table would take.
-///
-/// The version is read with the bar's own row, before the week, the room and the roster. A save
-/// landing in between can only leave the version older than what is read after it, which gets a
-/// proposal made from this reading refused, never accepted.
+/// Version read with bar row, before week, room and roster: save landing in between leaves version
+/// older than rest, so proposal from this read gets refused, never accepted.
 async fn load_settings(connection: &mut PgConnection, bar: BarId) -> Result<Settings> {
     let row = sqlx::query(
         "select name, address, timezone, turn_minutes, slot_step_minutes, max_party,
@@ -389,9 +390,8 @@ async fn write_tables(
     // `coalesce(existing.retired_at, now())` keeps the moment a table was first retired, so the
     // shift history can still say when the room changed.
     //
-    // The app names the tables it adds, so an identity can be one another bar already uses. That row
-    // is never touched: the update is limited to this bar's rows, and a row it skipped is counted
-    // and refused, in the one statement no other writer can slip between.
+    // App picks ids of tables it adds, so id may belong to another bar. Update touches only this
+    // bar's rows; skipped row counted and refused in same statement, so no writer slips between.
     let written = sqlx::query(
         "insert into bar_table (id, bar_id, number, seats, zone, retired_at)
          select proposed.id, $1, proposed.number, proposed.seats, proposed.zone,
@@ -450,8 +450,8 @@ async fn write_staff(
 
     // An existing binding is never overwritten from a proposal: the settings screen sends
     // usernames, and letting it clear a numeric id would downgrade authorisation to something a
-    // username squatter could take over. A seat keeps the moment it was first offered, on the
-    // clock payloads are judged by: only a payload signed from then on may claim it.
+    // username squatter could take over. Seat keeps moment first offered: only payload signed
+    // from then on may claim it.
     sqlx::query(
         "insert into bar_staff (bar_id, username, telegram_user_id, invited_at, bound_at)
          select $1, proposed.username, proposed.telegram_user_id, $4,
@@ -521,7 +521,11 @@ pub(crate) async fn insert_bar(
 impl Store {
     /// Brings a bar into being, hours, room and roster together.
     ///
-    /// `now` is when the roster's seats are offered.
+    /// `now`: when roster seats are offered.
+    ///
+    /// # Errors
+    ///
+    /// Database errors, including constraint refusals.
     pub async fn create_bar(&self, config: &ValidConfig, now: DateTime<Utc>) -> Result<BarId> {
         let mut transaction = self.pool().begin().await?;
         let bar = insert_bar(&mut transaction, config, now).await?;

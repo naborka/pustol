@@ -1,40 +1,31 @@
 /**
- * Which answers reach the screen, and which failures it admits to — one rule for every read.
+ * Which answers reach screen, which failures show. One rule for every read.
  *
- * Every read names its question — the evening, the party and the date, the session — and gets a
- * number. Each question keeps its own last value and its own last failure, so an answer about
- * tomorrow never decides whether an answer about tonight is news.
+ * Each read names its question (evening, party and date, session) and gets number. Each question
+ * keeps own last value and last failure, so answer about tomorrow never decides news about tonight.
  *
- * An answer replaces the value on record when the server orders it after that value (a room carries
- * a version), or, when the server cannot tell the two apart or orders nothing, when it was asked
- * later. A write's own answer is numbered when the write was sent. A failure is recorded only when
- * it was asked after every answer heard, and is shown only while nothing else is on its way for
- * that question — beside the value on record, if there is one. Any answer asked after it clears it,
- * or keeps it from being recorded, a read's or a write's, applied or not: an answer too old to show
- * still proves the question can be answered.
+ * Answer replaces value on record when server orders it newer (room carries version), or, when
+ * server cannot tell or orders nothing, when asked later. Write's own answer numbered at send.
+ * Failure recorded only when asked after every answer heard; shown only while nothing else in flight
+ * for that question, beside value on record if any. Any later-asked answer, read or write, applied
+ * or not, clears failure or blocks recording it: too-old answer still proves question answerable.
  */
 
 import type { ApiFailure } from "./errors";
 
-/**
- * How the server orders two answers to one question: above zero when `next` is newer, below when it
- * is older, zero when the server cannot tell them apart.
- */
+/** Above zero: `next` newer. Below zero: older. Zero: server cannot tell. */
 export type Order<T> = (next: T, shown: T) => number;
 
 export interface Entry<T> {
-  /** The value on record, and the number of the read or write that brought it. */
+  /** `number`: read or write that brought it. */
   readonly value?: { readonly number: number; readonly data: T };
-  /**
-   * The newest number among the answers heard, a read's or a write's, applied or not: a failure
-   * asked before it is older news.
-   */
+  /** Newest number among answers heard, read or write, applied or not; failure asked before is old news. */
   readonly heard: number;
   readonly failure?: { readonly number: number; readonly failure: ApiFailure };
 }
 
 export interface Ledger<T> {
-  /** The number the newest read, write or mark was given. */
+  /** Number given to newest read, write or mark. */
   readonly asked: number;
   readonly inFlight: readonly { readonly number: number; readonly key: string }[];
   readonly entries: Readonly<Record<string, Entry<T>>>;
@@ -56,7 +47,6 @@ function landed<T>(ledger: Ledger<T>, number: number): Ledger<T> {
   return { ...ledger, inFlight: ledger.inFlight.filter((read) => read.number !== number) };
 }
 
-/** Whether `data`, asked as `number`, replaces what `entry` has on record. */
 function replaces<T>(entry: Entry<T>, number: number, data: T, order?: Order<T>): boolean {
   const shown = entry.value;
   if (shown === undefined) return true;
@@ -64,7 +54,7 @@ function replaces<T>(entry: Entry<T>, number: number, data: T, order?: Order<T>)
   return said > 0 || (said === 0 && number > shown.number);
 }
 
-/** `entry` once an answer asked as `number` came back: a failure of a read asked after it stays. */
+/** Failure of read asked after `number` stays. */
 function heardAt<T>(entry: Entry<T>, number: number): Entry<T> {
   const stale = entry.failure !== undefined && entry.failure.number <= number;
   if (!stale && number <= entry.heard) return entry;
@@ -74,24 +64,23 @@ function heardAt<T>(entry: Entry<T>, number: number): Entry<T> {
   return rest;
 }
 
-/** `entry` with `data`, asked as `number`, on record. */
 function applied<T>(entry: Entry<T>, number: number, data: T): Entry<T> {
   return { ...heardAt(entry, number), value: { number, data } };
 }
 
-/** A read of `key` starting, and the number it goes by. */
+/** Starts read of `key`; returns ledger and read number. */
 export function begun<T>(ledger: Ledger<T>, key: string): [Ledger<T>, number] {
   const number = ledger.asked + 1;
   return [{ ...ledger, asked: number, inFlight: [...ledger.inFlight, { number, key }] }, number];
 }
 
-/** A number later than every read asked so far and earlier than every read asked after. */
+/** Number after every read asked so far, before every read asked later. */
 export function marked<T>(ledger: Ledger<T>): [Ledger<T>, number] {
   const number = ledger.asked + 1;
   return [{ ...ledger, asked: number }, number];
 }
 
-/** A read of `key` answered with `data`: applied when it is newer than the value on record. */
+/** Applied only when newer than value on record. */
 export function answered<T>(
   ledger: Ledger<T>,
   number: number,
@@ -106,7 +95,7 @@ export function answered<T>(
   return { ledger: withEntry(next, key, kept), apply };
 }
 
-/** A read of `key` failed: recorded only when it was asked after every answer heard. */
+/** Recorded only when asked after every answer heard. */
 export function failed<T>(
   ledger: Ledger<T>,
   number: number,
@@ -123,9 +112,8 @@ export function failed<T>(
 }
 
 /**
- * A write's own answer about `key`, made on the value on record and numbered `sent`, the mark taken
- * when the write was sent. A change with nothing to put there brought no answer, so `key` is left
- * as it was.
+ * Write's own answer about `key`, built on value on record, numbered `sent` (mark taken at send).
+ * `change` returning undefined brought no answer; `key` left untouched.
  */
 export function written<T>(
   ledger: Ledger<T>,
@@ -142,18 +130,16 @@ export function written<T>(
   return { ledger: kept === entry ? ledger : withEntry(ledger, key, kept), apply, data };
 }
 
-/** Whether a read of `key` is on its way. */
 export function pendingOn<T>(ledger: Ledger<T>, key: string | null): boolean {
   return ledger.inFlight.some((read) => read.key === key);
 }
 
-/** The value on record for `key`, or null. */
 export function valueOn<T>(ledger: Ledger<T>, key: string | null): T | null {
   if (key === null) return null;
   return entryOf(ledger, key).value?.data ?? null;
 }
 
-/** The failure to show for `key`: the latest word on it, once nothing else is on its way. */
+/** Latest failure for `key`, only once nothing else in flight. */
 export function failureOn<T>(ledger: Ledger<T>, key: string | null): ApiFailure | null {
   if (key === null || pendingOn(ledger, key)) return null;
   return entryOf(ledger, key).failure?.failure ?? null;
@@ -163,10 +149,7 @@ function lastHeard<T>(entry: Entry<T>): number {
   return Math.max(entry.heard, entry.failure?.number ?? 0);
 }
 
-/**
- * The ledger without every question but the one on screen, the ones on their way, and the `keep`
- * heard from last of the rest.
- */
+/** Drops every question except one on screen, ones in flight, and `keep` most recently heard of rest. */
 export function pruned<T>(ledger: Ledger<T>, onScreen: string | null, keep: number): Ledger<T> {
   const idle = Object.entries(ledger.entries).filter(
     ([key]) => key !== onScreen && !pendingOn(ledger, key),

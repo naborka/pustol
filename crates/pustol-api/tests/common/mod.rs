@@ -126,7 +126,7 @@ pub fn config_with(tables: Vec<BarTable>) -> BarConfig {
     }
 }
 
-/// The settings screen's payload turned back into the proposal the screen would send.
+/// Settings payload turned back into draft settings screen would send.
 pub fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "version": settings["version"],
@@ -164,8 +164,7 @@ pub fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
 
 /// Builds an app whose clock is stopped at `now`.
 ///
-/// The bar was set up an hour earlier, so the manager it invited signs a payload well after the seat
-/// was offered, as they would in life, rather than within the clock skew a claim allows for.
+/// Bar created hour earlier, so manager payload is signed after seat offer beyond clock skew.
 pub async fn harness_at(now: DateTime<Utc>, config: BarConfig) -> Harness {
     let store = database::fresh_store().await;
     let config = ValidConfig::new(config)
@@ -284,7 +283,6 @@ impl Answer {
         &self.body
     }
 
-    /// The id of the booking a successful answer carries.
     pub fn booking_id(&self) -> String {
         self.expect_ok()["booking"]["id"]
             .as_str()
@@ -302,7 +300,7 @@ impl Harness {
         stopped_at(self.store.clone(), self.bar, self.config.clone(), now)
     }
 
-    /// The whole process as it runs in production: this API, serving a built app as well.
+    /// Production router: API plus built app assets.
     pub fn serving(&self, assets: pustol_api::Assets) -> Router {
         router(self.state.clone(), Some(assets))
     }
@@ -365,12 +363,10 @@ impl Harness {
         self.send("POST", path, caller, body).await
     }
 
-    /// A guest booking a table in the app.
     pub async fn book(&self, guest: &Caller, body: serde_json::Value) -> Answer {
         self.post("/api/booking", guest, body).await
     }
 
-    /// Staff recording whether the party of booking `id` turned up.
     pub async fn mark(&self, staff: &Caller, id: &str, attendance: &str) -> Answer {
         self.send(
             "PATCH",
@@ -381,7 +377,6 @@ impl Harness {
         .await
     }
 
-    /// Staff moving booking `id` to where and when `to` names.
     pub async fn move_booking(&self, staff: &Caller, id: &str, to: serde_json::Value) -> Answer {
         self.send(
             "PATCH",
@@ -392,7 +387,7 @@ impl Harness {
         .await
     }
 
-    /// A JSON call whose request says how long its body is, as a browser's does.
+    /// Sets `Content-Length`, as browser does.
     pub async fn send_sized(
         &self,
         method: &str,
@@ -413,8 +408,7 @@ impl Harness {
         .await
     }
 
-    /// A call with the body sent as written, under the content type given, for a body that is not
-    /// JSON or not said to be.
+    /// Raw body under given content type, for non-JSON bodies.
     pub async fn send_text(
         &self,
         method: &str,

@@ -46,12 +46,10 @@ pub const DEFAULT_HOURS: DayHours = DayHours {
 
 static NEXT_ACCOUNT: AtomicI64 = AtomicI64::new(1);
 
-/// Arrival times, as the picker asks them of the room.
 pub struct Offered {
     pub slots: Vec<Slot>,
 }
 
-/// The picker's read: the room on a shift, asked for a party's arrival times.
 #[allow(async_fn_in_trait)]
 pub trait Availability {
     async fn availability(
@@ -80,7 +78,6 @@ impl Availability for Store {
     }
 }
 
-/// A reason to close a table, known not to be blank.
 pub fn reason(text: &str) -> BlockReason {
     BlockReason::new(text).expect("fixture reasons are not blank")
 }
@@ -90,10 +87,7 @@ pub async fn store() -> Store {
     database::fresh_store().await
 }
 
-/// A payload Telegram stamped at `at`, on a clock taken to agree with this one.
-///
-/// For tests about something other than the clock. The ones about it say how far apart the two
-/// clocks may be.
+/// Zero clock skew, for tests not about clock.
 pub fn signed(at: DateTime<Utc>) -> Signature {
     Signature {
         stamped_at: at,
@@ -232,7 +226,7 @@ pub fn numbered(tables: &[BarTable], number: i32) -> &BarTable {
         .unwrap_or_else(|| panic!("fixture room has no table {number}"))
 }
 
-/// A proposal that changes nothing, made from the settings as they now stand, ready to be edited.
+/// No-op proposal from current settings, ready to edit.
 pub async fn draft_of(store: &Store, bar: BarId) -> Draft {
     let settings = store.settings(bar).await.expect("the settings load");
     let config = &settings.config;
@@ -299,7 +293,7 @@ pub fn guest_booking(
     }
 }
 
-/// A guest's `request` saying it replaces exactly `ids`, as the guest's app would have said.
+/// Guest `request` replacing exactly `ids`, as guest app sends it.
 pub fn replacing(mut request: NewBooking, ids: &[pustol_domain::BookingId]) -> NewBooking {
     let Channel::Guest { replacing, .. } = &mut request.channel else {
         panic!("only a guest's booking replaces anything");

@@ -1,10 +1,6 @@
 /**
- * The whole app, against a fake Telegram and a fake server.
- *
- * The screens are tested on their own elsewhere. What only shows up here is the wiring between
- * them: when the app fetches, what it does with two taps, what a failure after a success leaves
- * on screen, and what Telegram's own buttons do. Everything in this file was broken in a way no
- * screen test could see.
+ * Whole app against fake Telegram and fake server. Covers wiring screen tests cannot see: fetch
+ * timing, double taps, failure after success, Telegram buttons.
  */
 
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -34,7 +30,7 @@ import type {
 } from "@/lib/api";
 import type { WebApp } from "@/lib/telegram";
 
-/** An answer the test lets through when it chooses. */
+/** Answer released when test chooses. */
 function gate() {
   let open: () => void = () => {};
   const opened = new Promise<void>((resolve) => {
@@ -43,7 +39,7 @@ function gate() {
   return { opened, open: () => act(async () => open()) };
 }
 
-/** Long enough for every answer already let through to reach the screen. */
+/** Long enough for released answers to reach screen. */
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 50)));
 
 const nothingMoved = { moved: [], orphaned: [] };
@@ -61,7 +57,7 @@ const expired: Answer = { status: 401, body: { error: { code: "session_expired",
 
 const EXPIRED = "Сессия устарела. Закройте и откройте приложение — всё сохранится.";
 
-/** What a failed read said as a toast, which no read may say any more. */
+/** Failed-read toast text; reads must never show it. */
 const BROKEN = "Что-то сломалось у нас. Попробуйте ещё раз через минуту.";
 
 const STALE = "Не удалось обновить — показано прежнее.";
@@ -135,16 +131,13 @@ function fakeTelegram() {
 
 const staffSession = () => ({ body: session({ is_staff: true }) });
 
-/**
- * What the server answers an attendance change with: the booking now, what it was just before, and
- * the evening as it stands after.
- */
+/** Attendance change answer: booking now, previous status, evening after. */
 const attended = (status: Attendance, previous: Attendance, released: number | null = null) => {
   const now = shiftBooking({ status, released_minutes: released });
   return { body: { booking: now, previous, shift: shift({ bookings: [now] }) } };
 };
 
-/** A staff cancellation of Саша, and the evening left with `remaining`. */
+/** Staff cancellation of Саша, evening left with `remaining`. */
 const cancelled = (remaining: ShiftBooking[] = []) => ({
   body: {
     booking: shiftBooking({ status: "cancelled" }),
@@ -165,9 +158,8 @@ const timur = shiftBooking({
 });
 
 /**
- * A bar's settings as the server keeps them: a save made from settings somebody has saved since is
- * refused, every save moves the version on, and a table is found by the id the app gave it or made
- * with that id.
+ * Settings as server keeps them: save from outdated version refused, each save bumps version, table
+ * found by app-given id or created with it.
  */
 function settingsServer() {
   let stored = settingsView();
@@ -181,7 +173,7 @@ function settingsServer() {
     change(overrides: Partial<SettingsView>) {
       stored = { ...stored, ...overrides, version: stored.version + 1 };
     },
-    /** A save, answered with what it stored, listed as a read lists it. */
+    /** Save, answered with stored settings in read order. */
     save(draft: SettingsDraft): Answer {
       if (draft.version !== stored.version) {
         return { status: 409, body: { error: { code: "settings_changed", message: "changed" } } };
@@ -241,14 +233,13 @@ afterEach(() => {
 
 describe("the first paint", () => {
   it("does not tell a guest to open the app from Telegram before it has even looked", () => {
-    // The page is prerendered where there is no Telegram at all, and that HTML is what a guest sees
-    // until the scripts have loaded.
+    // Page prerenders without Telegram; guest sees that HTML until scripts load.
     const html = renderToString(<Page />);
     expect(html).not.toContain("Откройте приложение из Telegram");
   });
 
   it("opens on the first read when a refresh that overtook it fails", async () => {
-    // The refresh's failure is older news than the first read's answer, however late that lands.
+    // Refresh failure is older than first read's answer, however late that lands.
     const telegram = fakeTelegram();
     const first = gate();
     let sessions = 0;
@@ -356,7 +347,7 @@ describe("the first paint", () => {
   });
 
   it("shuts at once when the session ends while a read of it asked before is still on its way", async () => {
-    // Only a read asked after the end can bring the app back, so only such a read may spin over it.
+    // Only read asked after end can restore app, so only it may spin over end screen.
     const telegram = fakeTelegram();
     const hanging = gate();
     let sessions = 0;
@@ -384,7 +375,7 @@ describe("the first paint", () => {
   });
 
   it("asks nothing by itself once the session has ended, and keeps saying so", async () => {
-    // A quiet refresh started after the end spun over the screen that says to reopen the app.
+    // Quiet refresh after end must not spin over reopen screen.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const telegram = fakeTelegram();
     const server = fakeServer({
@@ -484,7 +475,7 @@ describe("a shift left open on the bar", () => {
   });
 
   it("goes by the server's evening, not the day this phone opened on, for what it offers", async () => {
-    // Left open past midnight: the phone's session still says the 11th, the bar is on the 12th.
+    // Open past midnight: phone session says 11th, bar is on 12th.
     fakeTelegram();
     fakeServer({
       "GET /api/session": staffSession,
@@ -515,7 +506,7 @@ describe("a shift left open on the bar", () => {
   });
 
   it("offers no seat-now on tonight's evening while the server takes no party at the door", async () => {
-    // Before the doors open, or between the close and the next shift.
+    // Before doors open, or between close and next shift.
     fakeTelegram();
     fakeServer({
       "GET /api/session": staffSession,
@@ -711,7 +702,7 @@ describe("a shift left open on the bar", () => {
   });
 
   it("keeps an undo on screen when a tap is dropped while another action runs", async () => {
-    // Replacing «Вернуть» with «Подождите» took away the only way back from the tap before.
+    // Replacing «Вернуть» with «Подождите» would drop only undo of previous tap.
     const telegram = fakeTelegram();
     const noting = gate();
     const server = fakeServer({
@@ -975,7 +966,7 @@ describe("a shift left open on the bar", () => {
   });
 
   it("offers no undo for closing a table the server says this tap did not close", async () => {
-    // A colleague closed it a moment earlier; «Вернуть» would have opened their table.
+    // Colleague closed it moments earlier; «Вернуть» must not open their table.
     fakeTelegram();
     fakeServer({
       "GET /api/session": staffSession,
@@ -1050,7 +1041,7 @@ describe("a shift left open on the bar", () => {
       "PATCH /api/admin/bookings/b1/attendance": ({ body }) => {
         const attendance = (body as { attendance: Attendance }).attendance;
         asked.push(attendance);
-        // A colleague seated them a moment ago; this phone still shows them expected.
+        // Colleague seated them; this phone still shows them expected.
         return asked.length === 1
           ? attended("no_show", "arrived", 1_280)
           : attended(attendance, "no_show");
@@ -1407,7 +1398,7 @@ describe("a shift left open on the bar", () => {
   });
 
   it("keeps the room asked later when two refreshes of one version answer in the wrong order", async () => {
-    // A room's version does not move with the clock or with whether the bot can reach a guest.
+    // Room version ignores clock and bot reachability.
     const telegram = fakeTelegram();
     const older = gate();
     const newer = gate();
@@ -1942,8 +1933,8 @@ describe("a guest changing their mind", () => {
   }
 
   it("sees the booking gone once cancelled, with no way back offered, even when the home screen cannot be read again", async () => {
-    // The confirmation was the protection. A rebooking undo could cancel another booking the guest
-    // held, and could never bring back one that had begun.
+    // Confirmation was protection. Rebooking undo could cancel another held booking, never restore one
+    // begun.
     fakeTelegram();
     let sessions = 0;
     const server = fakeServer({
@@ -2992,7 +2983,7 @@ describe("settings", () => {
         const draft = body as SettingsDraft;
         const answer = bar.save(draft);
         if (answer.status) return answer;
-        // In the order the save was sent, where every read lists the staff sorted.
+        // Order as sent, while every read sorts staff.
         const saved = answer.body as { settings: SettingsView };
         const staff = draft.staff.map(
           ({ username }) =>
@@ -3193,7 +3184,7 @@ describe("settings", () => {
   });
 
   it("draw two rows typed the same as two rows, and remove one of them", async () => {
-    // Keyed by the username alone, the second row was the same child as the first to React.
+    // Keyed by username alone, React sees second row as same child as first.
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     fakeTelegram();
     const bar = settingsServer();
@@ -3224,7 +3215,7 @@ describe("settings", () => {
     ["@aaron_bar", ["@marina", "@nastya", "@pavel"]],
   ] as const) {
     it(`remove ${who}, tapped while a save that added @aaron_bar is on its way, and nobody the answer lists in that place`, async () => {
-      // The save answers with the staff sorted, where the tap was made on the list as it was sent.
+      // Save answers staff sorted; tap made on list as sent.
       fakeTelegram();
       const saving = gate();
       const bar = settingsServer();

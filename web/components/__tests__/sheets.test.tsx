@@ -102,7 +102,7 @@ describe("one booking", () => {
   });
 
   it("says why the guest cannot be written to, rather than offering and failing", () => {
-    // Unreachable is also a guest with Telegram who stopped the bot: «без Telegram» was not true.
+    // Unreachable includes Telegram guest who stopped bot, so «без Telegram» wrong.
     bookingSheet(shiftBooking({ reachable_by_bot: false }));
     const button = screen.getByText("Бот не может написать гостю");
     expect(button.closest("button")?.disabled).toBe(true);
@@ -138,8 +138,7 @@ describe("one booking", () => {
 
 describe("a booking whose table is given back", () => {
   it("offers a move and a cancel exactly while the server says the booking is not finished", () => {
-    // The server's clock, not this phone's: a minute cached on a phone left open is how a party that
-    // went home was still offered a move the server then refused.
+    // Server clock, not phone: minute cached on phone left open offers move server refuses.
     const cases: [string, ReturnType<typeof shiftBooking>, number | null, boolean][] = [
       ["waiting tonight", shiftBooking(), 1_280, true],
       ["on an evening to come", shiftBooking(), null, true],
@@ -363,7 +362,7 @@ describe("a party at the door", () => {
   });
 
   it("says the table is held until the end the server gave, not one worked out on the wall clock", () => {
-    // The night the clocks go back: a turn from 00:30 ends at the second 01:30, before closing at 02:00.
+    // Clocks go back: turn from 00:30 ends at second 01:30, before 02:00 closing.
     walkInSheet(shift({ now_minutes: 1_470, walk_in_until_minutes: 1_530, bookings: [] }), 2);
     expect(
       within(screen.getByRole("dialog")).getByText(
@@ -482,8 +481,7 @@ describe("a party at the door", () => {
   });
 
   it("offers only the tables the server names, not ones free by the wall clock on the night the clocks go back", () => {
-    // Seated at the first 02:00, a turn of an hour ends at the second 02:00: in wall minutes the
-    // window is empty and both two-tops booked at the first 02:30 look free. They are not.
+    // Seated first 02:00, one-hour turn ends second 02:00: wall minutes see empty window, so two-tops booked first 02:30 wrongly look free.
     const view = shift({
       hours: { open_minutes: 1_080, close_minutes: 1_680, closed: false },
       now_minutes: 1_560,
@@ -546,7 +544,7 @@ describe("moving a booking", () => {
         turnMinutes={120}
         maxParty={6}
         partySize={booking.party_size}
-        // The booking is set aside, so its own time is free at every table.
+        // Booking set aside, so its own time free at every table.
         availability={availability({
           slots: [
             { start_minutes: 1_260, state: "past", evening: true, free_table_ids: ["t1", "t2", "t3"] },
@@ -652,7 +650,7 @@ describe("moving a booking", () => {
   });
 
   it("offers a booking kept at its time the tables free for its own window, not for the slot's", () => {
-    // A walk-in sat down at 21:07, a minute no slot starts at, and holds its table to 23:07.
+    // Walk-in seated 21:07, off slot grid, holds table to 23:07.
     const walkIn = shiftBooking({
       status: "arrived",
       started: true,
@@ -834,7 +832,7 @@ describe("leaving a sheet", () => {
   }
 
   it("can be done with a button a screen reader can find, and hands focus back", async () => {
-    // The backdrop is hidden from assistive technology, so without a button there was no way out.
+    // Backdrop hidden from assistive technology; button is only way out.
     render(<Opener />);
     const opener = screen.getByRole("button", { name: "Открыть" });
     await userEvent.click(opener);
@@ -896,7 +894,7 @@ describe("changing how many are coming", () => {
         onMove={onMove}
       />,
     );
-    // Table 7 seats two; the smallest free table that seats four is table 8.
+    // Table 7 seats two; smallest free table for four is table 8.
     const save = screen.getByText("4 гостя за столом 8");
     await userEvent.click(save);
     expect(onMove).toHaveBeenCalledWith(1_260, "t2", 4);

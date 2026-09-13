@@ -1,4 +1,4 @@
-//! What every answer carries, whichever part of the process gave it.
+//! Headers every response carries, from any layer.
 
 mod common;
 
@@ -36,8 +36,20 @@ async fn every_answer_forbids_sniffing_referrers_and_framing_outside_telegram() 
     let router = app.serving(built_app());
     for path in ["/", "/no-such-page", "/health", "/api/session"] {
         let headers = headers_of(router.clone(), path, None).await;
-        assert_eq!(headers.get("x-content-type-options").map(axum::http::HeaderValue::as_bytes), Some(&b"nosniff"[..]), "{path}");
-        assert_eq!(headers.get("referrer-policy").map(axum::http::HeaderValue::as_bytes), Some(&b"no-referrer"[..]), "{path}");
+        assert_eq!(
+            headers
+                .get("x-content-type-options")
+                .map(axum::http::HeaderValue::as_bytes),
+            Some(&b"nosniff"[..]),
+            "{path}"
+        );
+        assert_eq!(
+            headers
+                .get("referrer-policy")
+                .map(axum::http::HeaderValue::as_bytes),
+            Some(&b"no-referrer"[..]),
+            "{path}"
+        );
         let policy = headers
             .get("content-security-policy")
             .and_then(|value| value.to_str().ok())
@@ -55,7 +67,9 @@ async fn the_app_travels_compressed_to_a_phone_that_accepts_it() {
     let router = app.serving(built_app());
     let headers = headers_of(router, "/", Some("gzip")).await;
     assert_eq!(
-        headers.get(header::CONTENT_ENCODING).map(axum::http::HeaderValue::as_bytes),
+        headers
+            .get(header::CONTENT_ENCODING)
+            .map(axum::http::HeaderValue::as_bytes),
         Some(&b"gzip"[..])
     );
 }

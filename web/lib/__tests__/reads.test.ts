@@ -1,6 +1,4 @@
-/**
- * Which answers reach the screen, and which failures it admits to.
- */
+/** Which answers reach screen, which failures it admits. */
 
 import { describe, expect, it } from "vitest";
 
@@ -29,7 +27,7 @@ function ask<T>(ledger: Ledger<T>, key: string): [Ledger<T>, number] {
   return begun(ledger, key);
 }
 
-/** A write's own answer, numbered when it was sent. */
+/** Write's own answer, numbered at send. */
 function write<T>(
   ledger: Ledger<T>,
   key: string,
@@ -42,8 +40,6 @@ function write<T>(
 
 describe("an answer", () => {
   it("is applied when its question has no answer yet, whatever another question has", () => {
-    // One applied number for every question dropped the first answer for tonight whenever tomorrow
-    // had answered in between.
     let ledger: Ledger<string> = EMPTY_LEDGER;
     let tonight: number;
     let tomorrow: number;
@@ -57,7 +53,7 @@ describe("an answer", () => {
   });
 
   it("is applied, and keeps the failure of a later ask of the same question, which is newer news", () => {
-    // What is on screen then is older than a read that failed, and the screen says so.
+    // Shown value older than failed read; screen admits it.
     let ledger: Ledger<Room> = EMPTY_LEDGER;
     let first: number;
     let retry: number;
@@ -101,8 +97,7 @@ describe("an answer", () => {
   });
 
   it("goes by when it was asked when the order it is given cannot tell two answers apart", () => {
-    // A room's version does not move with the clock or with whether the bot can reach a guest, so
-    // two rooms of one version still differ, and the one asked later is the fresher.
+    // Room version ignores clock and bot reachability, so same-version rooms differ; later ask is fresher.
     let ledger: Ledger<Room> = EMPTY_LEDGER;
     let older: number;
     let newer: number;
@@ -342,7 +337,7 @@ describe("a failure", () => {
   });
 
   it("is cleared by a read asked after it that answered an older room than the one on record", () => {
-    // The answer is not news, but it proves the question can be read.
+    // Answer not news, but proves question readable.
     let ledger: Ledger<Room> = EMPTY_LEDGER;
     let first: number;
     let sent: number;

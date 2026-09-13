@@ -70,8 +70,7 @@ pub struct Query<'a> {
     pub blocks: &'a [TableBlock],
     /// The instant the guest is looking at the picker.
     pub now: DateTime<Utc>,
-    /// Bookings set aside: one being moved, which must not block its own slot, or the ones a guest's
-    /// booking again would replace.
+    /// Bookings that block nothing: one being moved, or ones guest's new booking replaces.
     pub ignoring: &'a [crate::allocator::BookingId],
 }
 
@@ -114,8 +113,7 @@ pub fn slot_at(query: &Query<'_>, start_minutes: i32) -> Option<Slot> {
         .map(|minutes| evaluate(query, minutes))
 }
 
-/// Every table free for `slot`'s window whatever the party, as [`allocator::open_tables_for`] answers
-/// this query about it, whatever the slot's state; empty for a slot the clocks jump over.
+/// [`allocator::open_tables_for`] for `slot`, whatever its availability; empty when clocks skip it.
 #[must_use]
 pub fn open_tables_at<'a>(query: &Query<'a>, slot: &Slot) -> Vec<&'a BarTable> {
     slot.window.map_or_else(Vec::new, |window| {
@@ -123,12 +121,10 @@ pub fn open_tables_at<'a>(query: &Query<'a>, slot: &Slot) -> Vec<&'a BarTable> {
     })
 }
 
-/// Whether `day`'s grid still has an arrival time after `now`: one that happens, and that the grid
-/// would not call past.
+/// Whether `day`'s grid has arrival after `now` that happens.
 ///
-/// Asked of the grid itself, never of closing time less a turn. A step that does not divide the
-/// shift ends the grid earlier than that, and the clocks can skip its last arrivals; either way a
-/// guest told they could still move to tonight would find no time to move to.
+/// Asked of grid, never closing less turn: step not dividing shift ends grid earlier, and clocks can
+/// skip last arrivals. Either way guest offered move to tonight would find no time.
 #[must_use]
 pub fn has_arrival_after(config: &ValidConfig, day: ServiceDay, now: DateTime<Utc>) -> bool {
     arrival_minutes(config, day)
@@ -141,9 +137,7 @@ pub fn has_arrival_after(config: &ValidConfig, day: ServiceDay, now: DateTime<Ut
 /// stopping one turn before closing so no booking runs past the moment the lights go off. Empty on
 /// a day off, which is what makes every caller need no special case for one.
 ///
-/// Written once because every caller walks it — the whole grid, one slot of it, the first free slot
-/// on it, and whether any of it is left — and copies of the same loop are chances to disagree about
-/// the last arrival time.
+/// One loop for every caller, so none disagree about last arrival.
 fn arrival_minutes(config: &ValidConfig, day: ServiceDay) -> impl Iterator<Item = i32> {
     let hours = config.week.for_service_day(day);
     // A validated config guarantees a positive step, so this range is always finite.
@@ -160,7 +154,6 @@ fn arrival_minutes(config: &ValidConfig, day: ServiceDay) -> impl Iterator<Item 
     )
 }
 
-/// Where one arrival time stands against the clock, before anybody asks which table it would get.
 enum Timing {
     /// The clocks jump over it.
     Nonexistent,
@@ -176,22 +169,17 @@ fn timing(config: &ValidConfig, day: ServiceDay, start_minutes: i32, now: DateTi
     }
 }
 
-/// The window a party arriving `start_minutes` into `day` holds, or `None` when the clocks jump over
-/// that time.
+/// `None` when clocks skip that time.
 fn window_of(config: &ValidConfig, day: ServiceDay, start_minutes: i32) -> Option<Interval> {
-    // Against a validated config the only way this can fail is a wall-clock time the spring
-    // clock change jumps over: the minute offset is bounded by closing time and the turn is
-    // positive, so neither of the other failures is reachable.
+    // Validated config: only failure is spring skip. Offset bounded by closing, turn positive.
     resolve(day, start_minutes, config.timezone)
         .and_then(|start| Interval::from_duration(start, config.turn_minutes))
         .ok()
 }
 
-/// The window of the last sitting `day`'s grid has: its last arrival time that happens. `None` on a
-/// day off, or when the clocks jump over every arrival.
+/// Window of grid's last arrival that happens. `None` on day off or when clocks skip every arrival.
 ///
-/// Asked of the grid itself, like [`has_arrival_after`]: closing less a turn is not always an arrival
-/// the grid has, nor one that happens.
+/// From grid, not closing less turn: that may be off grid or skipped.
 pub(crate) fn last_sitting(config: &ValidConfig, day: ServiceDay) -> Option<Interval> {
     arrival_minutes(config, day)
         .filter_map(|minutes| window_of(config, day, minutes))
@@ -254,11 +242,9 @@ pub fn bookable_days(config: &ValidConfig, today: ServiceDay) -> Vec<ServiceDay>
         .collect()
 }
 
-/// Whether a guest may book `day` at `now`: whether it is one of the [`bookable_days`] counted from
-/// the shift running then.
+/// `day` in [`bookable_days`] from shift running at `now`.
 ///
-/// The question the booking endpoint refuses by and every offer made to a guest is held to, so the
-/// screen never offers a move to an evening the endpoint then refuses.
+/// Booking endpoint and every guest offer ask this, so screen never offers move endpoint refuses.
 #[must_use]
 pub fn guest_may_book(config: &ValidConfig, day: ServiceDay, now: DateTime<Utc>) -> bool {
     bookable_days(config, config.current_service_day(now)).contains(&day)

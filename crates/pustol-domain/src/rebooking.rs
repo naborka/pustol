@@ -1,10 +1,6 @@
-//! What booking again does to the bookings a guest already holds.
-//!
-//! **The one rule for rebooking.** Which bookings a new one cancels, which evenings a guest is
-//! refused a second table on, which of their own bookings every offer made to them sets aside, and
-//! what their screen says booking again would do, are all this module. Asked in two places, the
-//! picker would offer a time the booking endpoint then refused, or the endpoint would cancel a
-//! booking the picker had counted as staying.
+//! **One rule for rebooking.** Which bookings new one cancels, which evenings refuse second table,
+//! which own bookings offers set aside, what guest screen promises. One place, so picker and
+//! endpoint never disagree.
 
 use chrono::{DateTime, Utc};
 
@@ -13,25 +9,20 @@ use crate::config::ValidConfig;
 use crate::service_day::ServiceDay;
 use crate::slots::{bookable_days, guest_may_book, has_arrival_after};
 
-/// Which new booking of the same guest replaces a booking they hold.
+/// Which new booking by same guest replaces held one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Rebooking {
-    /// A plan that has not started: the guest changed their mind, and a booking on any evening is
-    /// the new plan.
+    /// Plan not started: booking on any evening is new plan.
     AnyEvening,
-    /// A no-show whose table the bar still holds through the grace period: a booking on the same
-    /// evening takes its place. Another evening leaves it alone, because it is that evening's
-    /// record of who did not come, not a plan the guest still has.
+    /// No-show with table held through grace: only same-evening booking replaces it. Other evenings
+    /// leave it as that evening's record of who did not come.
     SameEvening,
 }
 
 impl Booking {
-    /// What a new booking by this booking's guest does to it at `now`, or `None` when nothing
-    /// replaces it.
+    /// What new booking by same guest does to this one at `now`; `None` when nothing replaces it.
     ///
-    /// A party at its table, or a plan already under way, is never replaced: cancelling it because
-    /// the guest tapped Book again would take the table out from under them. A booking whose table
-    /// is no longer held has nothing left to replace.
+    /// Seated party or plan under way never replaced: would take table from under them.
     #[must_use]
     pub fn rebooking(&self, now: DateTime<Utc>) -> Option<Rebooking> {
         if self.has_finished(now) {
@@ -47,16 +38,11 @@ impl Booking {
         }
     }
 
-    /// What the guest's screen offers booking again to do to this booking at `now`, or `None` when
-    /// it offers nothing.
+    /// [`Self::rebooking`], offered only while evening to rebook on exists: bookable, grid arrival
+    /// left, not held by any booking in `guest` (every booking guest holds).
     ///
-    /// [`Self::rebooking`], offered only while there is an evening to book again on: one guests may
-    /// book, whose grid has an arrival time left, and that no booking in `guest` holds. A plan is
-    /// offered while any such evening is left, its own among them; a no-show only while its own evening
-    /// is one, since nothing else takes its place. Offering «Перенести» otherwise would promise a move
-    /// the endpoint refuses.
-    ///
-    /// `guest` is every booking the guest holds.
+    /// Plan: any such evening, own included. No-show: only own evening. Otherwise «Перенести»
+    /// promises move endpoint refuses.
     #[must_use]
     pub fn rebooking_on_offer(
         &self,
@@ -75,17 +61,16 @@ impl Booking {
         })
     }
 
-    /// Whether this booking holds its evening at `now`: its table is still held for the guest and
-    /// no new booking of theirs replaces it, so a booking on that evening is refused.
+    /// Table still held and nothing replaces it, so new booking that evening refused.
     ///
-    /// **The one rule for "this evening is already yours".** [`refused_on`] is this question asked of
-    /// every booking a guest holds, so the guest's card and the endpoint cannot disagree about it.
+    /// **One rule for "evening already yours".** [`refused_on`] asks it of every guest booking, so
+    /// guest card and endpoint agree.
     #[must_use]
     pub fn holds_evening(&self, now: DateTime<Utc>) -> bool {
         !self.has_finished(now) && self.rebooking(now).is_none()
     }
 
-    /// Whether this booking is a plan at `now`: confirmed, and its time not yet come.
+    /// Confirmed, not yet started.
     #[must_use]
     pub fn is_plan(&self, now: DateTime<Utc>) -> bool {
         self.rebooking(now) == Some(Rebooking::AnyEvening)
@@ -100,9 +85,7 @@ impl Booking {
     }
 }
 
-/// The bookings of one guest that a new booking of theirs on `day` replaces, soonest first.
-///
-/// `guest` is every booking that guest holds; the rule decides which of them count.
+/// Bookings in `guest` (every booking guest holds) a new booking on `day` replaces, soonest first.
 #[must_use]
 pub fn replaced_on(guest: &[Booking], day: ServiceDay, now: DateTime<Utc>) -> Vec<BookingId> {
     let mut replaced: Vec<&Booking> = guest
@@ -113,20 +96,19 @@ pub fn replaced_on(guest: &[Booking], day: ServiceDay, now: DateTime<Utc>) -> Ve
     replaced.into_iter().map(|booking| booking.id).collect()
 }
 
-/// A rule about what one guest may hold, broken by one of their bookings.
+/// Holding rule one guest booking breaks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HoldingConflict {
-    /// Another booking of theirs still holds a table on the same evening.
+    /// Another booking holds table same evening.
     SameEvening,
-    /// The booking is a plan, and so is another booking of theirs.
+    /// Booking is plan, and so is another.
     AnotherPlan,
 }
 
-/// **What a guest may hold.** At most one running booking on any evening, and at most one plan.
+/// **What guest may hold:** one running booking per evening, one plan.
 ///
-/// Answers which of the two rules `booking` breaks among `guest` — every booking that guest holds —
-/// at `now`. Booking again keeps both by replacing; this is the statement of them that any other
-/// change to a guest's booking, such as staff restoring or moving one, is checked against.
+/// Which rule `booking` breaks among `guest` (every booking guest holds) at `now`. Rebooking keeps
+/// both by replacing; other changes, like staff restore or move, checked here.
 #[must_use]
 pub fn holding_conflict(
     guest: &[Booking],
@@ -139,21 +121,27 @@ pub fn holding_conflict(
     let mut others = guest
         .iter()
         .filter(|held| held.id != booking && !held.has_finished(now));
-    if others.clone().any(|other| other.service_day == this.service_day) {
+    if others
+        .clone()
+        .any(|other| other.service_day == this.service_day)
+    {
         return Some(HoldingConflict::SameEvening);
     }
     (this.is_plan(now) && others.any(|other| other.is_plan(now)))
         .then_some(HoldingConflict::AnotherPlan)
 }
 
-/// Whether the evening of `day` still has room for a booking of the guest holding `guest` at `now`:
-/// its grid has an arrival time left, and none of their bookings holds it.
-fn evening_left(guest: &[Booking], config: &ValidConfig, day: ServiceDay, now: DateTime<Utc>) -> bool {
+/// Grid has arrival left on `day`, and no booking in `guest` holds it.
+fn evening_left(
+    guest: &[Booking],
+    config: &ValidConfig,
+    day: ServiceDay,
+    now: DateTime<Utc>,
+) -> bool {
     has_arrival_after(config, day, now) && !refused_on(guest, day, now)
 }
 
-/// Whether a new booking of this guest on `day` is refused, because one of their bookings on that
-/// evening [holds it](Booking::holds_evening).
+/// New booking on `day` refused: guest booking there [holds evening](Booking::holds_evening).
 #[must_use]
 pub fn refused_on(guest: &[Booking], day: ServiceDay, now: DateTime<Utc>) -> bool {
     guest
@@ -182,7 +170,7 @@ mod tests {
         Utc.from_utc_datetime(&day.date().and_hms_opt(hour, 0, 0).expect("valid time"))
     }
 
-    /// A two-hour booking from 18:00 UTC on `day`.
+    /// Two hours from 18:00 UTC.
     fn booking(sequence: u128, day: ServiceDay, status: BookingStatus) -> Booking {
         let start = at(day, 18);
         Booking {
@@ -221,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_no_show_whose_table_is_still_held_is_replaced_only_on_its_own_evening() {
-        // Marked before the party was due, so the bar holds the table through the grace period.
+        // Marked before due, so table held through grace.
         let absent = no_show_held_until(
             1,
             thursday(),
@@ -295,7 +283,11 @@ mod tests {
         let thursday_plan = booking(1, thursday(), BookingStatus::Confirmed);
         let friday_plan = booking(2, friday(), BookingStatus::Confirmed);
         assert_eq!(
-            holding_conflict(&[thursday_plan.clone(), friday_plan.clone()], thursday_plan.id, now),
+            holding_conflict(
+                &[thursday_plan.clone(), friday_plan.clone()],
+                thursday_plan.id,
+                now
+            ),
             Some(HoldingConflict::AnotherPlan)
         );
 
@@ -304,7 +296,11 @@ mod tests {
             ..booking(3, thursday(), BookingStatus::Arrived)
         };
         assert_eq!(
-            holding_conflict(&[thursday_plan.clone(), second_thursday], thursday_plan.id, now),
+            holding_conflict(
+                &[thursday_plan.clone(), second_thursday],
+                thursday_plan.id,
+                now
+            ),
             Some(HoldingConflict::SameEvening),
             "two on one evening, whatever else"
         );

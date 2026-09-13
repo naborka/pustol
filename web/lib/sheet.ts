@@ -1,14 +1,10 @@
 /**
- * Which sheet is open over the app, and what it shows.
+ * Sheet holds copy of booking or table it opened on. Shift keeps changing under it (half-minute
+ * refresh, colleague phone, action just taken); stale copy is how undo restores status booking lost
+ * minutes ago. Copy of something room no longer has is worse, so that sheet closes.
  *
- * A sheet holds a copy of the booking or table it was opened on. The shift keeps changing under it —
- * the half-minute refresh, a colleague's phone, the action just taken — and a copy nobody updates is
- * how an undo restores a status the booking stopped having minutes ago. A copy of something the room
- * no longer has is worse, so that sheet closes.
- *
- * Every opening is numbered. An action that answers late closes the sheet it was started from, and
- * only that one: a sheet closed and opened again meanwhile — even on the same booking — is a new
- * decision somebody is in the middle of, not the one the action finished.
+ * Every opening numbered. Late action answer closes only sheet it started from: sheet closed and
+ * reopened meanwhile, even on same booking, is new decision in progress.
  */
 
 import type { GuestBooking, ShiftBooking, ShiftTable, ShiftView } from "./api";
@@ -30,10 +26,7 @@ export type OpenSheet = { kind: "none" } | (SheetContent & { opened: number });
 
 export const NO_SHEET: OpenSheet = { kind: "none" };
 
-/**
- * The sheet as `shift` now has what it shows, or no sheet once the shift no longer has it: a sheet
- * left open on a cancelled booking was a way to seat, move or message something that is gone.
- */
+/** No sheet once `shift` lacks its item: sheet on cancelled booking could seat, move or message it. */
 export function refreshedSheet(sheet: OpenSheet, shift: ShiftView): OpenSheet {
   switch (sheet.kind) {
     case "booking":
@@ -52,7 +45,6 @@ export function refreshedSheet(sheet: OpenSheet, shift: ShiftView): OpenSheet {
   }
 }
 
-/** The guest's cancel sheet as their bookings now are, or no sheet once its booking is gone. */
 export function refreshedGuestSheet(sheet: OpenSheet, bookings: GuestBooking[]): OpenSheet {
   if (sheet.kind !== "guestCancel") return sheet;
   const current = bookings.find((booking) => booking.id === sheet.booking.id);
@@ -63,12 +55,11 @@ function openingOf(sheet: OpenSheet): number | null {
   return sheet.kind === "none" ? null : sheet.opened;
 }
 
-/** Whether `current` is the very opening `from` was, however its copy has been refreshed since. */
+/** Same opening as `from`, however its copy refreshed since. */
 export function isStill(current: OpenSheet, from: OpenSheet): boolean {
   return current.kind === from.kind && openingOf(current) === openingOf(from);
 }
 
-/** No sheet, if `current` is still the one `from` was; otherwise `current`, untouched. */
 export function closedIfStill(current: OpenSheet, from: OpenSheet): OpenSheet {
   return isStill(current, from) ? NO_SHEET : current;
 }

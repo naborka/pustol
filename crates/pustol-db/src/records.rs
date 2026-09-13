@@ -13,11 +13,7 @@ use pustol_domain::service_day::{Interval, ServiceDay};
 use crate::error::{Error, Result};
 use crate::ids::TelegramUserId;
 
-/// How a booking reached the bar.
-///
-/// Not merely descriptive: a booking taken by staff has no Telegram account behind it, which is
-/// what makes "the bot has no chat with this guest" a fact about the data rather than a flag
-/// somebody has to keep in step.
+/// How a booking reached the bar. Staff and walk-in bookings have no Telegram account behind them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, sqlx::Type, serde::Serialize, serde::Deserialize)]
 #[sqlx(type_name = "booking_source", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -102,11 +98,9 @@ pub struct BookingRecord {
     pub guest_name: String,
     pub guest_username: Option<String>,
     pub telegram_user_id: Option<TelegramUserId>,
-    /// Whether the bot can message this guest: there is an account behind the booking, and the last
-    /// thing the bot learned about it is that messages reach it.
+    /// Account exists and last delivery learned messages reach it.
     ///
-    /// Read with the booking, from the account row, so a screen and a decision made on the same
-    /// reading cannot disagree about it.
+    /// Read with booking from account row, so screen and decision on same read never disagree.
     pub reachable_by_bot: bool,
     pub source: BookingSource,
     /// What staff wrote on this booking: "День рождения", "У окна". Never sent to the guest.

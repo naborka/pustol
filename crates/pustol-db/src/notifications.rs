@@ -13,12 +13,11 @@ use crate::Store;
 use crate::error::Result;
 use crate::ids::{BarId, TelegramUserId};
 
-/// How long a claimed message is kept from other workers while it is being delivered.
+/// How long claimed message stays hidden from other workers during delivery.
 ///
-/// Claiming takes a row lock that ends with the claiming statement, so the lock alone cannot stop a
-/// second worker from sending a message the first is still waiting on Telegram about. Pushing the
-/// message out of the due window for longer than a delivery can take does. A worker that dies
-/// mid-delivery leaves the message to come back once this has passed.
+/// Claim row lock ends with claim statement, so lock alone cannot stop second worker resending while
+/// first waits on Telegram; pushing message out of due window longer than delivery takes does.
+/// Message of dead worker returns after lease.
 pub const CLAIM_LEASE: TimeDelta = TimeDelta::minutes(5);
 
 /// What a message is for.
@@ -47,17 +46,16 @@ pub struct PendingNotification {
     pub body: String,
     /// How many times delivery has now been tried, this attempt included.
     pub attempts: i32,
-    /// The moment this claim keeps the message from other workers until, exactly as stored.
+    /// Lease end, exactly as stored.
     ///
-    /// Together with `attempts` it names this claim and no other: a reminder rewritten while it
-    /// was out for delivery has a new moment and no attempts, and a later claim has more attempts.
-    /// A delivery result is recorded only while both still match, so the outcome of sending the old
-    /// words can never settle, delay or give up the new ones.
+    /// With `attempts` identifies this claim only: reminder rewritten mid-delivery gets new moment
+    /// and zero attempts; later claim has more attempts. Result recorded only while both match, so
+    /// outcome of old words never settles, delays or gives up new ones.
     pub lease: DateTime<Utc>,
 }
 
-/// The condition that the claim a delivery result is for is still the message's: the same row, lease
-/// and attempt, not yet settled. Binds `$1` to `$3`, which [`of_claim`] fills.
+/// SQL filter: row, lease and attempt still match claim, not settled. Uses `$1` to `$3`, bound by
+/// [`of_claim`].
 macro_rules! still_claimed {
     () => {
         " where id = $1 and scheduled_for = $2 and attempts = $3
@@ -71,12 +69,15 @@ impl Store {
     /// The text has to be one the bar configured. Accepting free text here would make a borrowed
     /// staff account a way to send anything to every guest who has ever booked, and checking it in
     /// the handler instead would leave the rule for every future caller to remember. Checked in
-    /// the transaction that queues it, under the bar's lock a settings save also holds, so a
-    /// template removed a moment ago cannot slip through.
+    /// queuing transaction under bar lock settings save also holds, so just-removed template cannot
+    /// slip through.
     ///
-    /// Only to a guest the bot can reach: a booking with an account behind it, which the bot has not
-    /// found it cannot write to. Staff are told the message went, and one that can never arrive would
-    /// tell them the guest knows what the guest does not, when somebody has to call instead.
+    /// Only to guest bot can reach: booking has account, not marked unreachable. Staff are told
+    /// message went; undeliverable one would mislead them when someone must call instead.
+    ///
+    /// # Errors
+    ///
+    /// `NoBotChat`, `UnknownMessage`, `NotFound` for unknown bar or booking, database errors.
     pub async fn send_template(
         &self,
         bar: BarId,
@@ -114,22 +115,25 @@ impl Store {
 
     /// Takes up to `limit` messages that are due, marking each as attempted and leased.
     ///
-    /// `for update skip locked` keeps two workers from claiming the same row at the same instant;
-    /// [`CLAIM_LEASE`] keeps the second from claiming it while the first is still delivering.
+    /// `for update skip locked` stops two workers claiming same row at same instant; [`CLAIM_LEASE`]
+    /// stops second claiming it while first still delivers.
     ///
     /// A reminder is withheld unless the guest asked for reminders, the bot is believed able to
-    /// reach them and the booking still holds a table. Messages that can never be worth sending —
-    /// a reminder, cancellation or move notice about an evening that is over, a reminder for a
-    /// booking that was cancelled or has begun — are settled first, so they stop sitting in front
-    /// of the ones that can. A staff message is never settled by the clock: it is about whatever
-    /// staff chose to say, and staff were told it was sent.
+    /// reach them and booking still holds table. Messages never worth sending (reminder,
+    /// cancellation or move notice for evening already over; reminder for booking cancelled or
+    /// begun) settled first, so they stop blocking the rest. Staff message never settled by clock:
+    /// staff chose it and were told it was sent.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     pub async fn claim_due(
         &self,
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<PendingNotification>> {
-        // One statement: every part sees the same snapshot, so the messages it settles are set aside
-        // from the ones it claims by identity rather than by what the settling wrote.
+        // One statement, one snapshot: settled rows excluded from claim by id, not by what settling
+        // wrote.
         let rows = sqlx::query(
             "with settled as (
                  update notification n
@@ -222,10 +226,12 @@ impl Store {
         Ok(())
     }
 
-    /// Waits as long as Telegram asked, without counting the wait as a failed attempt.
+    /// Waits as long as Telegram asked; wait not counted as failed attempt, since rate limit says
+    /// nothing about deliverability.
     ///
-    /// Being told to slow down says nothing about whether this message can be delivered, so it
-    /// must not bring the message closer to being given up on.
+    /// # Errors
+    ///
+    /// Database errors.
     pub async fn postpone(
         &self,
         claimed: &PendingNotification,
@@ -270,7 +276,7 @@ impl Store {
     }
 }
 
-/// `sql`, with the identity of `claimed` bound to `$1`, `$2` and `$3`.
+/// `sql` with claim identity of `claimed` bound to `$1`, `$2`, `$3`.
 fn of_claim<'q>(
     sql: &'static str,
     claimed: &'q PendingNotification,
@@ -310,15 +316,11 @@ pub(crate) async fn enqueue(
     Ok(row.try_get("id")?)
 }
 
-/// The reminder a booking should have, for the window it now has.
+/// Fits reminder to booking's current window; shared by taking and moving booking.
 ///
-/// One function for taking a booking and for moving one, because they ask the same question: the
-/// reminder follows the window the booking has now, however it came to have it.
-///
-/// A reminder whose moment has already passed is not kept: telling somebody three hours in advance
-/// about a table they booked ten minutes ago is noise. One already delivered is left alone. Whether
-/// the guest wants reminders is deliberately *not* checked here — that is settled when the message
-/// is about to go out, so a guest who opts in after booking still gets one.
+/// Reminder whose moment passed not kept: three-hour notice for table booked ten minutes ago is
+/// noise. Delivered one left alone. Guest consent deliberately *not* checked here: settled at send
+/// time, so guest opting in after booking still gets one.
 pub(crate) async fn plan_reminder(
     connection: &mut PgConnection,
     bar: BarId,

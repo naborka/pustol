@@ -63,8 +63,7 @@ pub fn guests(count: i32) -> String {
     plural(count, "гость", "гостя", "гостей")
 }
 
-/// `count` followed by the noun form Russian puts after it: `one` after 1, 21, 31…, `few` after 2 to
-/// 4, 22 to 24…, and `many` after everything else, the teens included.
+/// Russian plural: `one` after 1, 21, 31; `few` after 2 to 4, 22 to 24; else `many`, teens too.
 fn plural(count: i32, one: &str, few: &str, many: &str) -> String {
     let noun = match (count % 100, count % 10) {
         (11..=19, _) => many,
@@ -75,21 +74,20 @@ fn plural(count: i32, one: &str, few: &str, many: &str) -> String {
     format!("{count} {noun}")
 }
 
-/// Where the bot sends a guest for everything it does not do itself.
 const IN_THE_APP: &str = "Забронировать, перенести или отменить стол можно в приложении.";
 
-/// The answer to «Не смогу прийти» when the table went back.
+/// Reply to «Не смогу прийти» once table freed.
 pub const CANCELLED_FROM_REMINDER: &str =
     "Бронь отменена. Спасибо, что предупредили — стол ушёл другим гостям.";
 
-/// The answer to a button whose booking is gone, started, or was never this guest's.
+/// Reply to button whose booking is gone, started, or never this guest's.
 pub const NO_LONGER_ACTIVE: &str = "Эта бронь уже не действует.";
 
-/// The answer when cancelling failed on our side. The button stays, so the guest can try again.
+/// Cancel failed on server side. Button stays so guest can retry.
 pub const COULD_NOT_CANCEL: &str =
     "Не получилось отменить. Попробуйте ещё раз или отмените в приложении.";
 
-/// The answer to starting the bot from the app's reminder prompt.
+/// Reply to bot start from app reminder prompt.
 #[must_use]
 pub fn reminders_on(remind_hours: i32) -> String {
     format!(
@@ -98,14 +96,13 @@ pub fn reminders_on(remind_hours: i32) -> String {
     )
 }
 
-/// The answer to starting the bot any other way.
+/// Reply to bot start any other way.
 #[must_use]
 pub fn welcome(bar_name: &str, contact: Option<&str>) -> String {
     format!("Это бот бара «{bar_name}». {IN_THE_APP}{}", reach(contact))
 }
 
-/// The answer to a message typed into the bot's chat. Nobody reads it, and saying nothing would
-/// read as being ignored — so it says where somebody does.
+/// Reply to typed message. Nobody reads chat; silence feels like being ignored, so name contact.
 #[must_use]
 pub fn nobody_reads_this(bar_name: &str, contact: Option<&str>) -> String {
     format!(

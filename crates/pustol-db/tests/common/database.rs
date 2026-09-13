@@ -1,41 +1,27 @@
-//! A migrated database of a test's own, on the cluster the suites run against.
+//! Per-test migrated database, shared by storage and API suites through `#[path]`.
 //!
-//! Shared by the storage suite and the API suite through `#[path]`, so the two cannot drift on how a
-//! database is named, made and cleared away.
+//! Test never drops own database: pool still open at return, and panicking test never returns.
+//! Names carry creation second; first test of each process drops long-abandoned ones.
 //!
-//! A test never drops its own database: its pool is still open when it returns, and a test that
-//! panics returns nowhere. Every database is named after the second it was made instead, and the
-//! first test of each process drops the ones that are long abandoned.
-//!
-//! Abandoned is judged by the cluster alone, never by which processes this machine can see: a suite
-//! in another container or pid namespace is invisible from here, and its pid can be reused by an
-//! unrelated process. A database is dropped only when it is older than any run takes and nobody is
-//! connected to it, and without force, so a connection made in between keeps it.
+//! Abandoned judged by cluster only, never by visible processes: suite in another container or pid
+//! namespace is invisible, and pids get reused. Dropped only when older than any run and idle, and
+//! without force, so connection made in between keeps it.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pustol_db::Store;
 
-/// What every test database these suites make is named with, before the second, the pid and the
-/// counter.
 pub const PREFIX: &str = "pustol_test_";
 
-/// Every prefix a test database of these suites has ever been named under: [`PREFIX`], and the
-/// `pustol_t` that round four wrote the numbers straight after.
-///
-/// A name is read only when it is exactly one prefix and the three numbers, so neither form is ever
-/// read as the other, and nothing else under `pustol_t` is read at all.
+/// `pustol_t` is older form, numbers straight after. Name read only as exact prefix plus three
+/// numbers, so forms never confused and nothing else under `pustol_t` read.
 pub const SWEPT_PREFIXES: [&str; 2] = [PREFIX, "pustol_t"];
 
-/// How old a test database with nobody connected has to be before it counts as abandoned.
-///
-/// Far longer than a whole suite takes, so a database made a moment ago by a run that has not
-/// connected to it yet is never taken for one left behind.
+/// Far longer than whole suite, so fresh database not yet connected never counts as abandoned.
 pub const ABANDONED_AFTER: Duration = Duration::from_mins(30);
 
-/// The longest name `PostgreSQL` keeps, in bytes. A longer one is cut short when the database is made,
-/// and the name a test goes on using then names no database at all.
+/// `PostgreSQL` name limit in bytes; longer name silently truncated, so test would name no database.
 const LONGEST_NAME: usize = 63;
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
@@ -46,7 +32,6 @@ pub fn cluster_url() -> String {
         .unwrap_or_else(|_| "postgres://postgres@127.0.0.1:55432/pustol".to_owned())
 }
 
-/// The same connection string pointed at another database on the same cluster.
 fn pointing_at(url: &str, database: &str) -> String {
     let (base, query) = url
         .split_once('?')
@@ -59,12 +44,10 @@ fn pointing_at(url: &str, database: &str) -> String {
     }
 }
 
-/// A pool on the cluster's maintenance database, where databases are made and dropped.
 pub async fn maintenance() -> sqlx::PgPool {
     connect_to("postgres").await
 }
 
-/// A pool on one database of the cluster.
 pub async fn connect_to(database: &str) -> sqlx::PgPool {
     let url = pointing_at(&cluster_url(), database);
     sqlx::PgPool::connect(&url)
@@ -72,20 +55,17 @@ pub async fn connect_to(database: &str) -> sqlx::PgPool {
         .unwrap_or_else(|error| panic!("no cluster at {url}: {error}\nrun scripts/pg.sh start"))
 }
 
-/// Seconds since the epoch, the clock database names are written in.
 pub fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
 }
 
-/// The name of a test database under `prefix`, made at `made_at` by process `pid`, the `counter`th
-/// it made.
 pub fn database_name(prefix: &str, made_at: u64, pid: u32, counter: u64) -> String {
     format!("{prefix}{made_at}_{pid}_{counter}")
 }
 
-/// A migrated database of this test's own, with a pool belonging to this test's runtime.
+/// Pool bound to this test's runtime.
 pub async fn fresh_store() -> Store {
     let admin = maintenance().await;
     if !SWEPT.swap(true, Ordering::SeqCst) {
@@ -109,11 +89,8 @@ pub async fn fresh_store() -> Store {
     store
 }
 
-/// Creates a database under the first name `next` offers that nobody has taken, and gives the name.
-///
-/// The second, the pid and the counter keep the names of one machine apart, but two suites in
-/// different pid namespaces can be the same pid in the same second. Creating a database either takes
-/// the name or fails without touching anything, so a taken name is passed over for the next one.
+/// Suites in different pid namespaces can share pid and second. Create either takes name or fails
+/// harmlessly, so taken name skipped for next one `next` offers.
 pub async fn create_database(admin: &sqlx::PgPool, mut next: impl FnMut() -> String) -> String {
     loop {
         let name = next();
@@ -122,8 +99,7 @@ pub async fn create_database(admin: &sqlx::PgPool, mut next: impl FnMut() -> Str
             name.len() <= LONGEST_NAME,
             "{name:?} is longer than PostgreSQL keeps a name"
         );
-        // `create database` takes no bind parameters, so the name has to be interpolated. It is made
-        // of letters, digits and underscores, as just asserted.
+        // `create database` takes no bind parameters; name asserted plain above.
         match sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
             .execute(admin)
             .await
@@ -135,8 +111,7 @@ pub async fn create_database(admin: &sqlx::PgPool, mut next: impl FnMut() -> Str
     }
 }
 
-/// Whether creating a database failed only because its name is taken. A concurrent creation under
-/// the same name can report the catalogue's unique index instead of the name itself.
+/// Concurrent create of same name may report catalogue unique index `23505` instead of `42P04`.
 fn is_taken(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
@@ -144,20 +119,19 @@ fn is_taken(error: &sqlx::Error) -> bool {
         .is_some_and(|code| code == "42P04" || code == "23505")
 }
 
-/// [`sweep_abandoned`] under each of `prefixes`.
 pub async fn sweep_every(admin: &sqlx::PgPool, prefixes: &[&str], now: u64) {
     for prefix in prefixes {
         sweep_abandoned(admin, prefix, now).await;
     }
 }
 
-/// Drops every database named under `prefix` that is older than [`ABANDONED_AFTER`] at `now` and
-/// that nobody is connected to.
-///
-/// Without force: a connection made after the list was read makes the drop fail, and that database
-/// is left for a later sweep.
+/// Drops idle databases under `prefix` older than [`ABANDONED_AFTER`]. Without force: connection
+/// made after listing makes drop fail, left for later sweep.
 pub async fn sweep_abandoned(admin: &sqlx::PgPool, prefix: &str, now: u64) {
-    assert!(is_plain(prefix), "{prefix:?} is not a prefix this suite makes");
+    assert!(
+        is_plain(prefix),
+        "{prefix:?} is not a prefix this suite makes"
+    );
     let idle: Vec<String> = sqlx::query_scalar(
         "select datname from pg_database d
          where datname like $1
@@ -174,8 +148,7 @@ pub async fn sweep_abandoned(admin: &sqlx::PgPool, prefix: &str, now: u64) {
         if now.saturating_sub(made_at) < ABANDONED_AFTER.as_secs() {
             continue;
         }
-        // Interpolated for the same reason as `create database`; `made_at` has admitted only the
-        // prefix followed by numbers.
+        // Interpolated like `create database`; `made_at` admitted only prefix plus numbers.
         let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
             "drop database if exists \"{name}\""
         )))
@@ -184,8 +157,7 @@ pub async fn sweep_abandoned(admin: &sqlx::PgPool, prefix: &str, now: u64) {
     }
 }
 
-/// The second a database was made, when `name` is exactly `prefix` and the three numbers
-/// [`database_name`] writes; `None` for any other name.
+/// Creation second, only when `name` is exactly `prefix` plus three numbers [`database_name`] writes.
 pub fn made_at(prefix: &str, name: &str) -> Option<u64> {
     let mut numbers = name.strip_prefix(prefix)?.split('_');
     let (made_at, pid, counter) = (numbers.next()?, numbers.next()?, numbers.next()?);

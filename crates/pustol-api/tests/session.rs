@@ -1,8 +1,4 @@
-//! A shift is longer than an hour.
-//!
-//! Telegram hands the app its signed payload once, when it opens, and the API accepts that payload
-//! for an hour. A bartender who opened the shift at six was locked out at seven, and at every hour
-//! after. The first screen now exchanges the payload for a session that lasts the day.
+//! Day-long session outlives one-hour Telegram payload, so shift is not locked out hourly.
 
 mod common;
 
@@ -204,7 +200,7 @@ async fn a_session_never_writes_back_a_name_the_account_has_since_changed() {
         username: before.username.as_ref().map(|name| format!("{name}_new")),
         ..before.clone()
     };
-    // Signed a second later: two profiles stamped in the same second say nothing about which is newer.
+    // Second later: same-second profiles have no order.
     app.at(morning() + TimeDelta::seconds(1))
         .get("/api/session", &after)
         .await
@@ -277,12 +273,11 @@ async fn an_older_payload_never_writes_back_a_name_a_newer_one_replaced() {
 
 #[tokio::test]
 async fn a_telegram_profile_holding_a_nul_character_is_refused_as_text_the_bar_cannot_keep() {
-    // PostgreSQL text cannot hold U+0000. A name carrying one reached the account row and came back
-    // as a server fault, from a payload and from a session alike.
+    // PostgreSQL text cannot hold U+0000.
     use pustol_telegram::init_data::{BotToken, TelegramUser, sign_for_tests};
 
     let app = harness().await;
-    // JSON's escape for U+0000, spelled out: a NUL byte itself is not JSON, and never reaches a name.
+    // JSON escape for U+0000; raw NUL byte is not valid JSON.
     let escaped_nul = format!("{}u0000", char::from(0x5C_u8));
     let user = format!(
         r#"{{"id":5550001,"first_name":"Ан{escaped_nul}на","username":"nul_guest","language_code":"ru"}}"#
@@ -330,8 +325,7 @@ async fn a_telegram_profile_holding_a_nul_character_is_refused_as_text_the_bar_c
 
 #[tokio::test]
 async fn a_telegram_profile_storage_cannot_keep_is_refused_before_anything_is_stored() {
-    // An account needs a positive id and a first name that is not blank. A signed profile without
-    // either reached the account row, where the database's own check refused it as a server fault.
+    // Database check demands positive id and non-blank first name.
     use pustol_telegram::init_data::{BotToken, TelegramUser, sign_for_tests};
 
     let app = harness().await;

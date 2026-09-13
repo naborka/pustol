@@ -87,7 +87,9 @@ pub fn reconcile(request: &Request<'_>) -> Reconciliation {
 
     let mut outcome = Reconciliation::default();
     for (_, id) in candidates {
-        let booking = find(&working, id).expect("candidates come from the working set").clone();
+        let booking = find(&working, id)
+            .expect("candidates come from the working set")
+            .clone();
         let previous = booking.table_id;
         let assignment = allocator::assign(&allocator::Request {
             party_size: booking.party_size,

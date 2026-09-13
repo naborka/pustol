@@ -1,21 +1,23 @@
-//! Text staff write that the bar keeps: how long it may be, and what may not be blank.
+//! Staff-written text: length limits, non-blank names and reasons.
 
-/// Whether `text` is longer than `limit` characters.
+/// Counts characters, not bytes.
 #[must_use]
 pub fn longer_than(text: &str, limit: usize) -> bool {
     text.chars().nth(limit).is_some()
 }
 
-/// The name a booking staff take is filed under: trimmed, and never blank.
+/// Trimmed, never blank.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GuestName(String);
 
-/// A name that is blank once trimmed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
 #[error("a booking needs a name to call out")]
 pub struct BlankGuestName;
 
 impl GuestName {
+    /// # Errors
+    ///
+    /// [`BlankGuestName`] when `text` is blank after trim.
     pub fn new(text: &str) -> Result<Self, BlankGuestName> {
         trimmed(text).map(Self).ok_or(BlankGuestName)
     }
@@ -26,17 +28,18 @@ impl GuestName {
     }
 }
 
-/// Why a table is shut for a shift: trimmed, and never blank, so storage holds no closure staff
-/// cannot explain.
+/// Why table shut for shift. Trimmed, never blank: storage holds no closure staff cannot explain.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BlockReason(String);
 
-/// A reason that is blank once trimmed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
 #[error("closing a table needs a reason staff can read later")]
 pub struct MissingBlockReason;
 
 impl BlockReason {
+    /// # Errors
+    ///
+    /// [`MissingBlockReason`] when `text` is blank after trim.
     pub fn new(text: &str) -> Result<Self, MissingBlockReason> {
         trimmed(text).map(Self).ok_or(MissingBlockReason)
     }

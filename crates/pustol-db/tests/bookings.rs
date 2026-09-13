@@ -1475,8 +1475,6 @@ async fn a_late_booking_does_not_haunt_the_following_shift() {
 
 #[tokio::test]
 async fn staff_grow_a_party_and_the_room_finds_a_table_it_fits() {
-    // «Нас будет четверо» is the call a bar takes most. Cancelling and taking the booking again
-    // told the guest their evening was off.
     let store = store().await;
     let (bar, _) = common::bar_with(
         &store,
@@ -1576,8 +1574,8 @@ async fn a_party_grown_past_every_free_table_or_the_cap_is_refused_and_left_as_i
 
 #[tokio::test]
 async fn a_no_show_still_held_stays_the_record_of_its_evening_when_the_guest_books_another() {
-    // They telephoned at seven to say eight is off, and the bar holds the table until a quarter
-    // past. A booking for Friday is a new plan; it is not a reason to rewrite what Thursday says.
+    // Called at seven to cancel eight; bar holds table until quarter past. Friday booking must not
+    // rewrite Thursday record.
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Стас");
@@ -1612,7 +1610,7 @@ async fn a_no_show_still_held_stays_the_record_of_its_evening_when_the_guest_boo
     assert_eq!(record.booking.status, BookingStatus::NoShow);
 }
 
-/// One two-top, open 18:00 to 22:00 with a four-hour turn: whoever holds an evening holds all of it.
+/// One two-top, open 18:00 to 22:00, four-hour turn: one party holds whole evening.
 fn one_table_one_sitting() -> pustol_domain::BarConfig {
     let mut config = config_with(vec![table(1, 2, "Бар")], "anna_mgr");
     config.turn_minutes = 240;
@@ -1703,8 +1701,7 @@ async fn a_seated_guest_holds_tonight_and_their_plan_for_another_evening_is_set_
         "for anybody else Friday is sold out"
     );
 
-    // Asked honestly, as the app asks: booking tonight would replace their Friday plan, and tonight
-    // is still refused.
+    // Declares replacing Friday plan, as app does: tonight still refused.
     let mut again = common::replacing(
         guest_booking(bar, &account, 1080, 2),
         &[planned.record.booking.id],
@@ -1796,8 +1793,8 @@ async fn a_guest_gives_back_one_booking_of_theirs_by_its_id_and_never_somebody_e
 
 #[tokio::test]
 async fn moving_a_booking_to_a_new_time_makes_it_a_plan_again() {
-    // Booked for eight, marked as not coming at seven, then moved to ten: the table the bar was
-    // holding until a quarter past eight says nothing about ten.
+    // Booked eight, marked no-show at seven, moved to ten: hold until quarter past eight says
+    // nothing about ten.
     let store = store().await;
     let (bar, _) = common::bar_with(
         &store,
@@ -1888,8 +1885,6 @@ async fn moving_only_the_table_or_the_party_keeps_what_staff_recorded() {
 
 #[tokio::test]
 async fn an_evening_is_one_moment_of_the_room_whatever_commits_while_it_is_read() {
-    // A version read a moment after the bookings would call an older room newer than it is, and a
-    // screen that keeps the newest evening would keep that one.
     let store = store().await;
     let (bar, config) = default_bar(&store).await;
     let before = store
@@ -1897,8 +1892,8 @@ async fn an_evening_is_one_moment_of_the_room_whatever_commits_while_it_is_read(
         .await
         .expect("read");
 
-    // Another transaction holds the version still, so the reading waits there, having already read
-    // the bookings. While it waits, that transaction takes a booking and commits.
+    // Other transaction locks version, so read waits there after reading bookings; meanwhile it
+    // books and commits.
     let mut other = store.pool().begin().await.expect("begun");
     sqlx::query("lock table room_version in access exclusive mode")
         .execute(&mut *other)
@@ -1962,9 +1957,8 @@ mod test_databases {
         made_at, maintenance, sweep_abandoned, sweep_every, unix_seconds,
     };
 
-    /// A prefix of `test`'s own. The suites' sweep never matches it, and neither does another of
-    /// these tests' sweeps, so nothing but `test` makes or drops a database under it. It still starts
-    /// with `pustol_t`, which `scripts/pg.sh start` clears if a run leaves one behind.
+    /// Prefix no suite sweep or other test sweep matches. Starts with `pustol_t`, so
+    /// `scripts/pg.sh start` clears leftovers.
     fn private(test: &str) -> String {
         format!("pustol_tsweep_{test}_")
     }
@@ -1978,8 +1972,7 @@ mod test_databases {
         )
     }
 
-    /// Waits until the cluster no longer lists a connection to `name`. A closed pool's backend
-    /// leaves `pg_stat_activity` a moment after the pool says it has closed.
+    /// Closed pool backend leaves `pg_stat_activity` a moment after close returns.
     async fn wait_until_nobody_is_connected(admin: &sqlx::PgPool, name: &str) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while sqlx::query_scalar::<_, bool>(
@@ -2032,7 +2025,7 @@ mod test_databases {
 
     #[tokio::test]
     async fn an_old_test_database_is_dropped_only_once_nobody_is_connected_to_it() {
-        // Another run, in a container this machine cannot see into, is still using it.
+        // Connection stands in for run in unseen container.
         let admin = maintenance().await;
         let prefix = private("old");
         let now = unix_seconds();
@@ -2055,7 +2048,6 @@ mod test_databases {
 
     #[tokio::test]
     async fn a_name_not_in_the_form_this_suite_writes_is_never_read_for_a_second() {
-        // Old and idle, and each is what a name made some other way looks like under the prefix.
         let admin = maintenance().await;
         let prefix = private("form");
         let old = unix_seconds() - ABANDONED_AFTER.as_secs() - 60;
@@ -2085,7 +2077,6 @@ mod test_databases {
 
     #[test]
     fn the_suites_sweep_every_form_a_test_database_was_ever_named_in() {
-        // Round four named them `pustol_t` and the numbers, and left thousands behind.
         assert_eq!(SWEPT_PREFIXES, [PREFIX, "pustol_t"]);
         let old = 1_757_000_000;
         assert_eq!(made_at("pustol_t", "pustol_t1757000000_4242_7"), Some(old));
@@ -2120,14 +2111,12 @@ mod test_databases {
     #[tokio::test]
     #[should_panic(expected = "longer than PostgreSQL keeps a name")]
     async fn a_name_longer_than_the_cluster_keeps_is_never_made() {
-        // The cluster cuts such a name short, and every later look for the name given back misses.
         let admin = maintenance().await;
         create_database(&admin, || format!("{}{}", private("long"), "9".repeat(64))).await;
     }
 
     #[tokio::test]
     async fn a_name_another_process_has_taken_is_passed_over() {
-        // Two suites in different pid namespaces can be the same pid in the same second.
         let admin = maintenance().await;
         let prefix = private("taken");
         let now = unix_seconds();

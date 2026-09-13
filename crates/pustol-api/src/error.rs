@@ -108,7 +108,6 @@ impl From<VerifyError> for ApiError {
 
 impl From<DbError> for ApiError {
     fn from(error: DbError) -> Self {
-        // A request that clashes with the room or the rules as they now stand, named by its code.
         let conflict = |code| Self::new(StatusCode::CONFLICT, code, error.to_string());
         let refused = |code| Self::bad_request(code, error.to_string());
         match &error {

@@ -11,8 +11,8 @@
  * rail the length of the bar's own booking horizon, and every chip on it says what it holds before
  * it is tapped, so no guest ever taps into a day with nothing in it.
  *
- * What a new booking does to the ones a guest already holds is the server's rule, reported on each
- * booking and each evening. The screens read it; they never work it out again from a clock.
+ * What new booking does to held ones is server rule, reported per booking and evening. Screens read
+ * it, never recompute from clock.
  */
 
 import type { Availability, BarView, DayOffer, GuestAvailability, GuestBooking, Session } from "@/lib/api";
@@ -37,18 +37,15 @@ import {
 // ---- what a new booking would do ---------------------------------------------------------------
 
 /**
- * The time the guest chose, while the times on screen still have it free. Read off the times rather
- * than kept: one that passed or was taken since is simply no longer chosen, with nothing to reset.
+ * Chosen time while shown times still have it free. Derived, not stored: passed or taken time just
+ * drops, nothing to reset.
  */
 export function chosenTime(times: Availability | null, chosen: number | null): number | null {
   const free = times?.slots.some((slot) => slot.start_minutes === chosen && slot.state === "free");
   return free ? chosen : null;
 }
 
-/**
- * The bookings a guest holds once a write answered: without the ones it removed, with the one it
- * took, soonest first — the order the server sends them in.
- */
+/** Held bookings after write: minus removed, plus taken, soonest first as server sends. */
 export function heldAfter(
   bookings: GuestBooking[],
   removed: string[],
@@ -63,8 +60,8 @@ export function heldAfter(
 }
 
 /**
- * Whether the server would refuse a booking on `serviceDate` because of one the guest holds. Never
- * read off `rebooking_replaces`: a booking nothing can replace does not always hold its evening.
+ * Whether server refuses booking on `serviceDate` for held booking. Never from `rebooking_replaces`:
+ * booking nothing can replace does not always hold its evening.
  */
 export function heldOn(bookings: GuestBooking[], serviceDate: fmt.IsoDate): boolean {
   return bookings.some((held) => held.service_date === serviceDate && held.holds_evening);
@@ -117,13 +114,10 @@ export function BarHeader({ bar }: { bar: BarView }) {
 }
 
 /**
- * The evening the picker opens on.
- *
- * Moving a held no-show opens on its own evening, the only one a booking replaces it from. Moving a
- * plan opens on its own evening while the bar still takes it. A new booking opens on tonight. Either
- * way never on an evening the guest already holds while another is open — a guest at the table
- * tonight is booking another night — and, when there is no other, on that one, where the picker
- * says why it cannot be booked.
+ * Evening picker opens on. Moving held no-show: own evening, only one booking replaces it from.
+ * Moving plan: own evening while bar takes it. New booking: tonight. Never evening guest holds while
+ * another is open (guest at table tonight books another night); with no other, that one, where
+ * picker says why it cannot be booked.
  */
 export function pickerStart(session: Session, moving: GuestBooking | null = null): fmt.IsoDate {
   if (moving?.rebooking_replaces === "same_evening") return moving.service_date;
@@ -141,7 +135,7 @@ export function BookingCard({
 }: {
   booking: GuestBooking;
   bar: BarView;
-  /** Null when no booking the guest can make now would replace this one. */
+  /** Null when no booking guest can make now would replace this one. */
   onMove: (() => void) | null;
   onCancel: () => void;
 }) {
@@ -434,12 +428,12 @@ export function BookScreen({
   serviceDate: string;
   chosenMinutes: number | null;
   /**
-   * The newest read of the evenings failed: a card when there are none to show, a notice under the
-   * ones shown. Kept apart from `timesFailure`: one succeeding must not hide that the other failed.
+   * Newest days read failed: card when none shown, notice under shown ones. Separate from
+   * `timesFailure`: one success must not hide other failure.
    */
   daysFailure: ApiFailure | null;
   timesFailure: ApiFailure | null;
-  /** The times on screen answer a question the guest has since changed. */
+  /** Shown times answer question guest since changed. */
   timesPending?: boolean;
   onPartySize: (size: number) => void;
   onServiceDate: (date: string) => void;
@@ -548,12 +542,9 @@ export function BookScreen({
 }
 
 /**
- * What the main button says at the bottom of the picker: the whole decision, in one line.
- *
- * `times` is the server's answer for this evening: whether the guest already holds it, where the
- * server would refuse the booking, and which bookings a booking on it replaces. A guest whose booking
- * would be replaced is moving it, and «Забронировать» would make them wonder whether they are about
- * to hold two.
+ * Picker main button: whole decision in one line. `times` is server answer for evening: held,
+ * refused, replaced bookings. Guest whose booking would be replaced is moving it; «Забронировать»
+ * would suggest holding two.
  */
 export function bookingDecision(
   partySize: number,
@@ -578,7 +569,7 @@ export function DoneScreen({
 }: {
   booking: GuestBooking;
   bar: BarView;
-  /** The booking replaced an earlier one, so this is a move rather than a new table. */
+  /** Booking replaced earlier one: move, not new table. */
   moved?: boolean;
 }) {
   return (

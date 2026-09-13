@@ -141,12 +141,12 @@ export function seats(count: number): string {
   return `${count} ${plural(count, "место", "места", "мест")}`;
 }
 
-/** "Держим стол 21 минуту": minutes as the object of a verb, which Russian inflects. */
+/** "Держим стол 21 минуту": verb object, accusative. */
 export function minutesAccusative(count: number): string {
   return `${count} ${plural(count, "минуту", "минуты", "минут")}`;
 }
 
-/** "до 21 гостя": guests after «до», which takes the genitive. */
+/** "до 21 гостя": genitive after «до». */
 export function guestsGenitive(count: number): string {
   return `${count} ${plural(count, "гостя", "гостей", "гостей")}`;
 }
@@ -206,10 +206,7 @@ export function dayStamp(date: IsoDate): string {
   return `${weekdayShort(date)}, ${dayDate(date)}`;
 }
 
-/**
- * "Открыт до 02:00", "Откроется в 18:00" or "Закрыт". Whether the bar is open, and whether it still
- * opens today, is the server's word, decided on instants.
- */
+/** Open now and still opening today: server's word, decided on instants. */
 export function openLabel(bar: {
   today_hours: { close_minutes: number };
   open_now: boolean;

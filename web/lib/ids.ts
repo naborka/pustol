@@ -1,8 +1,6 @@
 /**
- * Names the app gives things before the server has seen them.
- *
- * `crypto.randomUUID` is missing from older iOS webviews and from any page not served over HTTPS, so
- * a version-4 UUID is built from random bytes where it is.
+ * `crypto.randomUUID` missing in older iOS webviews and non-HTTPS pages; there, version-4 UUID built
+ * from random bytes.
  */
 
 export interface RandomSource {

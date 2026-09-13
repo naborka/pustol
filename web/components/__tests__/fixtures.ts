@@ -34,7 +34,7 @@ export const bar: BarView = {
   contact: null,
 };
 
-/** Tonight at 21:30, not yet begun: a plan a booking on any evening would replace. */
+/** Tonight 21:30, not begun; booking on any evening replaces it. */
 export const booking: GuestBooking = {
   id: "b1",
   service_date: "2026-09-11",
@@ -47,7 +47,7 @@ export const booking: GuestBooking = {
   holds_evening: false,
 };
 
-/** The same guest already at the table tonight: never replaced, and tonight is theirs. */
+/** Same guest seated tonight: never replaced, holds tonight. */
 export const seated: GuestBooking = {
   ...booking,
   id: "b0",
@@ -59,7 +59,7 @@ export const seated: GuestBooking = {
   holds_evening: true,
 };
 
-/** A no-show whose table is still held tonight: only a booking tonight replaces it. */
+/** No-show, table still held tonight: only booking tonight replaces it. */
 export const heldNoShow: GuestBooking = {
   ...booking,
   id: "b9",
@@ -105,11 +105,7 @@ export function rail(length: number): DayOffer[] {
   return days;
 }
 
-/**
- * Arrival times as either side answers them: for the guest, nothing held that a booking would replace
- * or refuse; for staff, every table free at each time that is not taken, the booking being moved set
- * aside.
- */
+/** Guest: nothing held to replace or refuse. Staff: every table free at each untaken time, moved booking set aside. */
 export function availability(
   overrides: Partial<GuestAvailability & StaffAvailability> = {},
 ): GuestAvailability & StaffAvailability {
@@ -174,7 +170,7 @@ export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
     stats: { bookings: 1, guests: 2, free_now: 2, seated_now: 2 },
     now_minutes: 1_280,
     walk_in_until_minutes: 1_400,
-    // Table 7 is Саша's until 23:00.
+    // Table 7 held by Саша until 23:00.
     walk_in_free_table_ids: ["t2", "t3"],
     largest_party_seatable_now: 8,
     days: [
@@ -226,7 +222,7 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     grace_minutes: 15,
     message_templates: ["Ваш стол готов", "Опаздываете?", "Мы рядом", "Ждём вас"],
     cancel_reasons: ["Дождь", "Авария", "Частное мероприятие", "Технические проблемы"],
-    // In the server's own order: by username, whatever case it was typed in.
+    // Server order: by username, whatever case typed.
     staff: [
       { username: "marina", bound: false },
       { username: "nastya", bound: true },

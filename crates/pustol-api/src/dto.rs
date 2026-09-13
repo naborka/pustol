@@ -20,17 +20,16 @@ use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 
-/// A date as a request wrote it, in a query or a body, read only through [`Self::day`].
-///
-/// Kept as the text that arrived, so that a date is refused one way wherever it is written and no
-/// handler can reach storage with one it cannot hold: `PostgreSQL` refused `-5000-01-01` as a server
-/// fault.
+/// Raw request date, read only through [`Self::day`], so every path refuses bad dates same way;
+/// `PostgreSQL` failed `-5000-01-01` as server fault.
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub struct ServiceDate(String);
 
 impl ServiceDate {
-    /// The shift this date names, or `invalid_date` when it is not a date of [`in_calendar`].
+    /// # Errors
+    ///
+    /// `invalid_date` when text is not a date or fails [`in_calendar`].
     pub fn day(&self) -> ApiResult<ServiceDay> {
         self.0
             .parse::<NaiveDate>()
@@ -46,8 +45,7 @@ impl ServiceDate {
     }
 }
 
-/// Whether a request may name `date`: years 1 to 9999, the dates a person writes, all of which
-/// storage holds.
+/// Years 1 to 9999: dates people write, all storable.
 pub fn in_calendar(date: NaiveDate) -> bool {
     (1..=9999).contains(&date.year())
 }
@@ -61,22 +59,19 @@ pub struct GuestBooking {
     pub end_minutes: i32,
     pub party_size: i32,
     pub status: Status,
-    /// Whether the window has begun, by the bar's clock rather than the phone's.
+    /// By bar clock, not phone clock.
     pub started: bool,
-    /// Which new booking would replace this one, absent when none would, or when no booking that would
-    /// can be made now: no evening is left that guests may book, whose grid has an arrival time left,
-    /// and that the guest's other bookings do not hold. A plan is moved to any such evening; a no-show
-    /// only to its own. The app offers «Перенести» exactly when this is present, from the rule the
-    /// booking endpoint then applies.
+    /// Absent when no replacing booking possible now: no bookable evening with arrival time left
+    /// that guest's other bookings do not hold. Plan moves to any such evening, no-show only to
+    /// its own. App shows «Перенести» exactly when present, same rule as booking endpoint.
     pub rebooking_replaces: Option<RebookingView>,
-    /// Whether this booking holds its evening: a new booking on that evening is refused because of
-    /// it. What the app knows "this evening is already yours" from; an absent `rebooking_replaces`
-    /// does not say it.
+    /// New booking on this evening refused because of it; absent `rebooking_replaces` never
+    /// implies this.
     pub holds_evening: bool,
 }
 
 impl GuestBooking {
-    /// `record` as its guest sees it at `now`, beside `guest`, every booking that guest holds.
+    /// `guest`: every booking that guest holds.
     pub fn of(
         record: &BookingRecord,
         guest: &[Booking],
@@ -179,21 +174,14 @@ pub struct BarView {
     /// different timezone from the bar and is under nobody's control. "Открыт до 02:00" is a claim
     /// about the bar, so it is answered by the bar.
     pub now_minutes: i32,
-    /// Whether the bar is open this minute, by the opening and closing the walk-in endpoint seats a
-    /// party by.
-    ///
-    /// Decided on instants rather than from `now_minutes` and today's hours: on the night the clocks go
-    /// back the wall repeats an hour, and comparing wall minutes called the bar shut while its door still
-    /// seated parties.
+    /// Same open and close walk-in endpoint uses. Decided on instants, not wall minutes: when
+    /// clocks go back, wall hour repeats and wall comparison called bar shut while door seated.
     pub open_now: bool,
-    /// When today's shift opens, in wall-clock minutes into it, while that moment is still ahead;
-    /// absent once it has come, and on a day off. What «Откроется в …» reads.
+    /// Wall minutes into shift; absent once opened and on day off. Feeds «Откроется в …».
     pub opens_at_minutes: Option<i32>,
-    /// Where a person at the bar answers, absent when the bar has given nowhere.
     pub contact: Option<ContactView>,
 }
 
-/// A contact, already turned into what a screen shows and what a tap opens.
 #[derive(Debug, Serialize)]
 pub struct ContactView {
     pub label: String,
@@ -237,22 +225,20 @@ impl BarView {
 /// Everything the app needs to draw its first screen, in one request.
 #[derive(Debug, Serialize)]
 pub struct Session {
-    /// What the app sends instead of the Telegram payload from now on, so that it keeps working
-    /// after the hour the payload is accepted for.
+    /// Replaces Telegram payload in later requests; payload expires after one hour.
     pub session_token: String,
     pub user: UserView,
     pub is_staff: bool,
     pub reminders: RemindersView,
     pub bar: BarView,
-    /// Every booking of the guest whose table is still held for them, soonest first: the table they
-    /// are sitting at, and a plan for another evening beside it.
+    /// Bookings still holding a table, soonest first: current seat plus plan for another evening.
     pub bookings: Vec<GuestBooking>,
     pub bookable_days: Vec<NaiveDate>,
     /// The earliest arrival time tonight still has, absent when it has none.
     ///
     /// The home screen's one honest sentence about this evening — "Сегодня свободно с 21:30" —
-    /// answered here so the first screen still costs one request. Their own bookings a booking
-    /// tonight would replace are set aside, so it is true for the guest reading it.
+    /// answered here so the first screen still costs one request. Guest's own bookings that
+    /// tonight's booking would replace are set aside.
     pub today_free_from_minutes: Option<i32>,
     /// The party size that sentence speaks for, and the size the picker opens on.
     ///
@@ -311,7 +297,6 @@ pub struct SlotView {
     pub evening: bool,
 }
 
-/// Arrival times on one shift for one party, each slot drawn as `S`.
 #[derive(Debug, Serialize)]
 pub struct Availability<S = SlotView> {
     pub service_date: NaiveDate,
@@ -322,33 +307,29 @@ pub struct Availability<S = SlotView> {
     pub free_count: usize,
 }
 
-/// The arrival times a guest is offered, and what booking on that shift would do to what they hold.
 #[derive(Debug, Serialize)]
 pub struct GuestAvailability {
     #[serde(flatten)]
     pub offer: Availability,
-    /// The bookings of theirs a booking on this shift would replace, soonest first: what the picker's
-    /// button promises, and what the booking sends back as `replacing`.
+    /// Soonest first; picker button promises these, booking echoes them as `replacing`.
     pub replacing: Vec<Uuid>,
-    /// Whether a booking on this shift is refused, because a booking of theirs holds the evening.
+    /// Refused because guest's booking holds evening.
     pub booked: bool,
 }
 
-/// A slot as staff see it: with every table free for its window whatever the party, smallest first,
-/// so a sheet can draw the ones too small for the party as well.
 #[derive(Debug, Serialize)]
 pub struct StaffSlotView {
     #[serde(flatten)]
     pub slot: SlotView,
+    /// Every free table whatever party size, smallest first, so sheet can show too-small ones.
     pub free_table_ids: Vec<Uuid>,
 }
 
-/// The arrival times staff are offered, and with a booking set aside, the tables free for its own
-/// stored window: where keeping its time can seat it, whether or not that time is on the grid.
 #[derive(Debug, Serialize)]
 pub struct StaffAvailability {
     #[serde(flatten)]
     pub offer: Availability<StaffSlotView>,
+    /// Tables free for moved booking's stored window, even when that time is off grid.
     pub kept_free_table_ids: Option<Vec<Uuid>>,
 }
 
@@ -363,8 +344,7 @@ pub struct DayOffer {
     pub closed: bool,
     /// The earliest arrival time still free for this party, absent when the day holds none.
     pub free_from_minutes: Option<i32>,
-    /// The guest already holds this evening with a booking booking again cannot replace, so a
-    /// booking here would be refused.
+    /// Guest holds evening with booking rebooking cannot replace; new booking refused.
     pub booked: bool,
 }
 
@@ -376,7 +356,6 @@ pub struct DayRail {
 }
 
 impl<S> Availability<S> {
-    /// The slots a client is shown, each drawn by `draw` from the slot and its plain view.
     pub fn drawn(
         day: ServiceDay,
         party_size: i32,
@@ -411,9 +390,8 @@ impl SlotView {
             start_minutes: slot.start_minutes,
             state: match slot.availability {
                 SlotAvailability::Free => SlotState::Free,
-                // A time the clock change jumped over is filtered out before it is drawn and never
-                // reaches a client. It is matched rather than left to a catch-all so that adding a
-                // variant to the domain is a compile error here rather than a silent default.
+                // `Nonexistent` filtered out before drawing. Named, not catch-all: new variant
+                // must fail compile.
                 SlotAvailability::Taken | SlotAvailability::Nonexistent => SlotState::Taken,
                 SlotAvailability::Past => SlotState::Past,
             },
@@ -447,14 +425,11 @@ pub struct ShiftBooking {
     pub source: Source,
     /// What staff wrote on this booking. Staff-facing only: nothing sends it anywhere.
     pub note: Option<String>,
-    /// Whether the bot can message this guest. False for a booking taken at the door, which has no
-    /// Telegram account behind it at all, and for a guest the bot has found it cannot reach: in both
-    /// cases a person has to call.
+    /// False for door booking without Telegram account or guest bot cannot reach: staff must call.
     pub reachable_by_bot: bool,
-    /// Whether the window has begun, by the server's clock.
+    /// By server clock.
     pub started: bool,
-    /// Whether the booking is the record of an evening rather than a table still held, by the
-    /// server's clock and the one rule every refusal to move or cancel it uses.
+    /// No longer holds table; same server rule that refuses move or cancel.
     pub finished: bool,
 }
 
@@ -520,10 +495,8 @@ pub struct ShiftStats {
     /// Tables free at this moment, absent for a shift that is not the one running: "free now" has
     /// no meaning on next Tuesday, and an invented number is worse than a blank.
     pub free_now: Option<usize>,
-    /// Guests at their tables this minute, absent for a shift that is not the one running.
-    ///
-    /// Counted here, in instants: on the night the clocks go back a party can sit from the first 02:40
-    /// to the second, a stretch a count in wall-clock minutes reads as empty.
+    /// Absent unless running shift. Counted in instants: when clocks go back, party sitting from
+    /// first 02:40 to second reads as empty in wall minutes.
     pub seated_now: Option<i32>,
 }
 
@@ -538,13 +511,9 @@ pub struct ShiftDay {
 #[derive(Debug, Serialize)]
 pub struct ShiftView {
     pub service_date: NaiveDate,
-    /// How far the bar's room had moved on when this evening was read.
-    ///
-    /// Answers do not arrive in the order they were asked for, so a screen draws an evening only when
-    /// its version is not older than the one it already shows for that date.
+    /// Room version at read. Answers arrive out of order; screen ignores evening older than shown.
     pub version: i64,
-    /// The shift running by the bar's clock, whichever day is on screen. What "today" and "past"
-    /// mean to the screen, answered by the server rather than by a phone in another timezone.
+    /// Running shift by bar clock, whatever day shown; phone may sit in other timezone.
     pub today: NaiveDate,
     pub hours: Hours,
     pub tables: Vec<ShiftTable>,
@@ -552,30 +521,18 @@ pub struct ShiftView {
     pub stats: ShiftStats,
     /// Where to draw the "now" line, absent for a shift that is not running.
     pub now_minutes: Option<i32>,
-    /// The largest party the room could seat this minute, absent when none fits — and absent whenever
-    /// [`Self::walk_in_until_minutes`] is.
-    ///
-    /// Asked over the window a party seated now would hold, the one the walk-in endpoint takes, so
-    /// the line never promises a table the door then refuses.
+    /// Absent when none fits or [`Self::walk_in_until_minutes`] absent. Uses walk-in endpoint
+    /// window, so never promises table door then refuses.
     ///
     /// Answered here, by the allocator, rather than inferred from a count of free tables: seven
     /// free two-tops do not seat the four people at the door, and a bartender who is sent to
     /// another view to find that out has been failed by the one he was on.
     pub largest_party_seatable_now: Option<i32>,
-    /// Until when a party seated this minute holds its table, in wall-clock minutes into the shift:
-    /// the end of the window the walk-in endpoint gives them. Absent on any shift but the one running,
-    /// where "now" means nothing, and while that shift seats nobody new: before it opens, and once it
-    /// has closed.
-    ///
-    /// Sent rather than worked out on the phone, which counts in wall minutes and would get the two
-    /// nights the clocks change wrong.
+    /// End of walk-in window, wall minutes into shift. Absent unless running shift and open. Server
+    /// computes it: phone wall-minute math breaks on clock-change nights.
     pub walk_in_until_minutes: Option<i32>,
-    /// Every table a party seated this minute could be put at, whatever its size: live, open tonight, and
-    /// held by nobody until [`Self::walk_in_until_minutes`]. Empty whenever that is absent. A table fits a
-    /// party when it seats them.
-    ///
-    /// The very list the walk-in endpoint seats a party from, so the sheet never offers a table the door
-    /// then refuses. Sent for the reason `walk_in_until_minutes` is.
+    /// Same list walk-in endpoint seats from, any size; empty when
+    /// [`Self::walk_in_until_minutes`] absent.
     pub walk_in_free_table_ids: Vec<Uuid>,
     /// Every day staff can reach from here, with what is on. Longer than the guest's horizon on
     /// purpose: a telephone booking for next month is not a thing to argue about.
@@ -586,8 +543,7 @@ pub struct ShiftView {
     pub message_templates: Vec<String>,
 }
 
-/// Whether `record` holds its table at `now`, by the one occupancy rule: a party that has left or
-/// never came does not hold a table staff can see standing empty.
+/// Party that left or never came does not hold table staff see standing empty.
 fn holds_table_at(record: &BookingRecord, now: DateTime<Utc>) -> bool {
     record
         .booking
@@ -596,8 +552,7 @@ fn holds_table_at(record: &BookingRecord, now: DateTime<Utc>) -> bool {
 }
 
 impl ShiftView {
-    /// The evening as the shift screen draws it: for `GET /shift` and for the answer to every write,
-    /// from one reading of the room, so the two can never be drawn by different rules.
+    /// One drawing for `GET /shift` and every write answer, so rules never diverge.
     pub fn of(evening: &Evening) -> Self {
         let Evening {
             now,
@@ -768,11 +723,8 @@ pub struct BookingRequest {
     pub service_date: ServiceDate,
     pub start_minutes: i32,
     pub party_size: i32,
-    /// The bookings the app said this one replaces, which is what its «Перенести» promised. Refused
-    /// as `booking_changed` unless that is exactly what it would replace.
-    ///
-    /// Absent reads as none. A Mini App already open from before this field keeps booking wherever
-    /// its booking replaces nothing, and is refused, not obeyed, wherever it would replace something.
+    /// What «Перенести» promised; `booking_changed` unless exact match. Absent means none, so
+    /// old app is refused wherever booking would replace something.
     #[serde(default)]
     pub replacing: Vec<Uuid>,
 }
@@ -821,7 +773,7 @@ pub struct MoveRequest {
     /// The table staff chose. Absent asks the room to choose, as everywhere else.
     #[serde(default)]
     pub table_id: Option<Uuid>,
-    /// How many are coming now. Absent keeps the party as it was.
+    /// Absent keeps party size.
     #[serde(default)]
     pub party_size: Option<i32>,
 }
@@ -881,12 +833,11 @@ pub struct ReconcileRequest {
 /// and so widening a limit needs no change here.
 #[derive(Debug, Serialize)]
 pub struct SettingsView {
-    /// Which settings these are: one more on every write. A save sends it back and is refused if they
-    /// have changed since.
+    /// Bumped every write; save echoes it and is refused if settings changed since.
     pub version: i64,
     pub name: String,
     pub address: String,
-    /// As the manager typed it; empty when there is none.
+    /// As typed; empty when none.
     pub contact: String,
     pub timezone: String,
     /// Indexed from Sunday, matching `chrono`'s numbering.
@@ -933,7 +884,7 @@ pub struct LimitsView {
     pub seats: Bounds,
     pub slot_step_minutes: &'static [i32],
     pub text: TextLimits,
-    /// The most entries each list may hold, so the screen stops offering «Добавить» at the bound.
+    /// Screen hides «Добавить» at bound.
     pub lists: ListLimits,
 }
 

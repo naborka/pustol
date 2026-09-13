@@ -1,8 +1,7 @@
 /**
- * One occupancy rule, and the consumers that have to agree with it.
+ * One occupancy rule; every consumer agrees with it.
  *
- * A party marked `Ушли` at 21:20 is not busy until 23:00 on the timeline while `свободно сейчас`
- * already counts the table and the walk-in sheet offers it. Every reading of one fact agrees.
+ * Party marked `Ушли` at 21:20 must not stay busy to 23:00 on timeline while `свободно сейчас` counts table free.
  */
 
 import { describe, expect, it } from "vitest";
@@ -20,7 +19,7 @@ import {
 } from "../occupancy";
 import { availability, shift, shiftBooking, shiftTable } from "@/components/__tests__/fixtures";
 
-/** A party seated at table 1 from 20:00 to 22:00. */
+/** Party seated at table 1, 20:00 to 22:00. */
 function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
   return shiftBooking({
     table_number: 1,
@@ -32,7 +31,6 @@ function booking(overrides: Partial<ShiftBooking> = {}): ShiftBooking {
   });
 }
 
-/** An evening with a two-top and a six-top and nothing booked. */
 function room(overrides: Partial<ShiftView> = {}): ShiftView {
   return shift({
     tables: [shiftTable({ number: 1 }), shiftTable({ id: "t2", number: 2, seats: 6 })],
@@ -73,8 +71,7 @@ describe("a party that leaves at 21:20", () => {
   });
 
   it("makes the readings of the room this screen works out agree", () => {
-    // The hourly bars and the width of the block on the timeline: one function, and they move
-    // together.
+    // Hourly bars and timeline block width share one function.
     expect(hourlyLoad(evening).map((hour) => hour.tables)).toEqual([0, 0, 1, 1, 0, 0, 0, 0]);
     expect(occupancyEnd(gone) - gone.start_minutes).toBe(80);
   });
@@ -170,8 +167,7 @@ describe("the tables offered to a party at the door", () => {
   });
 
   it("offers no table the server does not name, however free the wall clock says it is", () => {
-    // The night the clocks go back: seated at the first 02:00, the turn ends at the second 02:00,
-    // an empty window in wall minutes that a booking at the first 02:30 does not touch.
+    // Clocks go back: seated first 02:00, turn ends second 02:00; wall minutes see empty window booking at first 02:30 misses.
     const evening = room({
       tables: [shiftTable({ number: 1 }), shiftTable({ id: "t2", number: 2 })],
       bookings: [

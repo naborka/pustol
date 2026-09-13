@@ -54,10 +54,8 @@ pub struct Limits {
     pub lists: ListLimits,
 }
 
-/// The longest each text the bar writes may be, in characters.
-///
-/// A guest message longer than Telegram carries is refused on every send; a name, reason or zone
-/// that long breaks every screen and message it is drawn into.
+/// Max length per text, in characters. Longer message Telegram refuses on every send; longer name,
+/// reason or zone breaks screens.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct TextLimits {
     pub name: usize,
@@ -67,18 +65,16 @@ pub struct TextLimits {
     pub zone: usize,
 }
 
-/// The most entries each list the bar keeps may hold.
-///
-/// Every list travels whole in one settings save. Unbounded, a legal configuration could outgrow any
-/// request the API reads, and could then never be saved again.
+/// Max entries per list. Whole config travels in one save; unbounded, legal config could outgrow
+/// request limit and never save again.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct ListLimits {
     pub message_templates: usize,
     pub cancel_reasons: usize,
     pub zones: usize,
     pub staff: usize,
-    /// Tables in the live room. Retired tables are the room's history, kept for ever, and never
-    /// count: a bar that replaced its furniture often enough would otherwise be locked out.
+    /// Live tables only. Retired ones are history kept forever; counting them would lock out bar
+    /// that replaced furniture often.
     pub tables: usize,
 }
 
@@ -135,10 +131,7 @@ pub struct DayHours {
 }
 
 impl DayHours {
-    /// Length of the shift in minutes.
-    ///
-    /// Wide, because these are a proposal's hours until validated, and the difference of any two
-    /// integers a body can carry does not fit in the width they arrived in.
+    /// `i64`: unvalidated `i32` hours overflow on subtraction.
     #[must_use]
     pub fn shift_minutes(self) -> i64 {
         i64::from(self.close_minutes) - i64::from(self.open_minutes)
@@ -222,8 +215,7 @@ pub struct BarConfig {
     pub message_templates: Vec<String>,
     pub cancel_reasons: Vec<String>,
     pub staff: Vec<StaffMember>,
-    /// How guests reach a person at the bar — a phone number or a Telegram username — when the bar
-    /// has given one. Kept as written; [`Contact::parse`] says what it is.
+    /// Phone or Telegram username, kept as typed; [`Contact::parse`] reads it.
     pub contact: Option<String>,
 }
 
@@ -242,8 +234,7 @@ impl BarConfig {
             .unwrap_or(0)
     }
 
-    /// The contact guests are given, or `None` when the bar gives none or what it gives is neither
-    /// kind [`Contact::parse`] reads.
+    /// `None` when absent or unparseable.
     #[must_use]
     pub fn contact(&self) -> Option<Contact> {
         self.contact.as_deref().and_then(Contact::parse)
@@ -525,35 +516,25 @@ impl ValidConfig {
         self.0
     }
 
-    // Everything below does arithmetic on the hours, the turn and the room, and so lives here rather
-    // than on the proposal: it is correct only for values validation has bounded.
+    // Below: arithmetic on hours, turn and room; correct only for validated values.
 
-    /// Total live seats — the settings summary line.
     #[must_use]
     pub fn total_seats(&self) -> i32 {
         self.active_tables().map(|table| table.seats).sum()
     }
 
-    /// Latest wall-clock minute a party may arrive on `weekday`, or `None` when closed.
-    ///
-    /// Derived, never stored: it is closing time minus one turn, and a stored copy would drift
-    /// away from the two facts it is made of.
+    /// Closing less one turn; `None` on day off. Derived, never stored, so cannot drift.
     #[must_use]
     pub fn last_arrival_minutes(&self, weekday: Weekday) -> Option<i32> {
         let hours = self.week.on(weekday);
         (!hours.closed).then(|| hours.close_minutes - self.turn_minutes)
     }
 
-    /// The shift that is running, or about to run, at `now`.
+    /// Shift running, or about to run, at `now`. Not calendar date: at 01:00 bar closing 02:00 still
+    /// works yesterday's shift.
     ///
-    /// Not the calendar date. At one in the morning a bar that shuts at two is still working
-    /// yesterday's shift, and a guest tapping "tonight" means the evening they are currently
-    /// sitting in. Getting this wrong would move the whole day strip forward by one at midnight
-    /// and show staff an empty room while the room is full.
-    ///
-    /// Decided on instants, never on the wall clock: yesterday runs until [`Self::shift_end`]. The
-    /// wall clock repeats an hour in autumn, and reading it made a shift that had stopped start
-    /// running again, an hour after every table was free.
+    /// Decided on instants: yesterday runs until [`Self::shift_end`]. Wall repeats hour in autumn;
+    /// reading it would restart finished shift.
     #[must_use]
     pub fn current_service_day(&self, now: DateTime<Utc>) -> ServiceDay {
         let today = ServiceDay::new(now.with_timezone(&self.timezone).date_naive());
@@ -563,14 +544,10 @@ impl ValidConfig {
         }
     }
 
-    /// The window a party sitting down at `now` holds on `day`, or `None` when `day` seats nobody
-    /// now: a day off, a shift that has not opened, or one that has closed.
+    /// Window for party seated at `now`: one turn, cut at closing. `None` unless `day`
+    /// [is open](Self::is_open).
     ///
-    /// One turn, cut short at closing, so a party never sits past the hours that seated it, on the wall
-    /// or in real time. Closing is never later than [`Self::shift_end`], so the party is gone before
-    /// the next shift runs.
-    ///
-    /// Seated only while `day` [is open](Self::is_open).
+    /// Closing never later than [`Self::shift_end`], so party leaves before next shift runs.
     #[must_use]
     pub fn walk_in_window(&self, day: ServiceDay, now: DateTime<Utc>) -> Option<Interval> {
         if !self.is_open(day, now) {
@@ -581,36 +558,31 @@ impl ValidConfig {
         Interval::new(now, turn.end().min(closes)).ok()
     }
 
-    /// The moment `day` opens, while `now` is before it; `None` once it has opened, and on a day off.
+    /// Opening of `day` while still ahead of `now`; `None` once opened or on day off.
     #[must_use]
     pub fn opening_ahead(&self, day: ServiceDay, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.opening(day).filter(|opens| now < *opens)
     }
 
-    /// Whether `day` is open at `now`: it has opened, and closing has not come.
-    ///
-    /// **The one rule for "open".** Whether a party at the door is seated and whether the guest's screen
-    /// says the bar is open are this question, asked of instants rather than of the wall. Closing is
-    /// the last moment the wall comes up to it from the minute before, so on the night the clocks go
-    /// back a bar closing inside the repeated hour stays open through it.
+    /// **One rule for "open".** Door seating and guest screen both ask this, on instants. Closing is
+    /// last time wall comes up to it, so on autumn night bar closing inside repeated hour stays open
+    /// through it.
     #[must_use]
     pub fn is_open(&self, day: ServiceDay, now: DateTime<Utc>) -> bool {
         self.opening(day).is_some_and(|opens| opens <= now)
             && self.closing(day).is_some_and(|closes| now < closes)
     }
 
-    /// The moment `day` stops running, or `None` on a day off.
+    /// Later of closing and last grid sitting end; `None` on day off.
     ///
-    /// The later of closing and the end of the last sitting the grid has. Every sitting ends by closing
-    /// on the wall, but not always in real time: on the night the clocks go forward the last one holds
-    /// its table an hour past closing, and the shift runs until it is over. On the night they go back
-    /// the wall can come up to closing twice, and the shift runs until the second.
+    /// Spring night: last sitting holds table hour past closing. Autumn night: closing is second
+    /// time wall reaches it.
     fn shift_end(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
         let closes = self.closing(day)?;
         Some(last_sitting(self, day).map_or(closes, |sitting| sitting.end().max(closes)))
     }
 
-    /// The moment `day` opens, or `None` on a day off.
+    /// `None` on day off.
     fn opening(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
         let hours = self.week.for_service_day(day);
         if hours.closed {
@@ -619,8 +591,7 @@ impl ValidConfig {
         resolve_boundary(day, hours.open_minutes, self.timezone).ok()
     }
 
-    /// The moment `day` closes, the last the wall comes up to its closing time from the minute before,
-    /// or `None` on a day off.
+    /// Last time wall comes up to closing from minute before; `None` on day off.
     fn closing(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
         let hours = self.week.for_service_day(day);
         if hours.closed {
@@ -629,14 +600,11 @@ impl ValidConfig {
         resolve_end(day, hours.close_minutes, self.timezone).ok()
     }
 
-    /// The latest a booking lasting `minutes` may end on `day` and still sit within its hours, or
-    /// `None` on a day off.
+    /// Latest end for booking of `minutes` on `day` still within hours; `None` on day off.
     ///
-    /// The later of two moments. One is closing, which can be the second time the wall reaches it: a
-    /// party seated on the first pass through the hour the clocks repeat holds its table longer than
-    /// the wall says, and sits within the hours all the same. The other is the end of a sitting as long, arriving at
-    /// the latest minute closing allows it: on the night the clocks go forward the grid's last arrival
-    /// holds its table an hour past closing, under the very hours that sold it.
+    /// Later of closing (autumn: maybe second wall reading, so first-pass party holds table longer
+    /// than wall says) and end of equal sitting arriving at latest allowed minute (spring: holds
+    /// table hour past closing).
     fn latest_end(&self, day: ServiceDay, minutes: i32) -> Option<DateTime<Utc>> {
         let hours = self.week.for_service_day(day);
         let closes = self.closing(day)?;
@@ -677,7 +645,6 @@ pub enum Setting {
     GraceMinutes,
 }
 
-/// A list the bar keeps, named so an error about its length can say which one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BarList {
     MessageTemplates,
@@ -846,8 +813,8 @@ pub fn schedule_conflicts(
         .collect()
 }
 
-/// Judged on instants, against the opening and the latest end [`ValidConfig::latest_end`] allows: on
-/// the wall the two clock changes each put a booking the hours themselves seated outside them.
+/// Judged on instants against opening and [`ValidConfig::latest_end`]: on wall, both clock changes put
+/// bookings the hours seated outside them.
 fn conflict_for(config: &ValidConfig, booking: &Booking) -> Option<ScheduleConflict> {
     let day = booking.service_day;
     let hours = config.week.for_service_day(day);
@@ -897,22 +864,20 @@ pub fn parties_above_cap(
         .collect()
 }
 
-/// A way for a guest to reach a person at the bar.
-///
-/// The bot's chat is read by nobody, so a party larger than the app takes needs somewhere a human
-/// answers. Only two kinds are accepted, because only those two turn into a link a phone can open.
+/// How guest reaches a person at bar. Bot chat unread, so party too large for app needs a human.
+/// Only phone and Telegram: only those become link phone opens.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Contact {
     Phone { shown: String, dial: String },
     Telegram { username: String },
 }
 
-/// The longest phone number as written, spaces and brackets included: one line of a screen. A
-/// username needs no cap of its own, because Telegram's rule already bounds it.
+/// Phone as typed, spaces and brackets included: one screen line. Username needs no cap; Telegram
+/// rule bounds it.
 const PHONE_MAX_CHARS: usize = 32;
 
 impl Contact {
-    /// Reads a contact as a manager typed it, or `None` when it is neither kind.
+    /// `None` when neither phone nor Telegram username.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
@@ -930,7 +895,7 @@ impl Contact {
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, ' ' | '-' | '(' | ')' | '+'))
             && text.rfind('+').is_none_or(|at| at == 0);
-        // E.164 allows at most fifteen digits; fewer than seven is not a number anyone can dial.
+        // E.164: max 15 digits; under 7 not dialable.
         (shaped && (7..=15).contains(&digits.len())).then(|| Self::Phone {
             shown: text.to_owned(),
             dial: if text.starts_with('+') {
@@ -941,7 +906,7 @@ impl Contact {
         })
     }
 
-    /// How the contact is written on a screen.
+    /// Text shown on screen.
     #[must_use]
     pub fn label(&self) -> String {
         match self {
@@ -950,7 +915,7 @@ impl Contact {
         }
     }
 
-    /// What a phone opens to reach it.
+    /// Link phone opens: `tel:` or `t.me`.
     #[must_use]
     pub fn url(&self) -> String {
         match self {
