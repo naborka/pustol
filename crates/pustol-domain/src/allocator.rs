@@ -173,16 +173,38 @@ pub struct Request<'a> {
 /// screen offers cannot disagree about what is free.
 #[must_use]
 pub fn free_tables<'a>(request: &Request<'a>) -> Vec<&'a BarTable> {
-    let mut candidates: Vec<&BarTable> = request
-        .tables
+    open_tables(
+        request.tables,
+        request.service_day,
+        request.window,
+        request.bookings,
+        request.blocks,
+        request.ignoring,
+    )
+    .into_iter()
+    .filter(|table| table.seats_party(request.party_size))
+    .collect()
+}
+
+/// Every table the room could put a party of any size at for `window` on `service_day`: live, open
+/// that evening, and held by no booking outside `ignoring` for any part of it. Smallest first, ties by
+/// printed number.
+fn open_tables<'a>(
+    tables: &'a [BarTable],
+    service_day: ServiceDay,
+    window: Interval,
+    bookings: &[Booking],
+    blocks: &[TableBlock],
+    ignoring: &[BookingId],
+) -> Vec<&'a BarTable> {
+    let mut open: Vec<&BarTable> = tables
         .iter()
         .filter(|table| table.is_active())
-        .filter(|table| table.seats_party(request.party_size))
-        .filter(|table| !is_blocked(table.id, request.service_day, request.blocks))
-        .filter(|table| free_during(table.id, request))
+        .filter(|table| !is_blocked(table.id, service_day, blocks))
+        .filter(|table| free_during(table.id, window, bookings, ignoring))
         .collect();
-    candidates.sort_unstable_by_key(|table| (table.seats, table.number));
-    candidates
+    open.sort_unstable_by_key(|table| (table.seats, table.number));
+    open
 }
 
 /// Picks the table for a party, or `None` when the room cannot take them.
@@ -203,10 +225,15 @@ fn is_blocked(table_id: TableId, service_day: ServiceDay, blocks: &[TableBlock])
         .any(|block| block.table_id == table_id && block.service_day == service_day)
 }
 
-fn free_during(table_id: TableId, request: &Request<'_>) -> bool {
-    !request.bookings.iter().any(|booking| {
-        !request.ignoring.contains(&booking.id) && booking.holds(table_id, request.window)
-    })
+fn free_during(
+    table_id: TableId,
+    window: Interval,
+    bookings: &[Booking],
+    ignoring: &[BookingId],
+) -> bool {
+    !bookings
+        .iter()
+        .any(|booking| !ignoring.contains(&booking.id) && booking.holds(table_id, window))
 }
 
 /// The largest party the room could seat right now, or `None` when nothing fits.
@@ -237,6 +264,51 @@ pub fn largest_party_seatable(
             ignoring: &[],
         })
         .is_some()
+    })
+}
+
+/// What the room offers a party walking in.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WalkIn<'a> {
+    /// The window a party sitting down now holds: [`ValidConfig::walk_in_window`].
+    pub window: Interval,
+    /// Every table free for all of `window`, whatever the party: live, open tonight, and held by nobody
+    /// for any part of it. Smallest first, ties by printed number.
+    pub tables: Vec<&'a BarTable>,
+}
+
+impl<'a> WalkIn<'a> {
+    /// The tables that seat `party_size`: [`free_tables`] for this window, in the same order.
+    #[must_use]
+    pub fn tables_for(&self, party_size: i32) -> Vec<&'a BarTable> {
+        self.tables
+            .iter()
+            .copied()
+            .filter(|table| table.seats_party(party_size))
+            .collect()
+    }
+}
+
+/// What the room offers a party walking in on `day` at `now`, or `None` when `day` seats nobody new
+/// now: it is not the running shift, or it is not [open](ValidConfig::is_open).
+///
+/// **The one rule for walk-ins.** Seating a party at the door and the tables the shift offers one are
+/// both this, so the shift never offers a table the door then refuses.
+#[must_use]
+pub fn walk_in<'a>(
+    config: &'a ValidConfig,
+    day: ServiceDay,
+    now: DateTime<Utc>,
+    bookings: &[Booking],
+    blocks: &[TableBlock],
+) -> Option<WalkIn<'a>> {
+    if config.current_service_day(now) != day {
+        return None;
+    }
+    let window = config.walk_in_window(day, now)?;
+    Some(WalkIn {
+        window,
+        tables: open_tables(&config.tables, day, window, bookings, blocks, &[]),
     })
 }
 

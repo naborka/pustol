@@ -502,6 +502,7 @@ describe("a shift left open on the bar", () => {
             today: "2026-09-12",
             now_minutes: running ? 1_280 : null,
             walk_in_until_minutes: running ? 1_400 : null,
+            walk_in_free_table_ids: running ? ["t2", "t3"] : [],
           }),
         };
       },
@@ -523,7 +524,9 @@ describe("a shift left open on the bar", () => {
     fakeTelegram();
     fakeServer({
       "GET /api/session": staffSession,
-      "GET /api/admin/shift": () => ({ body: shift({ walk_in_until_minutes: null }) }),
+      "GET /api/admin/shift": () => ({
+        body: shift({ walk_in_until_minutes: null, walk_in_free_table_ids: [] }),
+      }),
     });
     const user = userEvent.setup();
     render(<Page />);
@@ -1486,6 +1489,51 @@ describe("a shift left open on the bar", () => {
     expect(screen.getByText(/^21:40 ·/)).toBeDefined();
   });
 
+  it("admits no failure of a refresh asked before one that answered, even with a room too old to show", async () => {
+    const telegram = fakeTelegram();
+    const seating = gate();
+    const second = gate();
+    const third = gate();
+    let reads = 0;
+    const server = fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": async () => {
+        const read = (reads += 1);
+        if (read === 2) {
+          await second.opened;
+          return failed;
+        }
+        if (read === 3) {
+          await third.opened;
+          return { body: shift({ version: 2 }) };
+        }
+        return { body: shift() };
+      },
+      "PATCH /api/admin/bookings/b1/attendance": async () => {
+        await seating.opened;
+        const now = shiftBooking({ status: "arrived" });
+        return { body: { booking: now, previous: "confirmed", shift: shift({ version: 3, bookings: [now] }) } };
+      },
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Смена"));
+    await user.click(await screen.findByText("Посадить"));
+    act(() => telegram.emit("activated"));
+    await waitFor(() => expect(server.count("GET", "/api/admin/shift")).toBe(2));
+    act(() => telegram.emit("activated"));
+    await waitFor(() => expect(server.count("GET", "/api/admin/shift")).toBe(3));
+
+    await seating.open();
+    await screen.findByText("Саша за столом 7.");
+    await third.open();
+    await settle();
+    await second.open();
+    await settle();
+    expect(screen.queryByText(STALE)).toBeNull();
+  });
+
   it("keeps a write's own room over a refresh of the same version asked before the write was sent", async () => {
     const telegram = fakeTelegram();
     const refresh = gate();
@@ -1591,7 +1639,13 @@ describe("a shift left open on the bar", () => {
           body:
             date === "2026-09-11"
               ? shift()
-              : shift({ service_date: date, now_minutes: null, walk_in_until_minutes: null, bookings: [] }),
+              : shift({
+                  service_date: date,
+                  now_minutes: null,
+                  walk_in_until_minutes: null,
+                  walk_in_free_table_ids: [],
+                  bookings: [],
+                }),
         };
       },
       "GET /api/admin/availability": async ({ url }) => {
@@ -1912,6 +1966,45 @@ describe("a guest changing their mind", () => {
     ]);
     expect(await screen.findByText("Забронировать · 4 гостя · сегодня в 21:30")).toBeDefined();
     expect(server.count("GET", "/api/session")).toBe(2);
+  });
+
+  it("reads the times again when the bookings changed, and no longer offers a time that passed meanwhile", async () => {
+    fakeTelegram();
+    let sessions = 0;
+    let refused = false;
+    fakeServer({
+      "GET /api/session": () => {
+        sessions += 1;
+        return { body: session({ bookings: sessions === 1 ? [booking] : [] }) };
+      },
+      "GET /api/days": () => ({ body: { party_size: 4, days: rail(2) } }),
+      "GET /api/availability": () => ({
+        body: refused
+          ? availability({
+              slots: [
+                { start_minutes: 1_290, state: "past", evening: true },
+                { start_minutes: 1_350, state: "free", evening: true },
+              ],
+              free_count: 1,
+            })
+          : availability(),
+      }),
+      "POST /api/booking": () => {
+        refused = true;
+        return { status: 409, body: { error: { code: "booking_changed", message: "changed" } } };
+      },
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Перенести"));
+    await user.click(await screen.findByRole("button", { name: "21:30" }));
+    await user.click(await screen.findByText("Перенести · 4 гостя · сегодня в 21:30"));
+    await screen.findByText("Ваши брони изменились — проверьте и нажмите ещё раз.");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "21:30" })).toBeNull());
+    expect(screen.getByRole("button", { name: "22:30" })).toBeDefined();
+    expect(screen.queryByText(/сегодня в 21:30/)).toBeNull();
+    expect(screen.getByText("Выберите время")).toBeDefined();
   });
 
   it("is not asked about reminders again once answered, even when the home screen cannot be read again", async () => {
@@ -3039,6 +3132,56 @@ describe("settings", () => {
     await settle();
     expect(screen.queryByText(STALE)).toBeNull();
     expect(reads).toBe(2);
+  });
+
+  it("remove the member whose row was tapped, not one spelled the same in another case", async () => {
+    fakeTelegram();
+    const bar = settingsServer();
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => ({ body: shift() }),
+      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Настройки"));
+    await user.click(await screen.findByText("Персонал"));
+    await user.type(await screen.findByPlaceholderText("@username"), "@Pavel");
+    await user.click(screen.getByText("Добавить"));
+    expect(await screen.findByText("@Pavel")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "Убрать @Pavel" }));
+
+    expect(screen.getByText("@pavel")).toBeDefined();
+    expect(screen.queryByText("@Pavel")).toBeNull();
+    expect(screen.queryByText("Сохранить")).toBeNull();
+  });
+
+  it("draw two rows typed the same as two rows, and remove one of them", async () => {
+    // Keyed by the username alone, the second row was the same child as the first to React.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    fakeTelegram();
+    const bar = settingsServer();
+    fakeServer({
+      "GET /api/session": staffSession,
+      "GET /api/admin/shift": () => ({ body: shift() }),
+      "GET /api/admin/settings": ({ url }) => ({ body: bar.read(url.searchParams.get("service_date")) }),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Настройки"));
+    await user.click(await screen.findByText("Персонал"));
+    await user.type(await screen.findByPlaceholderText("@username"), "@pavel");
+    await user.click(screen.getByText("Добавить"));
+    expect(screen.getAllByText("@pavel")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: "Убрать @pavel" })[1] as HTMLElement);
+    expect(screen.getAllByText("@pavel")).toHaveLength(1);
+    expect(screen.getAllByText(/^@/).map((node) => node.textContent)).toEqual(["@marina", "@nastya", "@pavel"]);
+    expect(screen.queryByText("Сохранить")).toBeNull();
+    const logged = errors.mock.calls.flat().join(" ");
+    errors.mockRestore();
+    expect(logged).not.toMatch(/same key/);
   });
 
   for (const [who, remaining] of [

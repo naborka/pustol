@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use pustol_domain::allocator::{Assignment, Booking, BookingId};
 use pustol_domain::config::ValidConfig;
 use pustol_domain::rebooking::{self, HoldingConflict};
-use pustol_domain::schedule::TableId;
+use pustol_domain::schedule::{BarTable, TableId};
 use pustol_domain::service_day::ServiceDay;
 use pustol_domain::slots::{self, Slot, SlotAvailability};
 use pustol_domain::reconcile::{Request as ReconcileRequest, reconcile};
@@ -160,6 +160,16 @@ pub enum Channel {
     },
 }
 
+impl Channel {
+    /// The account a guest's booking is taken for, `None` for one staff take.
+    const fn guest(&self) -> Option<TelegramUserId> {
+        match self {
+            Self::Guest { user, .. } => Some(*user),
+            Self::Staff { .. } => None,
+        }
+    }
+}
+
 /// A request for a table.
 #[derive(Clone, Debug)]
 pub struct NewBooking {
@@ -212,6 +222,12 @@ pub struct CreatedBooking {
     pub record: BookingRecord,
     /// The guest's earlier bookings cancelled to make room for this one, soonest first.
     pub replaced: Vec<BookingId>,
+    /// Every booking of the guest whose table is still held for them, as taking this one left them, this
+    /// one among them, soonest first. Empty for a booking with no guest behind it.
+    ///
+    /// What booking again would do to this booking depends on them, so they are read by the transaction
+    /// that took it, for the reason `evening` is.
+    pub guest_bookings: Vec<BookingRecord>,
     /// The evening the booking is on as taking it left it, with the configuration it was taken under.
     ///
     /// Read by the transaction that took the booking, before it committed, rather than left for the
@@ -445,6 +461,11 @@ impl Store {
     /// never refused a slot the app had just shown as available — except by losing a race, which
     /// is reported as its own error so the app can say "somebody just took it" rather than
     /// something vague.
+    ///
+    /// Refused for the first reason it cannot be taken, widest first: the party, the evening, the time,
+    /// the table. Only a booking that could otherwise be taken is held to what the guest's app promised
+    /// it replaces, and refused as changed when that promise is wrong. Refused as changed first, a guest
+    /// whose time has gone read their bookings again, found nothing to name, and was refused again.
     pub async fn create_booking(
         &self,
         request: &NewBooking,
@@ -457,24 +478,14 @@ impl Store {
         check_party_size(request.party_size, &config)?;
         check_shift_is_offered(request, &config, now)?;
 
-        // Booking again replaces what it replaces, in the same transaction, so there is no instant in
-        // which the guest holds two or none.
-        let replaced = match &request.channel {
-            Channel::Guest {
-                user, replacing, ..
-            } => {
-                replace_for_guest(
-                    &mut transaction,
-                    request.bar,
-                    *user,
-                    request.service_day,
-                    replacing,
-                    now,
-                )
-                .await?
-            }
-            Channel::Staff { .. } => Vec::new(),
-        };
+        // What booking again does to the guest's bookings is `rebooking` and nothing else, asked of them
+        // as this transaction reads them under the bar's lock.
+        let user = request.channel.guest();
+        let mine = bookings_of(&running_bookings_of(&mut transaction, request.bar, user, now).await?);
+        if rebooking::refused_on(&mine, request.service_day, now) {
+            return Err(Error::AlreadyBookedThisShift);
+        }
+        let replacing = rebooking::replaced_on(&mine, request.service_day, now);
 
         let bookings = load_window(&mut transaction, request.bar, request.service_day).await?;
         let blocks = load_blocks(&mut transaction, request.bar, request.service_day).await?;
@@ -487,29 +498,25 @@ impl Store {
             bookings: &live,
             blocks: &closed,
             now,
-            ignoring: &[],
+            ignoring: &replacing,
         };
         let window = window_at(&asking, request.start_minutes)?;
 
-        let (source, name, username, user, chosen) = match &request.channel {
-            Channel::Guest {
-                user,
-                name,
-                username,
-                ..
-            } => (
-                BookingSource::App,
-                name.clone(),
-                username.clone(),
-                Some(*user),
-                None,
-            ),
+        let (source, name, username, chosen) = match &request.channel {
+            Channel::Guest { name, username, .. } => {
+                (BookingSource::App, name.clone(), username.clone(), None)
+            }
             Channel::Staff { guest_name, table } => {
-                (BookingSource::Staff, guest_name.clone(), None, None, *table)
+                (BookingSource::Staff, guest_name.clone(), None, *table)
             }
         };
-        let table = seat_of(&asking.request(window), chosen)?.table_id;
+        let free = pustol_domain::free_tables(&asking.request(window));
+        let table = seat_of(&free, chosen, request.party_size)?.table_id;
+        check_promise(&request.channel, &replacing)?;
 
+        // Cancelled in the same transaction the booking is taken in, so there is no instant in which the
+        // guest holds two or none.
+        let replaced = cancel_replaced(&mut transaction, request.bar, &mine, &replacing, now).await?;
         let id = insert_booking(
             &mut transaction,
             &Written {
@@ -550,12 +557,14 @@ impl Store {
         }
 
         let record = fetch_booking(&mut transaction, request.bar, id).await?;
+        let guest_bookings = running_bookings_of(&mut transaction, request.bar, user, now).await?;
         let evening =
             read_evening(&mut transaction, request.bar, config, request.service_day, now).await?;
         transaction.commit().await?;
         Ok(CreatedBooking {
             record,
             replaced: replaced.into_iter().map(|(id, _)| id).collect(),
+            guest_bookings,
             evening,
         })
     }
@@ -735,7 +744,8 @@ impl Store {
             }
             window_at(&asking, to.start_minutes)?
         };
-        let seat = seat_of(&asking.request(window), to.table)?;
+        let free = pustol_domain::free_tables(&asking.request(window));
+        let seat = seat_of(&free, to.table, party_size)?;
 
         // What staff recorded about the party — at the table, not coming, gone — is about the time
         // they were expected. At a new time nothing has happened yet, so the booking is a plan again;
@@ -816,12 +826,12 @@ impl Store {
     /// the table this takes is the table the shift's own "who fits" line promised.
     ///
     /// `table` is the one staff chose — the bartender can see the room and the allocator cannot.
-    /// Checked against the allocator's own list, in the transaction that writes. `None` asks the
+    /// Checked against the room's own list, in the transaction that writes. `None` asks the
     /// room to choose.
     ///
-    /// The party holds a turn, cut short at closing: [`ValidConfig::walk_in_window`], the window the
-    /// shift's "who fits" line asks about. Refused as not the running shift on any other day, and on
-    /// this one before it opens or once the wall has last read its closing time.
+    /// What the room offers is [`pustol_domain::walk_in`], the offer the shift draws its tables free
+    /// for a walk-in and its "who fits" line from: a turn cut short at closing, and a table free for all
+    /// of it. Refused as not the running shift on any other day, and on this one while it is not open.
     pub async fn seat_walk_in(
         &self,
         bar: BarId,
@@ -834,24 +844,15 @@ impl Store {
         lock_bar(&mut transaction, bar).await?;
         let config = load_config(&mut transaction, bar).await?;
         check_party_size(party_size, &config)?;
-        let window = (config.current_service_day(now) == day)
-            .then(|| config.walk_in_window(day, now))
-            .flatten()
-            .ok_or(Error::NotTheRunningShift {
+        let bookings = bookings_of(&load_window(&mut transaction, bar, day).await?);
+        let blocks = blocks_of(&load_blocks(&mut transaction, bar, day).await?);
+        let offer = pustol_domain::walk_in(&config, day, now, &bookings, &blocks).ok_or(
+            Error::NotTheRunningShift {
                 service_day: day.date(),
-            })?;
-        let bookings = load_window(&mut transaction, bar, day).await?;
-        let blocks = load_blocks(&mut transaction, bar, day).await?;
-        let request = pustol_domain::allocator::Request {
-            party_size,
-            window,
-            service_day: day,
-            tables: &config.tables,
-            bookings: &bookings_of(&bookings),
-            blocks: &blocks_of(&blocks),
-            ignoring: &[],
-        };
-        let seat = seat_of(&request, table)?;
+            },
+        )?;
+        let seat = seat_of(&offer.tables_for(party_size), table, party_size)?;
+        let window = offer.window;
 
         let id = insert_booking(
             &mut transaction,
@@ -876,6 +877,7 @@ impl Store {
         Ok(CreatedBooking {
             record,
             replaced: Vec::new(),
+            guest_bookings: Vec::new(),
             evening,
         })
     }
@@ -1131,15 +1133,11 @@ fn in_order_asked<T>(
     changed
 }
 
-/// The table a booking takes: the one staff chose, or the room's own pick when nobody did.
+/// The table a party of `party_size` takes: the one staff chose, or the room's own pick when nobody did.
 ///
-/// A chosen table is accepted exactly when the allocator could have handed it over itself, so
-/// choosing is as safe as being allocated.
-fn seat_of(
-    request: &pustol_domain::allocator::Request<'_>,
-    chosen: Option<TableId>,
-) -> Result<Assignment> {
-    let free = pustol_domain::free_tables(request);
+/// `free` is every table the room could seat the party at, in the order it takes them. A chosen table
+/// is accepted exactly when it is among them, so choosing is as safe as being allocated.
+fn seat_of(free: &[&BarTable], chosen: Option<TableId>, party_size: i32) -> Result<Assignment> {
     match chosen {
         Some(id) => free
             .iter()
@@ -1147,9 +1145,11 @@ fn seat_of(
             .find(|candidate| candidate.id == id)
             .map(Assignment::of)
             .ok_or(Error::ChosenTableNotFree),
-        None => free.first().copied().map(Assignment::of).ok_or(Error::NoTableFree {
-            party_size: request.party_size,
-        }),
+        None => free
+            .first()
+            .copied()
+            .map(Assignment::of)
+            .ok_or(Error::NoTableFree { party_size }),
     }
 }
 
@@ -1601,35 +1601,21 @@ pub(crate) async fn persist_reconciliation(
     Ok(())
 }
 
-/// Makes way for a guest's new booking on `day`, under the bar's lock: refuses a booking whose app
-/// promised to replace other bookings than it would, refuses an evening they already hold, and
-/// cancels every booking of theirs the new one replaces, soonest first.
-///
-/// Which is which is [`pustol_domain::rebooking`] and nothing else, asked of the guest's running
-/// bookings as this transaction reads them. The promise is checked first, before anything is
-/// written: whatever else would be said about a booking, it is not the one the guest agreed to.
-async fn replace_for_guest(
+/// Cancels `replacing`, the bookings among `mine` a guest's new booking replaces, soonest first, and
+/// names the evening each was on.
+async fn cancel_replaced(
     connection: &mut PgConnection,
     bar: BarId,
-    user: TelegramUserId,
-    day: ServiceDay,
-    expected: &[BookingId],
+    mine: &[Booking],
+    replacing: &[BookingId],
     now: DateTime<Utc>,
 ) -> Result<Vec<(BookingId, ServiceDay)>> {
-    let mine = bookings_of(&running_bookings_of_guest(&mut *connection, bar, user, now).await?);
-    let replacing = rebooking::replaced_on(&mine, day, now);
-    if !same_bookings(&replacing, expected) {
-        return Err(Error::BookingChanged);
-    }
-    if rebooking::refused_on(&mine, day, now) {
-        return Err(Error::AlreadyBookedThisShift);
-    }
     let replaced: Vec<(BookingId, ServiceDay)> = replacing
-        .into_iter()
+        .iter()
         .filter_map(|id| {
             mine.iter()
-                .find(|booking| booking.id == id)
-                .map(|booking| (id, booking.service_day))
+                .find(|booking| booking.id == *id)
+                .map(|booking| (*id, booking.service_day))
         })
         .collect();
     if replaced.is_empty() {
@@ -1682,6 +1668,31 @@ async fn running_bookings_of_guest(
         }
     }
     Ok(running)
+}
+
+/// [`running_bookings_of_guest`] for `user`, and none for a booking with no guest behind it.
+async fn running_bookings_of(
+    connection: &mut PgConnection,
+    bar: BarId,
+    user: Option<TelegramUserId>,
+    now: DateTime<Utc>,
+) -> Result<Vec<BookingRecord>> {
+    match user {
+        Some(user) => running_bookings_of_guest(connection, bar, user, now).await,
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Refuses a guest's booking whose app promised it replaces other bookings than `replacing`, the ones
+/// it does: whatever else it is, it is not the booking the guest agreed to.
+fn check_promise(channel: &Channel, replacing: &[BookingId]) -> Result<()> {
+    match channel {
+        Channel::Guest {
+            replacing: promised,
+            ..
+        } if !same_bookings(replacing, promised) => Err(Error::BookingChanged),
+        Channel::Guest { .. } | Channel::Staff { .. } => Ok(()),
+    }
 }
 
 /// Whether two lists name the same bookings, whatever their order and however often.

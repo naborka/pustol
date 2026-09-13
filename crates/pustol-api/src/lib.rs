@@ -13,6 +13,7 @@ pub mod callbacks;
 pub mod dto;
 pub mod error;
 pub mod inbox;
+pub mod params;
 pub mod routes;
 pub mod state;
 pub mod worker;
@@ -43,8 +44,9 @@ use crate::error::ApiError;
 /// Enforced by the extractor that reads the body, so a body over it is refused as `body_invalid`
 /// JSON like every other body refusal, whether or not the request said how long it was.
 fn max_body_bytes() -> usize {
-    /// The most bytes JSON writes one character of a text in: `` for a control character.
-    const WIDEST_CHARACTER: usize = 6;
+    /// The most bytes JSON writes one character of a text in: `\ud83c\udf7a`, a character past U+FFFF
+    /// escaped as its pair of surrogates.
+    const WIDEST_CHARACTER: usize = 12;
     /// Room around one entry of a list: quotes, keys, an identity, a number, punctuation.
     const ENTRY: usize = 128;
     /// Room for everything else a save carries: the week, the numbers, the version, the timezone and

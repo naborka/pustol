@@ -546,7 +546,7 @@ impl ValidConfig {
     }
 
     /// The window a party sitting down at `now` holds on `day`, or `None` when `day` seats nobody
-    /// now: a day off, a shift that has not opened, or one whose closing time the wall has last read.
+    /// now: a day off, a shift that has not opened, or one that has closed.
     ///
     /// One turn, cut short at closing. Held past closing, the party sat on after the hours that
     /// seated it: on the night the clocks go forward that was an hour past closing on the wall, and
@@ -554,25 +554,35 @@ impl ValidConfig {
     /// [`Self::shift_end`], so the party is gone before the next shift runs; its screen reads only its
     /// own bookings and would call the table free.
     ///
-    /// Opening and closing are instants: closing is the last time the wall reads it, so on the night
-    /// the clocks go back the bar seats parties through the repeated hour.
+    /// Seated only while `day` [is open](Self::is_open).
     #[must_use]
     pub fn walk_in_window(&self, day: ServiceDay, now: DateTime<Utc>) -> Option<Interval> {
-        let (opens, closes) = (self.opening(day)?, self.closing(day)?);
-        if now < opens || now >= closes {
+        if !self.is_open(day, now) {
             return None;
         }
+        let closes = self.closing(day)?;
         let turn = Interval::from_duration(now, self.turn_minutes).ok()?;
         Interval::new(now, turn.end().min(closes)).ok()
     }
 
+    /// Whether `day` is open at `now`: it has opened, and closing has not come.
+    ///
+    /// **The one rule for "open".** Whether a party at the door is seated and whether the guest's screen
+    /// says the bar is open are this question, asked of instants rather than of the wall. Closing is
+    /// the last moment the wall comes up to it from the minute before, so on the night the clocks go
+    /// back a bar closing inside the repeated hour stays open through it.
+    #[must_use]
+    pub fn is_open(&self, day: ServiceDay, now: DateTime<Utc>) -> bool {
+        self.opening(day).is_some_and(|opens| opens <= now)
+            && self.closing(day).is_some_and(|closes| now < closes)
+    }
+
     /// The moment `day` stops running, or `None` on a day off.
     ///
-    /// The later of the last time the wall reads closing and the end of the last sitting the grid
-    /// has. Every sitting ends by closing on the wall, but not always in real time: on the night the
-    /// clocks go forward the last one holds its table an hour past closing, and the shift runs until
-    /// it is over. On the night they go back the wall reads closing twice, and the shift runs until the
-    /// second.
+    /// The later of closing and the end of the last sitting the grid has. Every sitting ends by closing
+    /// on the wall, but not always in real time: on the night the clocks go forward the last one holds
+    /// its table an hour past closing, and the shift runs until it is over. On the night they go back
+    /// the wall can come up to closing twice, and the shift runs until the second.
     fn shift_end(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
         let closes = self.closing(day)?;
         Some(last_sitting(self, day).map_or(closes, |sitting| sitting.end().max(closes)))
@@ -587,7 +597,8 @@ impl ValidConfig {
         resolve_boundary(day, hours.open_minutes, self.timezone).ok()
     }
 
-    /// The last moment the wall reads `day`'s closing time, or `None` on a day off.
+    /// The moment `day` closes, the last the wall comes up to its closing time from the minute before,
+    /// or `None` on a day off.
     fn closing(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
         let hours = self.week.for_service_day(day);
         if hours.closed {
@@ -599,9 +610,9 @@ impl ValidConfig {
     /// The latest a booking lasting `minutes` may end on `day` and still sit within its hours, or
     /// `None` on a day off.
     ///
-    /// The later of two moments. One is closing, the last time the wall reads it: a party seated on
-    /// the first pass through the hour the clocks repeat holds its table longer than the wall says,
-    /// and sits within the hours all the same. The other is the end of a sitting as long, arriving at
+    /// The later of two moments. One is closing, which can be the second time the wall reaches it: a
+    /// party seated on the first pass through the hour the clocks repeat holds its table longer than
+    /// the wall says, and sits within the hours all the same. The other is the end of a sitting as long, arriving at
     /// the latest minute closing allows it: on the night the clocks go forward the grid's last arrival
     /// holds its table an hour past closing, under the very hours that sold it.
     fn latest_end(&self, day: ServiceDay, minutes: i32) -> Option<DateTime<Utc>> {

@@ -199,6 +199,33 @@ async fn a_body_that_is_not_json_of_the_right_shape_is_refused_with_a_code_the_a
 }
 
 #[tokio::test]
+async fn a_path_or_a_query_the_api_cannot_read_is_refused_with_a_code_the_app_can_read() {
+    // A malformed identifier, a value that is not a number, and a missing field came back as a line of
+    // plain text, which the app, reading a code out of JSON, reported as a failure to parse.
+    let app = harness().await;
+    let guest = Caller::new("Вера");
+    let staff = Caller::manager();
+    for (method, path, caller) in [
+        ("DELETE", "/api/bookings/not-a-uuid", &guest),
+        ("GET", "/api/days?party_size=two", &guest),
+        ("GET", "/api/availability?service_date=2026-07-30", &guest),
+        ("PATCH", "/api/admin/bookings/not-a-uuid/note", &staff),
+        ("GET", "/api/admin/shift", &staff),
+    ] {
+        let answer = app
+            .send(method, path, caller, serde_json::json!({ "note": null }))
+            .await;
+        assert_eq!(answer.status, axum::http::StatusCode::BAD_REQUEST, "{method} {path}: {}", answer.body);
+        assert_eq!(answer.error_code(), Some("request_invalid"), "{method} {path}: {}", answer.body);
+        assert!(
+            answer.body["error"]["message"].as_str().is_some_and(|message| !message.is_empty()),
+            "{method} {path}: {}",
+            answer.body
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_time_somebody_else_has_taken_is_refused_with_a_code_the_app_can_act_on() {
     let app = harness_at(morning(), config_with(vec![table(1, 2, "Бар")])).await;
     let first = Caller::new("Вера");
@@ -1072,7 +1099,8 @@ async fn booking_again_without_naming_the_plan_it_would_replace_is_refused_and_n
 async fn a_promise_read_before_the_plan_began_is_refused_once_it_has_begun() {
     // At 19:59 the app reads that booking again replaces the eight o'clock plan and says
     // «Перенести». The guest taps at 20:01: the plan is under way and nothing replaces it any more,
-    // so the booking would not be the move the button promised.
+    // so a booking on Friday would not be the move the button promised. One tonight could not be taken
+    // whatever it promised, because the plan under way holds tonight, and it says so.
     let app = harness().await;
     let guest = Caller::new("Лев");
     let plan = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
@@ -1088,16 +1116,59 @@ async fn a_promise_read_before_the_plan_began_is_refused_once_it_has_begun() {
     assert_eq!(read["bookings"][0]["rebooking_replaces"], "any_evening", "{read}");
 
     let tapped = app.at(utc(2026, 7, 30, 18, 1));
-    for body in [
-        book_replacing("2026-07-31", 1200, &[&plan]),
-        book_replacing("2026-07-30", 1320, &[&plan]),
+    for (body, code) in [
+        (book_replacing("2026-07-31", 1200, &[&plan]), "booking_changed"),
+        (book_replacing("2026-07-30", 1320, &[&plan]), "already_booked_tonight"),
     ] {
         let refused = tapped.post("/api/booking", &guest, body.clone()).await;
         assert_eq!(refused.status, axum::http::StatusCode::CONFLICT, "{body}: {}", refused.body);
-        assert_eq!(refused.error_code(), Some("booking_changed"), "{body}");
+        assert_eq!(refused.error_code(), Some(code), "{body}");
     }
     let session = tapped.get("/api/session", &guest).await.expect_ok().clone();
     assert_eq!(ids_of(&session["bookings"]), vec![plan], "no second booking");
+}
+
+#[tokio::test]
+async fn a_booking_that_could_not_be_taken_anyway_says_why_before_its_promise_is_compared() {
+    // The guest holds a plan for eight, which a booking of theirs anywhere replaces. Each request here
+    // could not be taken whatever it promised to replace, and says why. Refused as a changed booking
+    // instead, the app would read the bookings again and ask again, to be told the reason only then,
+    // or never, when what it read offered it nothing to name.
+    let app = harness_at(morning(), config_with(vec![table(1, 2, "Бар")])).await;
+    let guest = Caller::new("Нина");
+    let plan = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    app.post("/api/booking", &Caller::new("Глеб"), book_at(1320))
+        .await
+        .expect_ok();
+    let noon = app.at(utc(2026, 7, 30, 10, 0));
+
+    for (what, date, start_minutes, code) in [
+        ("a time the grid does not have", "2026-07-30", 1215, "not_an_arrival_time"),
+        ("a time that has gone", "2026-07-30", 600, "in_the_past"),
+        ("an evening beyond the horizon", "2026-08-05", 1200, "shift_not_bookable"),
+        ("a time somebody else has", "2026-07-30", 1320, "no_table_free"),
+    ] {
+        for promised in [Vec::new(), vec![plan.as_str()]] {
+            let refused = noon
+                .post("/api/booking", &guest, book_replacing(date, start_minutes, &promised))
+                .await;
+            assert_eq!(
+                refused.error_code(),
+                Some(code),
+                "{what}, promising {promised:?}: {}",
+                refused.body
+            );
+        }
+    }
+    let changed = noon
+        .post("/api/booking", &guest, book_replacing("2026-07-31", 1200, &[]))
+        .await;
+    assert_eq!(changed.error_code(), Some("booking_changed"), "{}", changed.body);
+    let session = noon.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![plan], "nothing was written");
 }
 
 #[tokio::test]
@@ -1425,6 +1496,41 @@ async fn a_no_show_on_an_evening_the_manager_took_off_the_horizon_is_offered_not
 }
 
 #[tokio::test]
+async fn a_plan_is_not_offered_a_move_once_no_evening_is_left_to_move_it_to() {
+    // At twenty past eight the guest sits at tonight's table and holds a plan for Sunday. The manager
+    // lowers the horizon to one day: tonight is the only evening a guest may book, and it is theirs.
+    let app = harness().await;
+    let guest = Caller::new("Лёва");
+    let manager = Caller::manager();
+    let tonight = app
+        .post("/api/booking", &guest, book_on("2026-07-30", 1200))
+        .await
+        .expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let during = app.at(utc(2026, 7, 30, 18, 20));
+    staff_mark(&during, &manager, &tonight, "arrived").await;
+    let sunday = during
+        .post("/api/booking", &guest, book_on("2026-08-02", 1200))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(sunday["booking"]["rebooking_replaces"], "any_evening", "{sunday}");
+    let sunday = sunday["booking"]["id"].as_str().expect("an id").to_owned();
+
+    let settings_path = "/api/admin/settings?service_date=2026-07-30";
+    let settings = during.get(settings_path, &manager).await.expect_ok().clone();
+    let mut draft = common::draft_from(&settings);
+    draft["horizon_days"] = serde_json::json!(1);
+    during.send("PUT", settings_path, &manager, draft).await.expect_ok();
+
+    let session = during.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![tonight, sunday], "{session}");
+    assert_eq!(session["bookings"][1]["rebooking_replaces"], serde_json::Value::Null, "{session}");
+}
+
+#[tokio::test]
 async fn a_no_show_on_an_evening_with_no_arrival_time_left_holds_nothing_and_a_booking_there_replaces_it() {
     // Ninety-minute sittings on an hourly grid closing at 02:00: the last arrival is midnight. The
     // midnight party is marked as not coming, and at ten past the table is still held for them.
@@ -1451,13 +1557,17 @@ async fn a_no_show_on_an_evening_with_no_arrival_time_left_holds_nothing_and_a_b
     assert_eq!(rail["days"][0]["service_date"], "2026-07-30", "{rail}");
     assert_eq!(rail["days"][0]["booked"], false, "{rail}");
 
-    // Naming it as replaced gets past every rule about what the guest holds, to the time itself.
+    // Midnight has gone, whatever the booking names as replaced. Refused as a changed booking, the app
+    // read the bookings again, found nothing offered, sent the same request, and was refused again.
     let naming_it = ten_past
         .post("/api/booking", &guest, book_replacing("2026-07-30", 1440, &[&id]))
         .await;
     assert_eq!(naming_it.error_code(), Some("in_the_past"), "{}", naming_it.body);
-    let not_naming_it = ten_past.post("/api/booking", &guest, book_at(1440)).await;
-    assert_eq!(not_naming_it.error_code(), Some("booking_changed"), "{}", not_naming_it.body);
+    let five_past = app.at(utc(2026, 7, 30, 22, 5));
+    let not_naming_it = five_past
+        .post("/api/booking", &guest, book_replacing("2026-07-30", 1440, &[]))
+        .await;
+    assert_eq!(not_naming_it.error_code(), Some("in_the_past"), "{}", not_naming_it.body);
 }
 
 #[tokio::test]

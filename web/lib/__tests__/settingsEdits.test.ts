@@ -12,9 +12,22 @@ import { settingsView } from "@/components/__tests__/fixtures";
 const base = draftOf(settingsView());
 
 describe("a change to a member of staff", () => {
-  it("names the member by username, whatever case it was typed in and wherever the list has them", () => {
-    const sorted = { ...base, staff: [{ username: "aaron_bar" }, { username: "marina" }, { username: "Pavel" }] };
-    expect(edited(sorted, removeStaff("pavel")).staff).toEqual([{ username: "aaron_bar" }, { username: "marina" }]);
+  it("names the member by the username of the row tapped, as it was typed, wherever the list has them", () => {
+    // Two rows one case apart are two rows until the save refuses them; a tap on one removes that one.
+    const sorted = {
+      ...base,
+      staff: [{ username: "aaron_bar" }, { username: "marina" }, { username: "pavel" }, { username: "Pavel" }],
+    };
+    expect(edited(sorted, removeStaff("Pavel")).staff).toEqual([
+      { username: "aaron_bar" },
+      { username: "marina" },
+      { username: "pavel" },
+    ]);
+    expect(edited(sorted, removeStaff("pavel")).staff).toEqual([
+      { username: "aaron_bar" },
+      { username: "marina" },
+      { username: "Pavel" },
+    ]);
     expect(edited(sorted, removeStaff("nobody_here")).staff).toEqual(sorted.staff);
   });
 });

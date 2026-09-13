@@ -9,10 +9,10 @@
  * An answer replaces the value on record when the server orders it after that value (a room carries
  * a version), or, when the server cannot tell the two apart or orders nothing, when it was asked
  * later. A write's own answer is numbered when the write was sent. A failure is recorded only when
- * it was asked after every answer applied, and is shown only while nothing else is on its way for
+ * it was asked after every answer heard, and is shown only while nothing else is on its way for
  * that question — beside the value on record, if there is one. Any answer asked after it clears it,
- * a read's or a write's, applied or not: an answer too old to show still proves the question can be
- * answered.
+ * or keeps it from being recorded, a read's or a write's, applied or not: an answer too old to show
+ * still proves the question can be answered.
  */
 
 import type { ApiFailure } from "./errors";
@@ -26,8 +26,11 @@ export type Order<T> = (next: T, shown: T) => number;
 export interface Entry<T> {
   /** The value on record, and the number of the read or write that brought it. */
   readonly value?: { readonly number: number; readonly data: T };
-  /** The newest number among the answers applied: a failure asked before it is older news. */
-  readonly settled: number;
+  /**
+   * The newest number among the answers heard, a read's or a write's, applied or not: a failure
+   * asked before it is older news.
+   */
+  readonly heard: number;
   readonly failure?: { readonly number: number; readonly failure: ApiFailure };
   /** The newest read of this question that answered, applied or not; 0 before any. */
   readonly answered: number;
@@ -42,7 +45,7 @@ export interface Ledger<T> {
 
 export const EMPTY_LEDGER: Ledger<never> = { asked: 0, inFlight: [], entries: {} };
 
-const NOTHING: Entry<never> = { settled: 0, answered: 0 };
+const NOTHING: Entry<never> = { heard: 0, answered: 0 };
 
 function entryOf<T>(ledger: Ledger<T>, key: string): Entry<T> {
   return ledger.entries[key] ?? NOTHING;
@@ -66,18 +69,17 @@ function replaces<T>(entry: Entry<T>, number: number, data: T, order?: Order<T>)
 
 /** `entry` once an answer asked as `number` came back: a failure of a read asked after it stays. */
 function heardAt<T>(entry: Entry<T>, number: number): Entry<T> {
-  if (!entry.failure || entry.failure.number > number) return entry;
-  const { failure: _cleared, ...rest } = entry;
+  const stale = entry.failure !== undefined && entry.failure.number <= number;
+  if (!stale && number <= entry.heard) return entry;
+  const next = { ...entry, heard: Math.max(entry.heard, number) };
+  if (!stale) return next;
+  const { failure: _cleared, ...rest } = next;
   return rest;
 }
 
 /** `entry` with `data`, asked as `number`, on record. */
 function applied<T>(entry: Entry<T>, number: number, data: T): Entry<T> {
-  return {
-    ...heardAt(entry, number),
-    value: { number, data },
-    settled: Math.max(entry.settled, number),
-  };
+  return { ...heardAt(entry, number), value: { number, data } };
 }
 
 /** A read of `key` starting, and the number it goes by. */
@@ -108,7 +110,7 @@ export function answered<T>(
   return { ledger: withEntry(next, key, { ...kept, answered: answeredUpTo }), apply };
 }
 
-/** A read of `key` failed: recorded only when it was asked after every answer applied. */
+/** A read of `key` failed: recorded only when it was asked after every answer heard. */
 export function failed<T>(
   ledger: Ledger<T>,
   number: number,
@@ -117,7 +119,7 @@ export function failed<T>(
 ): { ledger: Ledger<T>; recorded: boolean } {
   const next = landed(ledger, number);
   const entry = entryOf(next, key);
-  const recorded = number > entry.settled;
+  const recorded = number > entry.heard;
   if (!recorded || (entry.failure && entry.failure.number > number)) {
     return { ledger: next, recorded };
   }
@@ -126,7 +128,8 @@ export function failed<T>(
 
 /**
  * A write's own answer about `key`, made on the value on record and numbered `sent`, the mark taken
- * when the write was sent.
+ * when the write was sent. A change with nothing to put there brought no answer, so `key` is left
+ * as it was.
  */
 export function written<T>(
   ledger: Ledger<T>,
@@ -137,7 +140,8 @@ export function written<T>(
 ): { ledger: Ledger<T>; apply: boolean; data: T | undefined } {
   const entry = entryOf(ledger, key);
   const data = change(entry.value?.data);
-  const apply = data !== undefined && replaces(entry, sent, data, order);
+  if (data === undefined) return { ledger, apply: false, data };
+  const apply = replaces(entry, sent, data, order);
   const kept = apply ? applied(entry, sent, data) : heardAt(entry, sent);
   return { ledger: kept === entry ? ledger : withEntry(ledger, key, kept), apply, data };
 }

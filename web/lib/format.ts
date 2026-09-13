@@ -210,23 +210,18 @@ export function dayStamp(date: IsoDate): string {
   return `${weekdayShort(date)}, ${dayDate(date)}`;
 }
 
-/** "Открыт до 02:00" or "Закрыт", from the bar's hours and the bar's own clock. */
+/**
+ * "Открыт до 02:00", "Откроется в 18:00" or "Закрыт". Whether the bar is open is the server's word,
+ * decided on instants; the bar's clock only tells a bar not yet open from one already shut.
+ */
 export function openLabel(
   hours: { open_minutes: number; close_minutes: number; closed: boolean },
   nowMinutes: number,
+  openNow: boolean,
 ): string {
-  if (hours.closed) return "Закрыт";
-  if (nowMinutes < hours.open_minutes) return `Откроется в ${time(hours.open_minutes)}`;
-  if (nowMinutes >= hours.close_minutes) return "Закрыт";
-  return `Открыт до ${time(hours.close_minutes)}`;
-}
-
-/** Whether the bar is serving at this minute — what the dot on the header pill is coloured by. */
-export function isOpenNow(
-  hours: { open_minutes: number; close_minutes: number; closed: boolean },
-  nowMinutes: number,
-): boolean {
-  return !hours.closed && nowMinutes >= hours.open_minutes && nowMinutes < hours.close_minutes;
+  if (openNow) return `Открыт до ${time(hours.close_minutes)}`;
+  if (!hours.closed && nowMinutes < hours.open_minutes) return `Откроется в ${time(hours.open_minutes)}`;
+  return "Закрыт";
 }
 
 /** A ratio as a whole percentage: "72 %" reads as a measurement, "72.4 %" as a spreadsheet. */

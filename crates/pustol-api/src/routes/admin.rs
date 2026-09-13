@@ -9,7 +9,7 @@
 //! colleague did in between as if this write had done it, and a read after the commit could fail and
 //! report a write that went through as one that did not.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use pustol_db::bookings::{Attendance, Channel, MoveTo, MoveWords, NewBooking};
@@ -30,6 +30,7 @@ use crate::dto::{
     StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest, in_calendar,
 };
 use crate::error::{ApiError, ApiResult};
+use crate::params::{RequestPath, RequestQuery};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -51,7 +52,7 @@ pub fn routes() -> Router<AppState> {
 async fn shift(
     State(state): State<AppState>,
     _staff: Staff,
-    Query(query): Query<ShiftQuery>,
+    RequestQuery(query): RequestQuery<ShiftQuery>,
 ) -> ApiResult<Json<ShiftView>> {
     let evening = state
         .store
@@ -68,7 +69,7 @@ fn drawn_in(record: &BookingRecord, evening: &Evening) -> ShiftBooking {
 async fn availability(
     State(state): State<AppState>,
     _staff: Staff,
-    Query(query): Query<AvailabilityQuery>,
+    RequestQuery(query): RequestQuery<AvailabilityQuery>,
 ) -> ApiResult<Json<Availability>> {
     let day = query.service_date.day()?;
     let moving: Vec<BookingId> = query.ignoring.map(BookingId).into_iter().collect();
@@ -137,7 +138,7 @@ async fn create_booking(
 async fn set_attendance(
     State(state): State<AppState>,
     _staff: Staff,
-    Path(id): Path<Uuid>,
+    RequestPath(id): RequestPath<Uuid>,
     JsonBody(request): JsonBody<AttendanceRequest>,
 ) -> ApiResult<Json<AttendanceView>> {
     let recorded = state
@@ -168,7 +169,7 @@ pub struct AttendanceView {
 async fn set_note(
     State(state): State<AppState>,
     _staff: Staff,
-    Path(id): Path<Uuid>,
+    RequestPath(id): RequestPath<Uuid>,
     JsonBody(request): JsonBody<NoteRequest>,
 ) -> ApiResult<Json<BookedView>> {
     let written = state
@@ -201,7 +202,7 @@ pub struct MovedView {
 async fn move_booking(
     State(state): State<AppState>,
     _staff: Staff,
-    Path(id): Path<Uuid>,
+    RequestPath(id): RequestPath<Uuid>,
     JsonBody(request): JsonBody<MoveRequest>,
 ) -> ApiResult<Json<MovedView>> {
     let moved = state
@@ -280,7 +281,7 @@ pub struct CancelledView {
 async fn cancel_booking(
     State(state): State<AppState>,
     _staff: Staff,
-    Path(id): Path<Uuid>,
+    RequestPath(id): RequestPath<Uuid>,
     JsonBody(request): JsonBody<CancelRequest>,
 ) -> ApiResult<Json<CancelledView>> {
     let cancelled = state
@@ -320,7 +321,7 @@ pub struct MessageSent {
 async fn send_message(
     State(state): State<AppState>,
     _staff: Staff,
-    Path(id): Path<Uuid>,
+    RequestPath(id): RequestPath<Uuid>,
     JsonBody(request): JsonBody<MessageRequest>,
 ) -> ApiResult<Json<MessageSent>> {
     state
@@ -438,7 +439,7 @@ async fn reconcile_shift(
 async fn settings(
     State(state): State<AppState>,
     _staff: Staff,
-    Query(query): Query<ShiftQuery>,
+    RequestQuery(query): RequestQuery<ShiftQuery>,
 ) -> ApiResult<Json<SettingsView>> {
     let reading = state
         .store
@@ -456,7 +457,7 @@ async fn settings(
 async fn save_settings(
     State(state): State<AppState>,
     _staff: Staff,
-    Query(query): Query<ShiftQuery>,
+    RequestQuery(query): RequestQuery<ShiftQuery>,
     JsonBody(draft): JsonBody<Draft>,
 ) -> ApiResult<Json<SavedSettingsView>> {
     let day = query.service_date.day()?;

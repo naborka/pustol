@@ -48,6 +48,15 @@ export function replacedBy(held: GuestBooking, serviceDate: fmt.IsoDate): boolea
 }
 
 /**
+ * The time the guest chose, while the times on screen still have it free. Read off the times rather
+ * than kept: one that passed or was taken since is simply no longer chosen, with nothing to reset.
+ */
+export function chosenTime(times: Availability | null, chosen: number | null): number | null {
+  const free = times?.slots.some((slot) => slot.start_minutes === chosen && slot.state === "free");
+  return free ? chosen : null;
+}
+
+/**
  * The bookings a guest holds once a write answered: without the ones it removed, with the one it
  * took, soonest first — the order the server sends them in.
  */
@@ -76,7 +85,7 @@ export function heldOn(bookings: GuestBooking[], serviceDate: fmt.IsoDate): bool
 
 /** Who the bar is, and whether it is open. The name was in the payload and drawn nowhere. */
 export function BarHeader({ bar }: { bar: BarView }) {
-  const open = fmt.isOpenNow(bar.today_hours, bar.now_minutes);
+  const open = bar.open_now;
   return (
     <div
       style={{
@@ -112,7 +121,7 @@ export function BarHeader({ bar }: { bar: BarView }) {
       >
         <Dot color={open ? "var(--ok)" : "var(--hint)"} size={6} />
         <span style={{ fontSize: TEXT.sm, fontWeight: 600, color: "var(--txt)" }}>
-          {fmt.openLabel(bar.today_hours, bar.now_minutes)}
+          {fmt.openLabel(bar.today_hours, bar.now_minutes, open)}
         </span>
       </div>
     </div>

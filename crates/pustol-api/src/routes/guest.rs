@@ -1,6 +1,6 @@
 //! What a guest can do: see the bar, see their bookings, take one, give one back.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use pustol_db::bookings::{Channel, NewBooking};
@@ -19,6 +19,7 @@ use crate::dto::{
     GuestBooking, RemindersView, Session, UserView,
 };
 use crate::error::ApiResult;
+use crate::params::{RequestPath, RequestQuery};
 use crate::state::AppState;
 
 /// The party the home screen speaks for.
@@ -55,16 +56,10 @@ async fn session(
         .store
         .bookings_of_guest(state.bar, caller.user_id(), now)
         .await?;
+    let held = bookings_of(&mine);
     let tonight = state
         .store
-        .day_offers(
-            state.bar,
-            &config,
-            &[today],
-            HOME_CARD_PARTY,
-            now,
-            &bookings_of(&mine),
-        )
+        .day_offers(state.bar, &config, &[today], HOME_CARD_PARTY, now, &held)
         .await?;
 
     Ok(Json(Session {
@@ -79,7 +74,7 @@ async fn session(
         bar: BarView::of(&config, today, now),
         bookings: mine
             .iter()
-            .map(|record| GuestBooking::of(record, &config, now))
+            .map(|record| GuestBooking::of(record, &held, &config, now))
             .collect(),
         bookable_days: pustol_domain::bookable_days(&config, today)
             .into_iter()
@@ -101,7 +96,7 @@ async fn session(
 async fn days(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(query): Query<DayRailQuery>,
+    RequestQuery(query): RequestQuery<DayRailQuery>,
 ) -> ApiResult<Json<DayRail>> {
     let now = state.now();
     let config = state.store.config(state.bar).await?;
@@ -133,7 +128,7 @@ async fn days(
 async fn availability(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(query): Query<AvailabilityQuery>,
+    RequestQuery(query): RequestQuery<AvailabilityQuery>,
 ) -> ApiResult<Json<Availability>> {
     let now = state.now();
     let day = query.service_date.day()?;
@@ -210,7 +205,12 @@ async fn book(
         .await?;
 
     Ok(Json(BookingTaken {
-        booking: GuestBooking::of(&created.record, &created.evening.config, now),
+        booking: GuestBooking::of(
+            &created.record,
+            &bookings_of(&created.guest_bookings),
+            &created.evening.config,
+            now,
+        ),
         replaced: created.replaced.iter().map(|id| id.0).collect(),
     }))
 }
@@ -230,15 +230,17 @@ pub(crate) fn word_reminder(config: &ValidConfig, window: Interval, party_size: 
 async fn cancel(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    RequestPath(id): RequestPath<Uuid>,
 ) -> ApiResult<Json<GuestBooking>> {
     let now = state.now();
     let cancelled = state
         .store
         .cancel_booking_of_guest(state.bar, caller.user_id(), BookingId(id), now)
         .await?;
+    // Nothing replaces a cancelled booking, whatever else the guest holds.
     Ok(Json(GuestBooking::of(
         &cancelled.record,
+        &[],
         &cancelled.evening.config,
         now,
     )))

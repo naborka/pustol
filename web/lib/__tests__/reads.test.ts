@@ -175,6 +175,21 @@ describe("a write that puts its own answer on screen", () => {
     expect(write(EMPTY_LEDGER as Ledger<string>, "other", 1, () => undefined).apply).toBe(false);
   });
 
+  it("says nothing about a question it brought no answer to: its failure stays, and is still recorded", () => {
+    let ledger: Ledger<string> = EMPTY_LEDGER;
+    let broken: number;
+    let sent: number;
+    [ledger, broken] = ask(ledger, "session");
+    [ledger, sent] = marked(ledger);
+    ledger = write(ledger, "session", sent, () => undefined).ledger;
+    ledger = failed(ledger, broken, "session", boom).ledger;
+    expect(failureOn(ledger, "session")).toEqual(boom);
+
+    [ledger, sent] = marked(ledger);
+    ledger = write(ledger, "session", sent, () => undefined).ledger;
+    expect(failureOn(ledger, "session")).toEqual(boom);
+  });
+
   it("is dropped when the room on record is newer than the one it answered with", () => {
     let ledger: Ledger<Room> = EMPTY_LEDGER;
     let tick: number;
@@ -284,6 +299,38 @@ describe("a failure", () => {
     ledger = answered(ledger, fresh, "k", "fresh").ledger;
     expect(failed(ledger, old, "k", boom).recorded).toBe(false);
     expect(failed(ledger, elsewhere, "j", boom).recorded).toBe(true);
+  });
+
+  it("is not recorded when a read asked after it already answered, even with an answer not applied", () => {
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
+    let first: number;
+    let second: number;
+    let third: number;
+    [ledger, first] = ask(ledger, "11");
+    [ledger, second] = ask(ledger, "11");
+    [ledger, third] = ask(ledger, "11");
+    ledger = answered(ledger, first, "11", { version: 6, name: "first" }, byVersion).ledger;
+    const lagging = answered(ledger, third, "11", { version: 5, name: "third" }, byVersion);
+    expect(lagging.apply).toBe(false);
+    const outcome = failed(lagging.ledger, second, "11", boom);
+    expect(outcome.recorded).toBe(false);
+    expect(failureOn(outcome.ledger, "11")).toBeNull();
+  });
+
+  it("is not recorded when a write sent after it already answered, even with a room not applied", () => {
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
+    let first: number;
+    let broken: number;
+    let sent: number;
+    [ledger, first] = ask(ledger, "11");
+    ledger = answered(ledger, first, "11", { version: 5, name: "colleague" }, byVersion).ledger;
+    [ledger, broken] = ask(ledger, "11");
+    [ledger, sent] = marked(ledger);
+    const mine = write(ledger, "11", sent, () => ({ version: 4, name: "mine" }), byVersion);
+    expect(mine.apply).toBe(false);
+    const outcome = failed(mine.ledger, broken, "11", boom);
+    expect(outcome.recorded).toBe(false);
+    expect(failureOn(outcome.ledger, "11")).toBeNull();
   });
 
   it("is cleared by a newer answer", () => {

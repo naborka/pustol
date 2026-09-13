@@ -14,7 +14,7 @@ use pustol_db::identity::{ReminderStanding, Viewer};
 use pustol_db::records::{BookingRecord, BookingSource, blocks_of, bookings_of};
 use pustol_domain::config::{DayHours, LIMITS, ValidConfig};
 use pustol_domain::slots::{PartOfDay, Slot, SlotAvailability};
-use pustol_domain::{BookingStatus, Rebooking, ServiceDay, TableId, minutes_within};
+use pustol_domain::{Booking, BookingStatus, Rebooking, ServiceDay, TableId, minutes_within};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -63,10 +63,11 @@ pub struct GuestBooking {
     pub status: Status,
     /// Whether the window has begun, by the bar's clock rather than the phone's.
     pub started: bool,
-    /// Which new booking would replace this one, absent when none would, or when only one on its own
-    /// evening would and no booking can be made there: guests may not book that evening, or its grid
-    /// has no arrival time left. The app offers «Перенести» exactly when this is present, from the
-    /// rule the booking endpoint then applies.
+    /// Which new booking would replace this one, absent when none would, or when no booking that would
+    /// can be made now: no evening is left that guests may book, whose grid has an arrival time left,
+    /// and that the guest's other bookings do not hold. A plan is moved to any such evening; a no-show
+    /// only to its own. The app offers «Перенести» exactly when this is present, from the rule the
+    /// booking endpoint then applies.
     pub rebooking_replaces: Option<RebookingView>,
     /// Whether this booking holds its evening: a new booking on that evening is refused because of
     /// it. What the app knows "this evening is already yours" from; an absent `rebooking_replaces`
@@ -75,7 +76,13 @@ pub struct GuestBooking {
 }
 
 impl GuestBooking {
-    pub fn of(record: &BookingRecord, config: &ValidConfig, now: DateTime<Utc>) -> Self {
+    /// `record` as its guest sees it at `now`, beside `guest`, every booking that guest holds.
+    pub fn of(
+        record: &BookingRecord,
+        guest: &[Booking],
+        config: &ValidConfig,
+        now: DateTime<Utc>,
+    ) -> Self {
         let day = record.booking.service_day;
         Self {
             id: record.booking.id.0,
@@ -85,7 +92,10 @@ impl GuestBooking {
             party_size: record.booking.party_size,
             status: record.booking.status.into(),
             started: record.booking.has_started(now),
-            rebooking_replaces: record.booking.rebooking_on_offer(config, now).map(Into::into),
+            rebooking_replaces: record
+                .booking
+                .rebooking_on_offer(guest, config, now)
+                .map(Into::into),
             holds_evening: record.booking.holds_evening(now),
         }
     }
@@ -169,6 +179,13 @@ pub struct BarView {
     /// different timezone from the bar and is under nobody's control. "Открыт до 02:00" is a claim
     /// about the bar, so it is answered by the bar.
     pub now_minutes: i32,
+    /// Whether the bar is open this minute, by the opening and closing the walk-in endpoint seats a
+    /// party by.
+    ///
+    /// Decided on instants rather than from `now_minutes` and today's hours: on the night the clocks go
+    /// back the wall repeats an hour, and comparing wall minutes called the bar shut while its door still
+    /// seated parties.
+    pub open_now: bool,
     /// Where a person at the bar answers, absent when the bar has given nowhere.
     pub contact: Option<ContactView>,
 }
@@ -209,6 +226,7 @@ impl BarView {
             today_hours: hours.into(),
             last_arrival_minutes: config.last_arrival_minutes(today.weekday()),
             now_minutes: minutes_within(today, now, config.timezone),
+            open_now: config.is_open(today, now),
             contact: ContactView::of(config),
         }
     }
@@ -498,12 +516,19 @@ pub struct ShiftView {
     pub largest_party_seatable_now: Option<i32>,
     /// Until when a party seated this minute holds its table, in wall-clock minutes into the shift:
     /// the end of the window the walk-in endpoint gives them. Absent on any shift but the one running,
-    /// where "now" means nothing, and while that shift seats nobody new: before it opens, and once the
-    /// wall has last read its closing time.
+    /// where "now" means nothing, and while that shift seats nobody new: before it opens, and once it
+    /// has closed.
     ///
     /// Sent rather than worked out on the phone, which counts in wall minutes and would get the two
     /// nights the clocks change wrong.
     pub walk_in_until_minutes: Option<i32>,
+    /// Every table a party seated this minute could be put at, whatever its size: live, open tonight, and
+    /// held by nobody until [`Self::walk_in_until_minutes`]. Empty whenever that is absent. A table fits a
+    /// party when it seats them.
+    ///
+    /// The very list the walk-in endpoint seats a party from, so the sheet never offers a table the door
+    /// then refuses. Sent for the reason `walk_in_until_minutes` is.
+    pub walk_in_free_table_ids: Vec<Uuid>,
     /// Every day staff can reach from here, with what is on. Longer than the guest's horizon on
     /// purpose: a telephone booking for next month is not a thing to argue about.
     pub days: Vec<ShiftDay>,
@@ -564,20 +589,17 @@ impl ShiftView {
                 .count()
         });
         let now_minutes = is_running.then(|| minutes_within(day, now, config.timezone));
-        let walk_in = is_running
-            .then(|| config.walk_in_window(day, now))
-            .flatten();
-        let walk_in_until_minutes =
-            walk_in.map(|window| minutes_within(day, window.end(), config.timezone));
-        let largest_party_seatable_now = walk_in.and_then(|window| {
-                pustol_domain::largest_party_seatable(
-                    config,
-                    day,
-                    window,
-                    &bookings_of(bookings),
-                    &blocks_of(blocks),
-                )
-            });
+        let (live, closed) = (bookings_of(bookings), blocks_of(blocks));
+        let walk_in = pustol_domain::walk_in(config, day, now, &live, &closed);
+        let walk_in_until_minutes = walk_in
+            .as_ref()
+            .map(|offer| minutes_within(day, offer.window.end(), config.timezone));
+        let largest_party_seatable_now = walk_in.as_ref().and_then(|offer| {
+            pustol_domain::largest_party_seatable(config, day, offer.window, &live, &closed)
+        });
+        let walk_in_free_table_ids = walk_in.map_or_else(Vec::new, |offer| {
+            offer.tables.iter().map(|table| table.id.0).collect()
+        });
 
         Self {
             service_date: day.date(),
@@ -597,6 +619,7 @@ impl ShiftView {
             now_minutes,
             largest_party_seatable_now,
             walk_in_until_minutes,
+            walk_in_free_table_ids,
             days: days
                 .iter()
                 .map(|count| ShiftDay {

@@ -8,13 +8,15 @@
  * order they were sent, so their edits may go by position.
  */
 
-import { usernameKey, type Edit } from "./settingsRules";
+import type { Edit } from "./settingsRules";
 
+/**
+ * By the username as the row spells it. Two rows one case apart are both on screen until a save
+ * refuses them, and the server stores the case it was sent, so the tapped row is the one that goes.
+ */
 export function removeStaff(username: string): Edit {
   return (draft) => {
-    const index = draft.staff.findIndex(
-      (member) => usernameKey(member.username) === usernameKey(username),
-    );
+    const index = draft.staff.findIndex((member) => member.username === username);
     if (index >= 0) draft.staff.splice(index, 1);
   };
 }

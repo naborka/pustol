@@ -723,13 +723,23 @@ function ListSection({
   );
 }
 
+/**
+ * The username, and which of the rows spelled that way this is: the roster may hold one name twice
+ * until a save refuses it, and an index alone would hand a removed row's focus to the next member.
+ */
+function staffRowKey(staff: { username: string }[], index: number): string {
+  const username = staff[index]?.username ?? "";
+  const before = staff.slice(0, index).filter((other) => other.username === username).length;
+  return `${username}#${before}`;
+}
+
 function StaffSection({ ctx }: { ctx: Context }) {
   const { draft, edit } = ctx;
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
-      {draft.staff.map((member) => (
+      {draft.staff.map((member, index) => (
         <div
-          key={member.username}
+          key={staffRowKey(draft.staff, index)}
           style={{
             display: "flex",
             alignItems: "center",

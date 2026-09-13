@@ -2,9 +2,10 @@
  * When a booking holds its table — the screen's half of the one occupancy rule.
  *
  * The server answers the same question for free-now, for the guest's arrival times and for the
- * walk-in offer, from the same interval. Everything drawn on a staff screen derives from
- * [`occupancyEnd`] and from nothing else, so a block on the timeline, the free-table count in the
- * pulse and the shift's own occupancy figure cannot disagree about a party that went home at 21:20.
+ * walk-in offer, from the same interval, and sends those answers. Everything a staff screen still
+ * works out from the bookings derives from [`occupancyEnd`] and from nothing else, so a block on the
+ * timeline, the seated-guest count and the shift's own occupancy figure cannot disagree about a party
+ * that went home at 21:20.
  *
  * The bug this exists to remove: a booking marked `left` still drawn as busy until 23:00, while
  * `свободно сейчас` already counted the table as free and the walk-in sheet was offering it.
@@ -52,32 +53,6 @@ export function holdsDuring(booking: ShiftBooking, from: number, to: number): bo
   return held !== null && held.from < to && from < held.to;
 }
 
-/**
- * Tables free for the whole of `[from, to)`, smallest first, ties by printed number.
- *
- * The same order the allocator uses, so the table this offers is the table the server then gives:
- * smallest that fits, because a couple at a six-top is how a Friday runs out of six-tops.
- *
- * Deliberately *not* what the pulse line reads: the free count comes from the server, which answers
- * it from the same rule against the whole room.
- */
-export function freeTablesDuring(
-  tables: ShiftTable[],
-  bookings: ShiftBooking[],
-  from: number,
-  to: number,
-): ShiftTable[] {
-  return [...tables]
-    .filter(
-      (table) =>
-        table.blocked_because === null &&
-        !bookings.some(
-          (booking) => booking.table_id === table.id && holdsDuring(booking, from, to),
-        ),
-    )
-    .sort((left, right) => left.seats - right.seats || left.number - right.number);
-}
-
 /** A table standing empty, and whether the party at the door actually fits at it. */
 export interface TableOffer {
   table: ShiftTable;
@@ -85,13 +60,25 @@ export interface TableOffer {
 }
 
 /**
- * Every table free for the whole of `[from, to)`, the ones that fit the party first.
+ * Free tables as offers, the ones that fit the party first, each half smallest first, ties by printed
+ * number.
  *
- * The fitting half is the allocator's own list, in its own order, so the top is the table the room
- * would have chosen. The server checks again inside the transaction and has the last word.
+ * The same order the allocator uses, so the top is the table the room would have chosen: smallest
+ * that fits, because a couple at a six-top is how a Friday runs out of six-tops. The server checks
+ * again inside the transaction and has the last word.
  *
  * The rest are free tables this party is too large for, drawn rather than dropped: an empty room
  * under «свободного стола нет» reads like a broken app, and the reason is the answer.
+ */
+function offersAmong(free: ShiftTable[], partySize: number): TableOffer[] {
+  const offers = [...free]
+    .sort((left, right) => left.seats - right.seats || left.number - right.number)
+    .map((table) => ({ table, fits: table.seats >= partySize }));
+  return [...offers.filter((offer) => offer.fits), ...offers.filter((offer) => !offer.fits)];
+}
+
+/**
+ * Every table free for the whole of `[from, to)`.
  *
  * `ignoring` is a booking being moved, which must not block its own new place.
  */
@@ -102,32 +89,30 @@ export function tableOffers(
   to: number,
   ignoring?: string,
 ): TableOffer[] {
-  const others = shift.bookings.filter((booking) => booking.id !== ignoring);
-  const offers = freeTablesDuring(shift.tables, others, from, to).map((table) => ({
-    table,
-    fits: table.seats >= partySize,
-  }));
-  return [...offers.filter((offer) => offer.fits), ...offers.filter((offer) => !offer.fits)];
+  const free = shift.tables.filter(
+    (table) =>
+      table.blocked_because === null &&
+      !shift.bookings.some(
+        (booking) =>
+          booking.id !== ignoring &&
+          booking.table_id === table.id &&
+          holdsDuring(booking, from, to),
+      ),
+  );
+  return offersAmong(free, partySize);
 }
 
 /**
- * The tables a party at the door can be put at: free from now until the end the server gave. Never
- * worked out here: on the night the clocks change, wall minutes give the wrong end.
+ * The tables a party at the door can be put at: the ones the server names as free for the whole
+ * window it would give now. Never worked out here: on the night the clocks change, wall minutes give
+ * the wrong window.
  */
 export function walkInOffers(shift: ShiftView, partySize: number): TableOffer[] {
-  const now = shift.now_minutes;
-  const until = shift.walk_in_until_minutes;
-  if (now === null || until === null) return [];
-  return tableOffers(shift, partySize, now, until);
-}
-
-/** Tables with nobody at them and nothing closing them, at this minute. */
-export function freeTablesAt(
-  tables: ShiftTable[],
-  bookings: ShiftBooking[],
-  minute: number,
-): ShiftTable[] {
-  return freeTablesDuring(tables, bookings, minute, minute + 1);
+  const free = new Set(shift.walk_in_free_table_ids);
+  return offersAmong(
+    shift.tables.filter((table) => free.has(table.id)),
+    partySize,
+  );
 }
 
 /**

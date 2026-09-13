@@ -65,6 +65,7 @@ import {
   DoneScreen,
   HomeScreen,
   bookingDecision,
+  chosenTime,
   heldAfter,
   heldOn,
   pickerStart,
@@ -614,6 +615,7 @@ export default function Page() {
   // answer before still can, with a word that it could not be read again.
   const days = daysRead.failure ? daysRead.value : daysRead.shown;
   const times = timesRead.failure ? timesRead.value : timesRead.shown;
+  const chosen = chosenTime(times, chosenMinutes);
   const shownStaffTimes = staffTimesRead.failure ? null : staffTimesRead.shown;
 
   // ---- guest actions --------------------------------------------------------------------------
@@ -627,13 +629,13 @@ export default function Page() {
   };
 
   const book = exclusive(async () => {
-    if (chosenMinutes === null) return;
+    if (chosen === null) return;
     // What the button said this booking replaces. The server refuses rather than replace otherwise.
     const replacing = session.bookings
       .filter((held) => replacedBy(held, serviceDate))
       .map((held) => held.id);
     try {
-      const answer = await api.book(serviceDate, chosenMinutes, partySize, replacing);
+      const answer = await api.book(serviceDate, chosen, partySize, replacing);
       haptics.success();
       setTaken({ booking: answer.booking, moved: answer.replaced.length > 0 });
       // The answer already says what was booked. Showing it does not wait on rereading the home
@@ -649,9 +651,11 @@ export default function Page() {
       report(failure, "guest");
       if (failure.code === "booking_changed") {
         // What the guest holds changed since the button was drawn. The picker stays as it is; the
-        // button redraws from what they hold now, for them to look at and press again.
+        // button redraws from what they hold now and the times as they stand now, for them to look
+        // at and press again.
         unprompted(loadSession);
         unprompted(loadDays);
+        unprompted(loadTimes);
         return;
       }
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
@@ -707,7 +711,7 @@ export default function Page() {
     partySize,
     serviceDate,
     bar,
-    chosenMinutes,
+    chosen,
     session.bookings,
     offer ? offer.booked : heldOn(session.bookings, serviceDate),
   );
@@ -1214,7 +1218,7 @@ export default function Page() {
           availability={times}
           partySize={partySize}
           serviceDate={serviceDate}
-          chosenMinutes={chosenMinutes}
+          chosenMinutes={chosen}
           daysFailure={daysRead.failure}
           timesFailure={timesRead.failure}
           timesPending={timesRead.pending}

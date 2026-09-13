@@ -2398,6 +2398,103 @@ async fn once_the_shift_has_ended_nobody_can_be_seated_now_and_the_shift_says_so
 }
 
 #[tokio::test]
+async fn on_the_night_the_clocks_go_back_the_shift_offers_a_walk_in_only_the_tables_the_door_seats_it_at() {
+    // Saturday 24 October 2026 closes at 04:00, with one-hour sittings, and both two-tops are booked at
+    // the first 02:30, from 00:30Z to 01:30Z. At 00:40Z the wall reads 02:40 for the first time: a party
+    // seated then would sit into both bookings, and the sheet, counting in wall minutes, offered them.
+    let mut config = open_until(1680, 60);
+    config.tables = vec![table(1, 2, "Бар"), table(2, 2, "Бар")];
+    let app = harness_at(common::utc(2026, 10, 24, 10, 0), config).await;
+    let staff = manager(&app).await;
+    for guest_name in ["Пётр", "Ира"] {
+        app.post(
+            "/api/admin/bookings",
+            &staff,
+            serde_json::json!({
+                "service_date": "2026-10-24", "start_minutes": 1590, "party_size": 2,
+                "guest_name": guest_name
+            }),
+        )
+        .await
+        .expect_ok();
+    }
+    let shift_path = "/api/admin/shift?service_date=2026-10-24";
+    let walk_in = |table_id: Option<&serde_json::Value>| {
+        serde_json::json!({ "service_date": "2026-10-24", "party_size": 2, "table_id": table_id })
+    };
+
+    let first_pass = app.at(common::utc(2026, 10, 25, 0, 40));
+    let shift = first_pass.get(shift_path, &staff).await.expect_ok().clone();
+    assert!(!shift["walk_in_until_minutes"].is_null(), "walk-ins are taken: {shift}");
+    assert_eq!(shift["walk_in_free_table_ids"], serde_json::json!([]), "{shift}");
+    for table in shift["tables"].as_array().expect("tables") {
+        let refused = first_pass
+            .post("/api/admin/walkins", &staff, walk_in(Some(&table["id"])))
+            .await;
+        assert_eq!(refused.error_code(), Some("chosen_table_not_free"), "{}", refused.body);
+    }
+    let refused = first_pass.post("/api/admin/walkins", &staff, walk_in(None)).await;
+    assert_eq!(refused.error_code(), Some("no_table_free"), "{}", refused.body);
+
+    let second_pass = app.at(common::utc(2026, 10, 25, 1, 30));
+    let shift = second_pass.get(shift_path, &staff).await.expect_ok().clone();
+    let offered = shift["walk_in_free_table_ids"].as_array().expect("a list").clone();
+    let tables: Vec<serde_json::Value> = shift["tables"]
+        .as_array()
+        .expect("tables")
+        .iter()
+        .map(|table| table["id"].clone())
+        .collect();
+    assert_eq!(offered, tables, "{shift}");
+    let seated = second_pass
+        .post("/api/admin/walkins", &staff, walk_in(Some(&offered[1])))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(seated["booking"]["table_id"], offered[1], "{seated}");
+    assert_eq!(
+        seated["shift"]["walk_in_free_table_ids"],
+        serde_json::json!([offered[0]]),
+        "{seated}"
+    );
+}
+
+#[tokio::test]
+async fn the_guest_is_told_the_bar_is_open_exactly_while_the_door_seats_a_party_minute_by_minute_through_the_repeated_hour()
+{
+    // Saturday 24 October 2026 closes at 02:30. The wall reads 02:30 at 00:30Z, falls back from 02:59 to
+    // 02:00 at 01:00Z, and comes up to 02:30 again at 01:30Z, when the bar closes. The guest's screen
+    // compared wall minutes, and called the bar shut from 00:30Z while the door still seated parties.
+    let app = harness_at(common::utc(2026, 10, 24, 10, 0), open_until(1590, 60)).await;
+    let staff = manager(&app).await;
+    let guest = Caller::new("Вера");
+    let closes = common::utc(2026, 10, 25, 1, 30);
+    for minute in 0..=150 {
+        let now = common::utc(2026, 10, 24, 23, 30) + chrono::TimeDelta::minutes(minute);
+        let at = app.at(now);
+        let session = at.get("/api/session", &guest).await.expect_ok().clone();
+        let bar = &session["bar"];
+        let walk_in = at
+            .post(
+                "/api/admin/walkins",
+                &staff,
+                serde_json::json!({ "service_date": bar["today"], "party_size": 2 }),
+            )
+            .await;
+        let refused_as_closed = walk_in.error_code() == Some("not_the_running_shift");
+        assert!(
+            walk_in.status.is_success()
+                || refused_as_closed
+                || walk_in.error_code() == Some("no_table_free"),
+            "at {now}: {}",
+            walk_in.body
+        );
+        assert_eq!(bar["open_now"], !refused_as_closed, "at {now}: {bar} {}", walk_in.body);
+        assert_eq!(bar["open_now"], now < closes, "at {now}: {bar}");
+    }
+}
+
+#[tokio::test]
 async fn a_message_to_a_guest_the_bot_cannot_reach_is_refused_and_nothing_is_queued() {
     let app = harness().await;
     let staff = manager(&app).await;
@@ -2562,16 +2659,38 @@ fn largest_draft(settings: &serde_json::Value, unit: char, other: char) -> serde
     draft
 }
 
+/// `json` with every character past U+FFFF written as the escaped pair of surrogates JSON allows for
+/// it: twelve bytes, where UTF-8 takes four.
+fn escaped_as_surrogates(json: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut escaped = String::with_capacity(json.len() * 3);
+    for character in json.chars() {
+        if u32::from(character) <= 0xFFFF {
+            escaped.push(character);
+            continue;
+        }
+        for unit in character.encode_utf16(&mut [0; 2]).iter() {
+            write!(escaped, "\\u{unit:04x}").expect("a string takes what is written to it");
+        }
+    }
+    escaped
+}
+
 #[tokio::test]
 async fn the_largest_settings_save_the_limits_allow_is_read_and_saved() {
     let app = harness().await;
     let staff = manager(&app).await;
-    // Four bytes a character, as JSON writes most of the widest ones; six, as it writes a control
-    // character, the widest form any character a text may hold takes.
-    for (unit, other) in [('🍺', '🍷'), ('\u{1}', '\u{2}')] {
+    // Four bytes a character, as UTF-8 writes the widest; six, as JSON escapes a control character; and
+    // twelve, as JSON escapes a character past U+FFFF, the widest form any character a text may hold takes.
+    for (unit, other, escaped) in [('🍺', '🍷', false), ('\u{1}', '\u{2}', false), ('🍺', '🍷', true)] {
         let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
         let draft = largest_draft(&settings, unit, other);
-        let body = draft.to_string();
+        let body = if escaped {
+            escaped_as_surrogates(&draft.to_string())
+        } else {
+            draft.to_string()
+        };
 
         let saved = app.send_sized("PUT", SETTINGS, &staff, body.clone()).await;
         assert!(

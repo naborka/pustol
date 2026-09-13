@@ -28,6 +28,7 @@ export const bar: BarView = {
   today_hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
   last_arrival_minutes: 1_440,
   now_minutes: 1_280,
+  open_now: true,
   contact: null,
 };
 
@@ -148,6 +149,8 @@ export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
     stats: { bookings: 1, guests: 2, free_now: 2 },
     now_minutes: 1_280,
     walk_in_until_minutes: 1_400,
+    // Table 7 is Саша's until 23:00.
+    walk_in_free_table_ids: ["t2", "t3"],
     largest_party_seatable_now: 8,
     days: [
       { service_date: "2026-09-11", closed: false, bookings: 1 },

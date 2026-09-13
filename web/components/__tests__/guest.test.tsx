@@ -64,8 +64,17 @@ describe("the guest's home screen", () => {
   });
 
   it("says the bar is shut when it is", () => {
-    home({ bar: { ...bar, now_minutes: 600 } });
+    home({ bar: { ...bar, now_minutes: 600, open_now: false } });
     expect(screen.getByText("Откроется в 18:00")).toBeDefined();
+  });
+
+  it("says open or shut as the server decided on its own clock, not by comparing wall minutes", () => {
+    // The night the clocks go back, the wall clock passes the same minutes twice.
+    home({ bar: { ...bar, open_now: false } });
+    expect(screen.getByText("Закрыт")).toBeDefined();
+    cleanup();
+    home({ bar: { ...bar, now_minutes: 1_570, open_now: true } });
+    expect(screen.getByText("Открыт до 02:00")).toBeDefined();
   });
 
   it("invites a booking by saying what tonight still has", () => {

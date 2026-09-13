@@ -24,11 +24,13 @@ export type SlotState = "free" | "taken" | "past";
 /**
  * What a new booking would do to one the guest already holds — the server's rule, never guessed here.
  *
- * `any_evening`: a plan not yet begun, replaced by a booking on any evening. `same_evening`: a
+ * `any_evening`: a plan not yet begun, replaced by a booking on any evening, while some bookable
+ * evening still has an arrival time the guest's other bookings do not hold. `same_evening`: a
  * no-show whose table is still held, replaced only by a booking on its own evening while that evening
  * still has an arrival time by the server's own clock and slot grid. `null`: no booking the guest can
- * make now replaces it — a party at the table, a held no-show with no arrival time left, or a booking
- * on an evening guests can no longer book. «Перенести» is offered exactly when it is not `null`.
+ * make now replaces it — a party at the table, a held no-show with no arrival time left, a plan with
+ * no evening left to move to, or a booking on an evening guests can no longer book. «Перенести» is
+ * offered exactly when it is not `null`.
  *
  * It never says whether the evening is taken: that is `holds_evening`.
  */
@@ -62,6 +64,11 @@ export interface BarView {
   last_arrival_minutes: number | null;
   /** The bar's own clock, in wall-clock minutes into today's shift. */
   now_minutes: number;
+  /**
+   * Whether the bar is serving now, decided on instants by the opening and closing walk-ins go by:
+   * on the night the clocks change, wall minutes say the wrong thing.
+   */
+  open_now: boolean;
   /** Where a person at the bar answers, already turned into a label and a link. */
   contact: { label: string; url: string } | null;
 }
@@ -177,6 +184,11 @@ export interface ShiftView {
    * across a clock change. Null when the server takes no party at the door on this evening now.
    */
   walk_in_until_minutes: number | null;
+  /**
+   * The active, unblocked tables free for the whole of the window a party seated now would get, as the
+   * server counts it on instants. Empty when the server takes no party at the door now.
+   */
+  walk_in_free_table_ids: string[];
   /** The largest party the room could seat this minute; null when none fits or this is not today. */
   largest_party_seatable_now: number | null;
   /** Every evening staff can reach, with what is on. Longer than the guest's horizon. */

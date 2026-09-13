@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::routing::post;
 use pustol_api::callbacks;
 use pustol_api::inbox::Inbox;
@@ -83,9 +83,10 @@ impl Telegram {
     }
 }
 
+#[allow(clippy::disallowed_types, reason = "a stub of Telegram, not of this API")]
 async fn method(
     State(stub): State<Telegram>,
-    Path((_token, method)): Path<(String, String)>,
+    axum::extract::Path((_token, method)): axum::extract::Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     stub.calls.lock().await.push((method.clone(), body.clone()));

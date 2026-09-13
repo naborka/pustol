@@ -373,7 +373,10 @@ describe("a party at the door", () => {
   });
 
   it("does not exist while the server takes no party at the door, even on tonight's shift", () => {
-    const { container } = walkInSheet(shift({ walk_in_until_minutes: null }), 2);
+    const { container } = walkInSheet(
+      shift({ walk_in_until_minutes: null, walk_in_free_table_ids: [] }),
+      2,
+    );
     expect(container.firstChild).toBeNull();
   });
 
@@ -423,6 +426,7 @@ describe("a party at the door", () => {
   it("refuses plainly when every table is taken, with the button inert", () => {
     const full = shift({
       largest_party_seatable_now: null,
+      walk_in_free_table_ids: [],
       bookings: [
         shiftBooking({ id: "a", table_id: "t1", table_number: 7 }),
         shiftBooking({ id: "b", table_id: "t2", table_number: 8 }),
@@ -440,6 +444,7 @@ describe("a party at the door", () => {
   it("says the free tables are too small rather than that there are none", () => {
     const onlySmall = shift({
       largest_party_seatable_now: 2,
+      walk_in_free_table_ids: ["t1"],
       bookings: [
         shiftBooking({ id: "b", table_id: "t2", table_number: 8 }),
         shiftBooking({ id: "c", table_id: "t3", table_number: 10 }),
@@ -456,7 +461,10 @@ describe("a party at the door", () => {
   });
 
   it("does not exist at all on an evening that is not tonight", () => {
-    const { container } = walkInSheet(shift({ now_minutes: null, walk_in_until_minutes: null }), 2);
+    const { container } = walkInSheet(
+      shift({ now_minutes: null, walk_in_until_minutes: null, walk_in_free_table_ids: [] }),
+      2,
+    );
     expect(container.firstChild).toBeNull();
   });
 
@@ -467,9 +475,32 @@ describe("a party at the door", () => {
       now_minutes: 1_280,
       tables: [shiftTable()],
       bookings: [shiftBooking({ status: "left", released_minutes: 1_280 })],
+      walk_in_free_table_ids: ["t1"],
     });
     walkInSheet(view, 2);
     expect(screen.getByText("Посадить за стол 7")).toBeDefined();
+  });
+
+  it("offers only the tables the server names, not ones free by the wall clock on the night the clocks go back", () => {
+    // Seated at the first 02:00, a turn of an hour ends at the second 02:00: in wall minutes the
+    // window is empty and both two-tops booked at the first 02:30 look free. They are not.
+    const view = shift({
+      hours: { open_minutes: 1_080, close_minutes: 1_680, closed: false },
+      now_minutes: 1_560,
+      walk_in_until_minutes: 1_560,
+      largest_party_seatable_now: null,
+      tables: [shiftTable(), shiftTable({ id: "t2", number: 8 })],
+      bookings: [
+        shiftBooking({ id: "a", table_id: "t1", table_number: 7, start_minutes: 1_590, end_minutes: 1_590 }),
+        shiftBooking({ id: "b", table_id: "t2", table_number: 8, start_minutes: 1_590, end_minutes: 1_590 }),
+      ],
+      walk_in_free_table_ids: [],
+    });
+    walkInSheet(view, 2);
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).queryByText("Стол 7 · Стойка")).toBeNull();
+    expect(within(sheet).queryByText("Стол 8 · Стойка")).toBeNull();
+    expect(screen.getByText("Посадить некуда").closest("button")?.disabled).toBe(true);
   });
 });
 

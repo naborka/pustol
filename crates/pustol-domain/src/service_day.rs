@@ -157,12 +157,21 @@ pub fn resolve_boundary(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTim
     passed_on(Pass::First, day, minutes, tz)
 }
 
-/// Resolves a wall-clock minute at which something stops.
+/// Resolves a wall-clock minute at which something stops: the last moment the wall comes up to it
+/// from a minute before it.
 ///
-/// Exactly [`resolve_boundary`], except for a minute the autumn clock change repeats: whatever is
-/// open until then stays open until the wall reads it for the last time.
+/// Exactly [`resolve_boundary`], except for a minute the autumn clock change repeats. Whatever is open
+/// until then stays open until the wall reaches it the second time, coming up from the minute before
+/// it again. The first minute of the repeated hour is the exception: the second time the wall reads
+/// it, it has fallen back to it from an hour later, so it stops the first time.
 pub fn resolve_end(day: ServiceDay, minutes: i32, tz: Tz) -> Result<DateTime<Utc>, TimeError> {
-    passed_on(Pass::Last, day, minutes, tz)
+    let last = passed_on(Pass::Last, day, minutes, tz)?;
+    let just_before = minutes_within(day, last - Duration::seconds(1), tz);
+    if just_before < minutes {
+        Ok(last)
+    } else {
+        passed_on(Pass::First, day, minutes, tz)
+    }
 }
 
 /// Which instant a wall-clock minute the autumn clock change repeats resolves to.
@@ -322,6 +331,21 @@ mod tests {
             resolve_end(day(2026, 7, 30), 20 * 60, BELGRADE),
             resolve(day(2026, 7, 30), 20 * 60, BELGRADE),
             "anything else resolves as an arrival does"
+        );
+    }
+
+    #[test]
+    fn an_end_at_the_first_minute_the_autumn_clock_change_repeats_passes_when_the_wall_first_reaches_it() {
+        // Belgrade repeats 02:00..03:00 on 2026-10-25. The wall reaches 02:00 from 01:59 at 00:00Z; at
+        // 01:00Z it falls back to 02:00 from 02:59, and never comes up to 02:00 from before it again.
+        assert_eq!(
+            resolve_end(day(2026, 10, 25), 2 * 60, BELGRADE),
+            Ok(utc(2026, 10, 25, 0, 0))
+        );
+        assert_eq!(
+            resolve_end(day(2026, 10, 25), 3 * 60, BELGRADE),
+            Ok(utc(2026, 10, 25, 2, 0)),
+            "03:00 happens once, reached from 02:59 the second time round"
         );
     }
 
