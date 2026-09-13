@@ -38,7 +38,9 @@ pub fn id(sequence: u128) -> Uuid {
 
 pub fn table(number: i32, seats: i32, zone_name: &str) -> BarTable {
     BarTable {
-        id: TableId(id(u128::try_from(number).expect("table numbers are positive"))),
+        id: TableId(id(
+            u128::try_from(number).expect("table numbers are positive")
+        )),
         number,
         seats,
         zone: zone(zone_name),
@@ -96,12 +98,40 @@ pub fn default_config() -> BarConfig {
                 telegram_user_id: None,
             },
         ],
+        contact: None,
     }
 }
 
 /// A Thursday in high summer, well away from either clock change.
 pub fn thursday() -> ServiceDay {
-    ServiceDay::new(NaiveDate::from_ymd_opt(2026, 7, 30).expect("valid date"))
+    date(2026, 7, 30)
+}
+
+pub fn date(year: i32, month: u32, day: u32) -> ServiceDay {
+    ServiceDay::new(NaiveDate::from_ymd_opt(year, month, day).expect("valid date"))
+}
+
+/// Fixture bar open 10:00 to `close_minutes` daily.
+pub fn grid(close_minutes: i32, turn_minutes: i32, slot_step_minutes: i32) -> BarConfig {
+    BarConfig {
+        week: WeekSchedule::uniform(DayHours {
+            open_minutes: 600,
+            close_minutes,
+            closed: false,
+        }),
+        turn_minutes,
+        slot_step_minutes,
+        ..default_config()
+    }
+}
+
+/// Arrived booking for `window`, like walk-in.
+pub fn seated(day: ServiceDay, window: Interval) -> Booking {
+    Booking {
+        window,
+        status: BookingStatus::Arrived,
+        ..booking(1, day, 600, 2, None, 60)
+    }
 }
 
 pub fn utc(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
@@ -161,5 +191,6 @@ pub fn in_force() -> ValidConfig {
 
 /// `config` put in force, panicking with the reasons if it is not legal.
 pub fn force(config: BarConfig) -> ValidConfig {
-    ValidConfig::new(config).unwrap_or_else(|errors| panic!("fixture config is illegal: {errors:?}"))
+    ValidConfig::new(config)
+        .unwrap_or_else(|errors| panic!("fixture config is illegal: {errors:?}"))
 }

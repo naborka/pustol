@@ -17,18 +17,24 @@
  * anything; it only decides what to grey out.
  */
 
-import type { Bounds, Limits, SettingsDraft } from "./api";
+import type { Bounds, Limits, ListLimits, SettingsDraft } from "./api";
 
 /** A reason a proposal cannot be saved, named so the screen can put it next to the control. */
 export type Reason =
   | { kind: "blank_name" }
   | { kind: "blank_address" }
+  | { kind: "malformed_contact" }
+  | { kind: "name_too_long" }
+  | { kind: "address_too_long" }
+  | { kind: "message_template_too_long" }
+  | { kind: "cancel_reason_too_long" }
   | { kind: "open_out_of_range"; weekday: number }
   | { kind: "close_out_of_range"; weekday: number }
   | { kind: "every_day_closed" }
   | { kind: "shift_shorter_than_turn"; weekday: number }
   | { kind: "setting_out_of_range"; setting: NumericSetting }
   | { kind: "slot_step_not_offered" }
+  | { kind: "list_too_long"; list: keyof ListLimits; max: number }
   | { kind: "no_zones" }
   | { kind: "duplicate_zone"; zone: string }
   | { kind: "no_tables" }
@@ -50,13 +56,80 @@ export type NumericSetting =
   | "remind_hours"
   | "grace_minutes";
 
+/** Length as server counts: characters, not UTF-16 units; JavaScript counts emoji as two. */
+export function characters(text: string): number {
+  return [...text].length;
+}
+
 function within(value: number, bounds: Bounds): boolean {
   return value >= bounds.min && value <= bounds.max;
 }
 
+/**
+ * Rust `str::trim`: strips Unicode White_Space. `String.prototype.trim` differs: strips byte-order
+ * mark, keeps U+0085.
+ */
+export function trimmed(text: string): string {
+  let start = 0;
+  let end = text.length;
+  // Every White_Space character is one UTF-16 unit, so unit steps are character steps.
+  while (start < end && WHITE_SPACE.test(text.charAt(start))) start += 1;
+  while (end > start && WHITE_SPACE.test(text.charAt(end - 1))) end -= 1;
+  return text.slice(start, end);
+}
+
+const WHITE_SPACE = /^\p{White_Space}$/u;
+
 /** Telegram's published rule: five to thirty-two characters, starting with a letter. */
 export function isTelegramUsername(candidate: string): boolean {
   return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(candidate);
+}
+
+/** Telegram ignores username case. */
+export function usernameKey(username: string): string {
+  return username.toLowerCase();
+}
+
+const PHONE_MAX_CHARS = 32;
+
+/** Phone number or Telegram username. Advisory mirror of `Contact::parse` in `pustol-domain`. */
+export function isContact(text: string): boolean {
+  const contact = trimmed(text);
+  if (isTelegramUsername(contact.startsWith("@") ? contact.slice(1) : contact)) return true;
+  const digits = contact.replace(/\D/g, "").length;
+  return (
+    characters(contact) <= PHONE_MAX_CHARS &&
+    /^\+?[0-9 ()-]+$/.test(contact) &&
+    digits >= 7 &&
+    digits <= 15
+  );
+}
+
+function isBlank(text: string): boolean {
+  return trimmed(text).length === 0;
+}
+
+function longerThan(text: string, limit: number): boolean {
+  // Character is one or two UTF-16 units, so text within limit in units fits.
+  if (text.length <= limit) return false;
+  let count = 0;
+  for (const _character of trimmed(text)) {
+    count += 1;
+    if (count > limit) return true;
+  }
+  return false;
+}
+
+const LISTS = ["zones", "tables", "message_templates", "cancel_reasons", "staff"] as const satisfies readonly (keyof ListLimits)[];
+
+/** Separate from `wouldBeLegal`: add button must not grey out because something else is wrong. */
+export function roomFor(
+  draft: SettingsDraft,
+  limits: Limits,
+  list: keyof ListLimits,
+  adding: number,
+): boolean {
+  return draft[list].length + adding <= limits.lists[list];
 }
 
 export function largestTable(draft: SettingsDraft): number {
@@ -67,8 +140,13 @@ export function largestTable(draft: SettingsDraft): number {
 export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   const reasons: Reason[] = [];
 
-  if (draft.name.trim().length === 0) reasons.push({ kind: "blank_name" });
-  if (draft.address.trim().length === 0) reasons.push({ kind: "blank_address" });
+  if (isBlank(draft.name)) reasons.push({ kind: "blank_name" });
+  if (isBlank(draft.address)) reasons.push({ kind: "blank_address" });
+  if (longerThan(draft.name, limits.text.name)) reasons.push({ kind: "name_too_long" });
+  if (longerThan(draft.address, limits.text.address)) reasons.push({ kind: "address_too_long" });
+  if (!isBlank(draft.contact) && !isContact(draft.contact)) {
+    reasons.push({ kind: "malformed_contact" });
+  }
 
   draft.week.forEach((hours, weekday) => {
     if (!within(hours.open_minutes, limits.open_minutes)) {
@@ -96,6 +174,11 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   if (!limits.slot_step_minutes.includes(draft.slot_step_minutes)) {
     reasons.push({ kind: "slot_step_not_offered" });
   }
+  for (const list of LISTS) {
+    if (!roomFor(draft, limits, list, 0)) {
+      reasons.push({ kind: "list_too_long", list, max: limits.lists[list] });
+    }
+  }
 
   if (draft.zones.length === 0) reasons.push({ kind: "no_zones" });
   draft.zones.forEach((zone, index) => {
@@ -114,12 +197,18 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   }
 
   if (draft.message_templates.length === 0) reasons.push({ kind: "no_message_templates" });
-  if (draft.message_templates.some((text) => text.trim().length === 0)) {
+  if (draft.message_templates.some(isBlank)) {
     reasons.push({ kind: "blank_message_template" });
   }
   if (draft.cancel_reasons.length === 0) reasons.push({ kind: "no_cancel_reasons" });
-  if (draft.cancel_reasons.some((text) => text.trim().length === 0)) {
+  if (draft.cancel_reasons.some(isBlank)) {
     reasons.push({ kind: "blank_cancel_reason" });
+  }
+  if (draft.message_templates.some((text) => longerThan(text, limits.text.message))) {
+    reasons.push({ kind: "message_template_too_long" });
+  }
+  if (draft.cancel_reasons.some((text) => longerThan(text, limits.text.reason))) {
+    reasons.push({ kind: "cancel_reason_too_long" });
   }
 
   if (draft.staff.length === 0) reasons.push({ kind: "no_staff" });
@@ -130,7 +219,7 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
     if (
       draft.staff
         .slice(0, index)
-        .some((other) => other.username.toLowerCase() === member.username.toLowerCase())
+        .some((other) => usernameKey(other.username) === usernameKey(member.username))
     ) {
       reasons.push({ kind: "duplicate_staff_username", username: member.username });
     }
@@ -178,9 +267,14 @@ export function wouldBeLegal(
   change: Edit,
   limits: Limits,
 ): boolean {
+  return isLegal(edited(draft, change), limits);
+}
+
+/** Screen hands up changes, not finished proposals, so edit typed during save replays on what save stored. */
+export function edited(draft: SettingsDraft, change: Edit): SettingsDraft {
   const next = copyDraft(draft);
   change(next);
-  return isLegal(next, limits);
+  return next;
 }
 
 /** A change to a proposal, made in place on a copy. */
@@ -203,9 +297,14 @@ export function shortestShiftMinutes(draft: SettingsDraft): number | null {
   );
 }
 
+/** Equality of plain JSON values only. */
+export function same(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 /** Whether two proposals differ, which is what makes the Save button live. */
 export function differs(left: SettingsDraft, right: SettingsDraft): boolean {
-  return JSON.stringify(left) !== JSON.stringify(right);
+  return !same(left, right);
 }
 
 const WEEKDAY = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
@@ -216,6 +315,14 @@ const SETTING_NAME: Record<NumericSetting, string> = {
   horizon_days: "Горизонт брони",
   remind_hours: "Напоминание",
   grace_minutes: "Ожидание опоздавших",
+};
+
+const LIST_NAME: Record<keyof ListLimits, string> = {
+  zones: "Зон",
+  tables: "Столов",
+  message_templates: "Сообщений гостю",
+  cancel_reasons: "Причин отмены",
+  staff: "Сотрудников",
 };
 
 function hoursWord(minutes: number): string {
@@ -236,6 +343,16 @@ export function reasonSentence(reason: Reason, draft: SettingsDraft): string {
       return "У бара нет названия.";
     case "blank_address":
       return "У бара нет адреса.";
+    case "malformed_contact":
+      return "Контакт для гостей — это телефон или @ник в Telegram.";
+    case "name_too_long":
+      return "Название слишком длинное.";
+    case "address_too_long":
+      return "Адрес слишком длинный.";
+    case "message_template_too_long":
+      return "Сообщение гостю слишком длинное.";
+    case "cancel_reason_too_long":
+      return "Причина отмены слишком длинная.";
     case "open_out_of_range":
       return `${WEEKDAY[reason.weekday] ?? "День"} открывается в час, который бар не принимает.`;
     case "close_out_of_range":
@@ -251,6 +368,8 @@ export function reasonSentence(reason: Reason, draft: SettingsDraft): string {
       return `${SETTING_NAME[reason.setting]} вне допустимых значений.`;
     case "slot_step_not_offered":
       return "Такого шага времени бар не предлагает.";
+    case "list_too_long":
+      return `${LIST_NAME[reason.list]} больше ${reason.max} быть не может.`;
     case "no_zones":
       return "Нужна хотя бы одна зона.";
     case "duplicate_zone":

@@ -167,7 +167,13 @@ fn a_payload_at_the_very_edge_of_the_window_is_still_accepted() {
     let edge = now() + MAX_AGE;
     assert!(verify(&genuine(999), &token(), edge, MAX_AGE).is_ok());
     assert!(
-        verify(&genuine(999), &token(), edge + TimeDelta::seconds(1), MAX_AGE).is_err(),
+        verify(
+            &genuine(999),
+            &token(),
+            edge + TimeDelta::seconds(1),
+            MAX_AGE
+        )
+        .is_err(),
         "one second past the window is past the window"
     );
 }
@@ -296,4 +302,20 @@ fn a_bot_token_never_prints_itself() {
     let rendered = format!("{:?}", token());
     assert!(!rendered.contains("AAHfake"));
     assert_eq!(rendered, "BotToken(redacted)");
+}
+
+#[test]
+fn a_payload_a_few_seconds_ahead_of_this_server_is_accepted() {
+    // Clocks drift; payload 30s "in future" must not lock guest out.
+    let behind = now() - TimeDelta::seconds(30);
+    assert!(verify(&genuine(999), &token(), behind, MAX_AGE).is_ok());
+}
+
+#[test]
+fn a_token_names_the_bot_it_belongs_to() {
+    assert_eq!(
+        BotToken::new("123456:AAHfakeTokenForTestsOnly-000000000000000").bot_id(),
+        Some(123_456)
+    );
+    assert_eq!(BotToken::new("not a token").bot_id(), None);
 }

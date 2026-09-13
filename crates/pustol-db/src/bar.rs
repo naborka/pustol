@@ -26,7 +26,9 @@ fn stranded(
                 .find(|record| record.booking.id == conflict.booking());
             StrandedBooking {
                 conflict: *conflict,
-                guest_name: record.map(|record| record.guest_name.clone()).unwrap_or_default(),
+                guest_name: record
+                    .map(|record| record.guest_name.clone())
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -39,18 +41,25 @@ pub struct StrandedBooking {
     pub guest_name: String,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Settings {
+    pub config: ValidConfig,
+    /// Bumped on every write of bar row. Proposal from any other version refused.
+    pub version: i64,
+    /// Lets settings screen label table row it just added.
+    pub next_table_number: i32,
+}
+
 /// What a settings save actually did.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SavedSettings {
-    pub config: ValidConfig,
+    /// Read back from storage before commit.
+    pub settings: Settings,
     /// Bookings the change forced to move, and any it could not place.
     pub reconciliation: crate::bookings::Reseated,
     /// Live bookings for parties above the new cap. Not a refusal — they already have a table and
     /// will be served — but staff are told, so a cap lowered by accident is visible at once.
     pub above_cap: usize,
-    /// The number a table added next would be given, so the settings screen can label a row it
-    /// has only just created.
-    pub next_table_number: i32,
 }
 
 impl Store {
@@ -58,6 +67,15 @@ impl Store {
     pub async fn config(&self, bar: BarId) -> Result<ValidConfig> {
         let mut connection = self.pool().acquire().await?;
         load_config(&mut connection, bar).await
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` for unknown bar, `StoredConfigInvalid` or `CorruptRow` for bad stored rows,
+    /// database errors.
+    pub async fn settings(&self, bar: BarId) -> Result<Settings> {
+        let mut connection = self.pool().acquire().await?;
+        load_settings(&mut connection, bar).await
     }
 
     /// The number a newly added table would be given.
@@ -69,7 +87,10 @@ impl Store {
 
     /// Applies everything the settings screen sent, or refuses the lot.
     ///
-    /// Refusal comes in three flavours, deliberately distinguishable: the proposal makes no sense
+    /// Proposal from settings another save replaced is refused first: saving it would silently
+    /// revert that save.
+    ///
+    /// Otherwise refusal comes in three flavours, deliberately distinguishable: the proposal makes no sense
     /// (an unknown table, an unknown timezone), the proposal is illegal (a party cap no table can
     /// seat), or the proposal would strand bookings the bar has already promised. Only the last
     /// needs a human to move bookings first, and only the last is worth interrupting them for.
@@ -77,6 +98,11 @@ impl Store {
     /// Inventory changes are applied and the bookings reconciled rather than refused: the screen
     /// describes the room as it now physically is, and a system that will not record that just
     /// gets worked around.
+    ///
+    /// # Errors
+    ///
+    /// `SettingsChanged`, `UnusableProposal`, `ProposedConfigInvalid`, `WouldStrandBookings`,
+    /// `NotFound` for unknown bar, database errors.
     pub async fn save_settings(
         &self,
         bar: BarId,
@@ -86,9 +112,12 @@ impl Store {
         let mut transaction = self.pool().begin().await?;
         lock_bar(&mut transaction, bar).await?;
 
-        let current = load_config(&mut transaction, bar).await?;
+        let current = load_settings(&mut transaction, bar).await?;
+        if draft.version != current.version {
+            return Err(Error::SettingsChanged);
+        }
         let proposed = draft
-            .resolve(&current, Uuid::new_v4)
+            .resolve(&current.config)
             .map_err(|error| Error::UnusableProposal(error.to_string()))?;
         let proposed = ValidConfig::new(proposed).map_err(Error::ProposedConfigInvalid)?;
 
@@ -97,28 +126,33 @@ impl Store {
         let conflicts = schedule_conflicts(&proposed, &live, now);
         if !conflicts.is_empty() {
             // Named, so the screen can say which bookings and not merely that some exist.
-            return Err(Error::WouldStrandBookings(stranded(&conflicts, &unfinished)));
+            return Err(Error::WouldStrandBookings(stranded(
+                &conflicts,
+                &unfinished,
+            )));
         }
         let above_cap = parties_above_cap(&proposed, &live, now).len();
 
         write_bar(&mut transaction, bar, &proposed).await?;
         write_week(&mut transaction, bar, &proposed).await?;
         write_tables(&mut transaction, bar, &proposed).await?;
-        write_staff(&mut transaction, bar, &proposed).await?;
+        write_staff(&mut transaction, bar, &proposed, now).await?;
+
+        // Read back, not echoed from proposal: storage orders roster and room, and screen order
+        // would describe this version differently from every later read.
+        let saved = load_settings(&mut transaction, bar).await?;
 
         // The room may have shrunk. Anything that no longer fits goes through the same allocator
         // that seated it, and anything unseatable becomes an orphan for staff to settle.
         let reconciliation =
-            bookings::reconcile_from(&mut transaction, bar, &proposed, now).await?;
+            bookings::reconcile_from(&mut transaction, bar, &saved.config, now).await?;
 
-        let next_table_number = next_table_number(&proposed.tables);
         transaction.commit().await?;
 
         Ok(SavedSettings {
-            config: proposed,
+            settings: saved,
             reconciliation,
             above_cap,
-            next_table_number,
         })
     }
 }
@@ -128,13 +162,17 @@ impl Store {
 /// A stored row that fails validation means either that somebody wrote around the API or that a
 /// limit was tightened without a data migration. Both deserve a loud failure rather than a bar
 /// that quietly runs on rules the rest of the system does not believe in.
-pub(crate) async fn load_config(
-    connection: &mut PgConnection,
-    bar: BarId,
-) -> Result<ValidConfig> {
+pub(crate) async fn load_config(connection: &mut PgConnection, bar: BarId) -> Result<ValidConfig> {
+    Ok(load_settings(connection, bar).await?.config)
+}
+
+/// Version read with bar row, before week, room and roster: save landing in between leaves version
+/// older than rest, so proposal from this read gets refused, never accepted.
+async fn load_settings(connection: &mut PgConnection, bar: BarId) -> Result<Settings> {
     let row = sqlx::query(
         "select name, address, timezone, turn_minutes, slot_step_minutes, max_party,
-                horizon_days, remind_hours, grace_minutes, zones, message_templates, cancel_reasons
+                horizon_days, remind_hours, grace_minutes, zones, message_templates, cancel_reasons,
+                contact, settings_version
          from bar where id = $1",
     )
     .bind(bar)
@@ -177,8 +215,13 @@ pub(crate) async fn load_config(
         message_templates: row.try_get("message_templates")?,
         cancel_reasons: row.try_get("cancel_reasons")?,
         staff,
+        contact: row.try_get("contact")?,
     };
-    ValidConfig::new(config).map_err(Error::StoredConfigInvalid)
+    Ok(Settings {
+        next_table_number: next_table_number(&config.tables),
+        config: ValidConfig::new(config).map_err(Error::StoredConfigInvalid)?,
+        version: row.try_get("settings_version")?,
+    })
 }
 
 async fn load_week(connection: &mut PgConnection, bar: BarId) -> Result<WeekSchedule> {
@@ -267,15 +310,12 @@ async fn load_staff(connection: &mut PgConnection, bar: BarId) -> Result<Vec<Sta
         .collect()
 }
 
-async fn write_bar(
-    connection: &mut PgConnection,
-    bar: BarId,
-    config: &ValidConfig,
-) -> Result<()> {
+async fn write_bar(connection: &mut PgConnection, bar: BarId, config: &ValidConfig) -> Result<()> {
     sqlx::query(
         "update bar set name = $2, address = $3, timezone = $4, turn_minutes = $5,
                 slot_step_minutes = $6, max_party = $7, horizon_days = $8, remind_hours = $9,
-                grace_minutes = $10, zones = $11, message_templates = $12, cancel_reasons = $13
+                grace_minutes = $10, zones = $11, message_templates = $12, cancel_reasons = $13,
+                contact = $14
          where id = $1",
     )
     .bind(bar)
@@ -297,16 +337,13 @@ async fn write_bar(
     )
     .bind(&config.message_templates)
     .bind(&config.cancel_reasons)
+    .bind(&config.contact)
     .execute(connection)
     .await?;
     Ok(())
 }
 
-async fn write_week(
-    connection: &mut PgConnection,
-    bar: BarId,
-    config: &ValidConfig,
-) -> Result<()> {
+async fn write_week(connection: &mut PgConnection, bar: BarId, config: &ValidConfig) -> Result<()> {
     // Upserted rather than replaced, so the deferred "a week has seven days" trigger is never
     // presented with a bar that momentarily has none.
     let days = config.week.all();
@@ -352,7 +389,10 @@ async fn write_tables(
 
     // `coalesce(existing.retired_at, now())` keeps the moment a table was first retired, so the
     // shift history can still say when the room changed.
-    sqlx::query(
+    //
+    // App picks ids of tables it adds, so id may belong to another bar. Update touches only this
+    // bar's rows; skipped row counted and refused in same statement, so no writer slips between.
+    let written = sqlx::query(
         "insert into bar_table (id, bar_id, number, seats, zone, retired_at)
          select proposed.id, $1, proposed.number, proposed.seats, proposed.zone,
                 case when proposed.retired then coalesce(existing.retired_at, now()) end
@@ -362,16 +402,22 @@ async fn write_tables(
          on conflict (id) do update set
             seats = excluded.seats,
             zone = excluded.zone,
-            retired_at = excluded.retired_at",
+            retired_at = excluded.retired_at
+         where bar_table.bar_id = excluded.bar_id",
     )
     .bind(bar)
-    .bind(ids)
+    .bind(&ids)
     .bind(numbers)
     .bind(seats)
     .bind(zones)
     .bind(retired)
     .execute(connection)
     .await?;
+    if usize::try_from(written.rows_affected()).ok() != Some(ids.len()) {
+        return Err(Error::UnusableProposal(
+            "the proposal names a table that belongs to another bar".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -379,6 +425,7 @@ async fn write_staff(
     connection: &mut PgConnection,
     bar: BarId,
     config: &ValidConfig,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let usernames: Vec<String> = config
         .staff
@@ -403,11 +450,12 @@ async fn write_staff(
 
     // An existing binding is never overwritten from a proposal: the settings screen sends
     // usernames, and letting it clear a numeric id would downgrade authorisation to something a
-    // username squatter could take over.
+    // username squatter could take over. Seat keeps moment first offered: only payload signed
+    // from then on may claim it.
     sqlx::query(
-        "insert into bar_staff (bar_id, username, telegram_user_id, bound_at)
-         select $1, proposed.username, proposed.telegram_user_id,
-                case when proposed.telegram_user_id is not null then now() end
+        "insert into bar_staff (bar_id, username, telegram_user_id, invited_at, bound_at)
+         select $1, proposed.username, proposed.telegram_user_id, $4,
+                case when proposed.telegram_user_id is not null then $4 end
          from unnest($2::text[], $3::bigint[]) as proposed(username, telegram_user_id)
          on conflict (bar_id, username_lower) do update set
             username = excluded.username,
@@ -415,12 +463,13 @@ async fn write_staff(
             bound_at = case
                 when coalesce(bar_staff.telegram_user_id, excluded.telegram_user_id) is null
                 then null
-                else coalesce(bar_staff.bound_at, now())
+                else coalesce(bar_staff.bound_at, $4)
             end",
     )
     .bind(bar)
     .bind(&usernames)
     .bind(&bound)
+    .bind(now)
     .execute(connection)
     .await?;
     Ok(())
@@ -431,12 +480,13 @@ async fn write_staff(
 pub(crate) async fn insert_bar(
     connection: &mut PgConnection,
     config: &ValidConfig,
+    now: DateTime<Utc>,
 ) -> Result<BarId> {
     let bar: BarId = sqlx::query(
         "insert into bar (name, address, timezone, turn_minutes, slot_step_minutes, max_party,
                           horizon_days, remind_hours, grace_minutes, zones, message_templates,
-                          cancel_reasons)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning id",
+                          cancel_reasons, contact)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id",
     )
     .bind(&config.name)
     .bind(&config.address)
@@ -456,6 +506,7 @@ pub(crate) async fn insert_bar(
     )
     .bind(&config.message_templates)
     .bind(&config.cancel_reasons)
+    .bind(&config.contact)
     .fetch_one(&mut *connection)
     .await
     .map(|row| row.get::<Uuid, _>("id"))
@@ -463,15 +514,21 @@ pub(crate) async fn insert_bar(
 
     write_week(&mut *connection, bar, config).await?;
     write_tables(&mut *connection, bar, config).await?;
-    write_staff(&mut *connection, bar, config).await?;
+    write_staff(&mut *connection, bar, config, now).await?;
     Ok(bar)
 }
 
 impl Store {
     /// Brings a bar into being, hours, room and roster together.
-    pub async fn create_bar(&self, config: &ValidConfig) -> Result<BarId> {
+    ///
+    /// `now`: when roster seats are offered.
+    ///
+    /// # Errors
+    ///
+    /// Database errors, including constraint refusals.
+    pub async fn create_bar(&self, config: &ValidConfig, now: DateTime<Utc>) -> Result<BarId> {
         let mut transaction = self.pool().begin().await?;
-        let bar = insert_bar(&mut transaction, config).await?;
+        let bar = insert_bar(&mut transaction, config, now).await?;
         transaction.commit().await?;
         Ok(bar)
     }

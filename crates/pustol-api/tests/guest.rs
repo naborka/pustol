@@ -50,7 +50,7 @@ async fn the_first_screen_arrives_in_one_request() {
     assert_eq!(body["user"]["id"], guest.id);
     assert_eq!(body["user"]["first_name"], "Алексей");
     assert_eq!(body["is_staff"], false);
-    assert_eq!(body["booking"], serde_json::Value::Null);
+    assert_eq!(body["bookings"], serde_json::json!([]));
     assert_eq!(body["bar"]["name"], "Бар «Подвал»");
     assert_eq!(body["bar"]["address"], "Дечанска 12, Белград");
     assert_eq!(body["bar"]["max_party"], 6);
@@ -63,6 +63,25 @@ async fn the_first_screen_arrives_in_one_request() {
         body["bookable_days"],
         serde_json::json!(["2026-07-30", "2026-07-31", "2026-08-01", "2026-08-02"])
     );
+}
+
+#[tokio::test]
+async fn the_bar_says_when_it_opens_only_while_opening_is_still_ahead() {
+    // 08:00 Belgrade; bar opens 10:00.
+    let app = harness().await;
+    let guest = Caller::new("Алексей");
+    let before = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(before["bar"]["opens_at_minutes"], 600, "{}", before["bar"]);
+    assert_eq!(before["bar"]["open_now"], false);
+
+    let open = app.at(utc(2026, 7, 30, 8, 0));
+    let after = open.get("/api/session", &guest).await.expect_ok().clone();
+    assert!(
+        after["bar"]["opens_at_minutes"].is_null(),
+        "{}",
+        after["bar"]
+    );
+    assert_eq!(after["bar"]["open_now"], true);
 }
 
 #[tokio::test]
@@ -96,8 +115,7 @@ async fn a_guest_books_a_table_and_sees_it_on_the_next_visit() {
     let app = harness().await;
     let guest = Caller::new("Алексей");
     let taken = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
         )
@@ -108,10 +126,13 @@ async fn a_guest_books_a_table_and_sees_it_on_the_next_visit() {
     assert_eq!(taken["booking"]["end_minutes"], 1320);
     assert_eq!(taken["booking"]["party_size"], 2);
     assert_eq!(taken["booking"]["status"], "confirmed");
-    assert_eq!(taken["replaced"], serde_json::Value::Null);
+    assert_eq!(taken["replaced"], serde_json::json!([]));
+    assert_eq!(taken["booking"]["started"], false);
+    assert_eq!(taken["booking"]["rebooking_replaces"], "any_evening");
 
     let session = app.get("/api/session", &guest).await.expect_ok().clone();
-    assert_eq!(session["booking"]["id"], taken["booking"]["id"]);
+    assert_eq!(session["bookings"][0]["id"], taken["booking"]["id"]);
+    assert_eq!(session["bookings"].as_array().expect("bookings").len(), 1);
 }
 
 #[tokio::test]
@@ -119,8 +140,7 @@ async fn booking_again_replaces_the_earlier_booking() {
     let app = harness().await;
     let guest = Caller::new("Лиза");
     let first = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
         )
@@ -128,15 +148,137 @@ async fn booking_again_replaces_the_earlier_booking() {
         .expect_ok()
         .clone();
     let second = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
-            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1320, "party_size": 4 }),
+            serde_json::json!({
+                "service_date": "2026-07-30", "start_minutes": 1320, "party_size": 4,
+                "replacing": [first["booking"]["id"]]
+            }),
         )
         .await
         .expect_ok()
         .clone();
-    assert_eq!(second["replaced"], first["booking"]["id"]);
+    assert_eq!(
+        second["replaced"],
+        serde_json::json!([first["booking"]["id"]])
+    );
+}
+
+#[tokio::test]
+async fn a_body_holding_a_nul_character_anywhere_is_refused_as_text_the_bar_cannot_keep() {
+    // Keys too: unknown key is ignored, yet still text storage would have to refuse.
+    let app = harness().await;
+    let guest = Caller::new("Вера");
+    let refused = app
+        .book(
+            &guest,
+            serde_json::json!({
+                "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2,
+                "replacing": [], "comment\u{0}": "ключ"
+            }),
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refused.error_code(), Some("text_invalid"));
+    assert_eq!(
+        app.get("/api/session", &guest).await.expect_ok()["bookings"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn a_body_that_is_not_json_of_the_right_shape_is_refused_with_a_code_the_app_can_read() {
+    // Statuses are axum's own; body must be JSON with code, not plain text.
+    let app = harness().await;
+    let guest = Caller::new("Вера");
+    let cases = [
+        (
+            "application/json",
+            "{\"service_date\": ",
+            axum::http::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "text/plain",
+            "{}",
+            axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "application/json",
+            "{\"service_date\": 5}",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "application/json",
+            "{\"service_date\":\"2026-07-30\",\"start_minutes\":1200,\"party_size\":2,\"party_size\":9}",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ];
+    for (content_type, body, status) in cases {
+        let answer = app
+            .send_text("POST", "/api/booking", &guest, content_type, body)
+            .await;
+        assert_eq!(
+            answer.status, status,
+            "{content_type} {body}: {}",
+            answer.body
+        );
+        assert_eq!(
+            answer.error_code(),
+            Some("body_invalid"),
+            "{content_type} {body}: {}",
+            answer.body
+        );
+        assert!(
+            answer.body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "{}",
+            answer.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_path_or_a_query_the_api_cannot_read_is_refused_with_a_code_the_app_can_read() {
+    // Malformed id, non-number value, missing field: refusal must be JSON with code.
+    let app = harness().await;
+    let guest = Caller::new("Вера");
+    let staff = Caller::manager();
+    for (method, path, caller) in [
+        ("DELETE", "/api/bookings/not-a-uuid", &guest),
+        ("GET", "/api/days?party_size=two", &guest),
+        ("GET", "/api/availability?service_date=2026-07-30", &guest),
+        ("PATCH", "/api/admin/bookings/not-a-uuid/note", &staff),
+        ("GET", "/api/admin/shift", &staff),
+    ] {
+        let answer = app
+            .send(method, path, caller, serde_json::json!({ "note": null }))
+            .await;
+        assert_eq!(
+            answer.status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{method} {path}: {}",
+            answer.body
+        );
+        assert_eq!(
+            answer.error_code(),
+            Some("request_invalid"),
+            "{method} {path}: {}",
+            answer.body
+        );
+        assert!(
+            answer.body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "{method} {path}: {}",
+            answer.body
+        );
+    }
 }
 
 #[tokio::test]
@@ -144,8 +286,7 @@ async fn a_time_somebody_else_has_taken_is_refused_with_a_code_the_app_can_act_o
     let app = harness_at(morning(), config_with(vec![table(1, 2, "Бар")])).await;
     let first = Caller::new("Вера");
     let second = Caller::new("Марина");
-    app.post(
-        "/api/booking",
+    app.book(
         &first,
         serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
     )
@@ -153,8 +294,7 @@ async fn a_time_somebody_else_has_taken_is_refused_with_a_code_the_app_can_act_o
     .expect_ok();
 
     let refused = app
-        .post(
-            "/api/booking",
+        .book(
             &second,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
         )
@@ -172,8 +312,7 @@ async fn a_time_that_has_gone_is_refused_as_past() {
     .await;
     let guest = Caller::new("Егор");
     let refused = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
         )
@@ -186,8 +325,7 @@ async fn a_party_above_the_cap_is_refused_with_the_cap_in_the_detail() {
     let app = harness().await;
     let guest = Caller::new("Артур");
     let refused = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 9 }),
         )
@@ -201,8 +339,7 @@ async fn a_shift_beyond_the_horizon_is_refused() {
     let app = harness().await;
     let guest = Caller::new("Мила");
     let refused = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-09-01", "start_minutes": 1200, "party_size": 2 }),
         )
@@ -214,21 +351,39 @@ async fn a_shift_beyond_the_horizon_is_refused() {
 async fn a_guest_gives_their_table_back() {
     let app = harness().await;
     let guest = Caller::new("Полина");
-    app.post(
-        "/api/booking",
+    app.book(
         &guest,
         serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
     )
     .await
     .expect_ok();
 
+    let session = app.get("/api/session", &guest).await.expect_ok().clone();
+    let id = session["bookings"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+
     let cancelled = app
-        .send("DELETE", "/api/booking", &guest, serde_json::Value::Null)
+        .send(
+            "DELETE",
+            &format!("/api/bookings/{id}"),
+            &guest,
+            serde_json::Value::Null,
+        )
         .await;
     assert_eq!(cancelled.expect_ok()["status"], "cancelled");
+    assert_eq!(cancelled.expect_ok()["id"], serde_json::json!(id));
     assert_eq!(
-        app.get("/api/session", &guest).await.expect_ok()["booking"],
-        serde_json::Value::Null
+        app.get("/api/session", &guest).await.expect_ok()["bookings"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        app.send("DELETE", "/api/booking", &guest, serde_json::Value::Null)
+            .await
+            .status,
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        "there is no longer a booking without an id to give back"
     );
 }
 
@@ -247,8 +402,7 @@ async fn a_guest_who_has_gone_home_has_nothing_left_to_move_or_cancel() {
     let staff = Caller::manager();
 
     let taken = evening
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({
                 "service_date": "2026-07-30",
@@ -259,63 +413,92 @@ async fn a_guest_who_has_gone_home_has_nothing_left_to_move_or_cancel() {
         .await
         .expect_ok()
         .clone();
-    let id = taken["booking"]["id"].as_str().expect("an identifier").to_owned();
-    let attendance = format!("/api/admin/bookings/{id}/attendance");
+    let id = taken["booking"]["id"]
+        .as_str()
+        .expect("an identifier")
+        .to_owned();
 
     let sitting = evening.at(utc(2026, 7, 30, 18, 0));
-    sitting
-        .send(
-            "PATCH",
-            &attendance,
-            &staff,
-            serde_json::json!({ "attendance": "arrived" }),
-        )
+    sitting.mark(&staff, &id, "arrived").await.expect_ok();
+    let seated = sitting
+        .get("/api/session", &guest)
         .await
-        .expect_ok();
+        .expect_ok()
+        .clone();
     assert_eq!(
-        sitting.get("/api/session", &guest).await.expect_ok()["booking"]["id"],
+        seated["bookings"][0]["id"],
         serde_json::Value::String(id.clone()),
         "a guest at their table still has their booking"
     );
+    assert_eq!(seated["bookings"][0]["started"], true);
+    assert_eq!(
+        seated["bookings"][0]["rebooking_replaces"],
+        serde_json::Value::Null,
+        "booking again never takes the table they are sitting at"
+    );
 
     let gone = evening.at(utc(2026, 7, 30, 19, 30));
-    gone.send(
-        "PATCH",
-        &attendance,
-        &staff,
-        serde_json::json!({ "attendance": "left" }),
-    )
-    .await
-    .expect_ok();
+    gone.mark(&staff, &id, "left").await.expect_ok();
     assert_eq!(
-        gone.get("/api/session", &guest).await.expect_ok()["booking"],
-        serde_json::Value::Null
+        gone.get("/api/session", &guest).await.expect_ok()["bookings"],
+        serde_json::json!([])
+    );
+    let refused = gone
+        .send(
+            "DELETE",
+            &format!("/api/bookings/{id}"),
+            &guest,
+            serde_json::Value::Null,
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        axum::http::StatusCode::CONFLICT,
+        "{}",
+        refused.body
     );
     assert_eq!(
-        gone.send("DELETE", "/api/booking", &guest, serde_json::Value::Null)
-            .await
-            .status,
-        axum::http::StatusCode::NOT_FOUND,
+        refused.error_code(),
+        Some("booking_finished"),
         "an evening that happened is not a booking to give back"
     );
 }
 
 #[tokio::test]
-async fn cancelling_when_there_is_nothing_to_cancel_says_so() {
+async fn cancelling_a_booking_that_is_not_the_guests_to_give_back_says_there_is_none() {
     let app = harness().await;
     let guest = Caller::new("Настя");
-    let answer = app
-        .send("DELETE", "/api/booking", &guest, serde_json::Value::Null)
-        .await;
-    assert_eq!(answer.status, axum::http::StatusCode::NOT_FOUND);
+    let other = Caller::new("Вера");
+    let theirs = app
+        .book(
+            &other,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .booking_id();
+
+    for path in [
+        format!("/api/bookings/{}", uuid::Uuid::new_v4()),
+        format!("/api/bookings/{theirs}"),
+    ] {
+        let answer = app
+            .send("DELETE", &path, &guest, serde_json::Value::Null)
+            .await;
+        assert_eq!(answer.status, axum::http::StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(answer.error_code(), Some("not_found"), "{path}");
+    }
+    assert_eq!(
+        app.get("/api/session", &other).await.expect_ok()["bookings"][0]["status"],
+        "confirmed",
+        "somebody else's booking is untouched"
+    );
 }
 
 #[tokio::test]
 async fn a_guest_changing_their_booking_still_sees_their_own_time_as_free() {
     let app = harness_at(morning(), config_with(vec![table(1, 2, "Бар")])).await;
     let guest = Caller::new("Тимур");
-    app.post(
-        "/api/booking",
+    app.book(
         &guest,
         serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
     )
@@ -340,6 +523,42 @@ async fn a_guest_changing_their_booking_still_sees_their_own_time_as_free() {
         at_eight["state"], "free",
         "a guest must be able to keep their time while changing the party size"
     );
+}
+
+#[tokio::test]
+async fn the_picker_says_what_a_booking_on_that_evening_would_replace_and_whether_it_is_refused() {
+    let app = harness().await;
+    let guest = Caller::new("Тимур");
+    let staff = Caller::manager();
+    let plan = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let picker = |app: &common::Harness, date: &str| {
+        let path = format!("/api/availability?service_date={date}&party_size=2");
+        let guest = guest.clone();
+        let app = app.at(app.now);
+        async move { app.get(&path, &guest).await.expect_ok().clone() }
+    };
+
+    for date in ["2026-07-30", "2026-07-31"] {
+        let offer = picker(&app, date).await;
+        assert_eq!(
+            offer["replacing"],
+            serde_json::json!([plan]),
+            "{date}: {offer}"
+        );
+        assert_eq!(offer["booked"], false, "{date}: {offer}");
+    }
+
+    let seated = app.at(utc(2026, 7, 30, 18, 30));
+    seated.mark(&staff, &plan, "arrived").await.expect_ok();
+    let tonight = picker(&seated, "2026-07-30").await;
+    assert_eq!(tonight["replacing"], serde_json::json!([]), "{tonight}");
+    assert_eq!(tonight["booked"], true, "{tonight}");
+    let tomorrow = picker(&seated, "2026-07-31").await;
+    assert_eq!(tomorrow["replacing"], serde_json::json!([]), "{tomorrow}");
+    assert_eq!(tomorrow["booked"], false, "{tomorrow}");
 }
 
 #[tokio::test]
@@ -370,7 +589,7 @@ async fn a_guest_cannot_reach_the_admin_side() {
     let guest = Caller::new("Прохожий");
     for path in [
         "/api/admin/shift?service_date=2026-07-30",
-        "/api/admin/settings?service_date=2026-07-30",
+        "/api/admin/settings",
     ] {
         let answer = app.get(path, &guest).await;
         assert_eq!(
@@ -389,8 +608,7 @@ async fn a_guest_with_no_username_can_still_book() {
     let guest = Caller::anonymous("Инкогнито");
     let session = app.get("/api/session", &guest).await.expect_ok().clone();
     assert_eq!(session["user"]["username"], serde_json::Value::Null);
-    app.post(
-        "/api/booking",
+    app.book(
         &guest,
         serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
     )
@@ -433,8 +651,7 @@ async fn a_day_the_bar_is_shut_is_not_offered_and_cannot_be_booked() {
     );
 
     let refused = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-07-31", "start_minutes": 1200, "party_size": 2 }),
         )
@@ -495,6 +712,40 @@ async fn an_unknown_api_path_fails_the_way_the_api_fails() {
 }
 
 #[tokio::test]
+async fn a_wrong_method_or_the_bare_api_root_fails_the_way_the_api_fails() {
+    // Old app still sends removed method; `api.ts` says reopen only when refusal has code.
+    use axum::http::StatusCode;
+    let app = harness().await;
+    for (method, path, status, code) in [
+        (
+            "DELETE",
+            "/api/booking",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+        ),
+        (
+            "GET",
+            "/api/admin/blocks",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+        ),
+        ("GET", "/api", StatusCode::NOT_FOUND, "not_found"),
+        ("GET", "/api/", StatusCode::NOT_FOUND, "not_found"),
+        ("GET", "/api/admin", StatusCode::NOT_FOUND, "not_found"),
+        ("GET", "/api/admin/", StatusCode::NOT_FOUND, "not_found"),
+    ] {
+        let answer = app.send_raw(method, path, None, None).await;
+        assert_eq!(answer.status, status, "{method} {path}: {}", answer.body);
+        assert_eq!(
+            answer.error_code(),
+            Some(code),
+            "{method} {path}: {}",
+            answer.body
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_day_rail_is_the_horizon_itself_and_every_chip_says_what_it_holds() {
     // Four days from a Thursday, with the Saturday shut. The rail is four chips long, not three:
     // a day a guest cannot have is a day the rail has to answer, not one it may quietly drop.
@@ -519,6 +770,10 @@ async fn the_day_rail_is_the_horizon_itself_and_every_chip_says_what_it_holds() 
     assert_eq!(days.len(), 4);
     assert_eq!(days[0]["service_date"], "2026-07-30");
     assert_eq!(days[0]["closed"], false);
+    assert_eq!(
+        days[0]["booked"], false,
+        "a guest holding nothing is refused nothing"
+    );
     assert_eq!(days[0]["free_from_minutes"], 600);
     assert_eq!(days[2]["service_date"], "2026-08-01");
     assert_eq!(days[2]["closed"], true);
@@ -558,8 +813,7 @@ async fn a_day_with_nothing_left_says_so_before_it_is_tapped() {
     let guest = Caller::new("Тимур");
     let other = Caller::new("Глеб");
 
-    app.post(
-        "/api/booking",
+    app.book(
         &other,
         serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1080, "party_size": 2 }),
     )
@@ -582,6 +836,62 @@ async fn a_day_with_nothing_left_says_so_before_it_is_tapped() {
     assert!(session["today_free_from_minutes"].is_null());
 }
 
+/// One table, held open to close.
+fn one_table_one_sitting() -> pustol_domain::BarConfig {
+    let mut config = config_with(vec![table(1, 2, "Бар")]);
+    config.horizon_days = 2;
+    config.turn_minutes = 240;
+    config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
+        open_minutes: 1_080,
+        close_minutes: 1_320,
+        closed: false,
+    });
+    config
+}
+
+#[tokio::test]
+async fn a_guest_holding_tonights_only_table_is_not_told_tonight_is_full() {
+    // Rebooking replaces own booking, freeing exactly its time. Sold-out card shown to only guest
+    // who could take table reads as table lost on cancel.
+    let app = harness_at(morning(), one_table_one_sitting()).await;
+    let guest = Caller::new("Тимур");
+    app.book(
+        &guest,
+        serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1080, "party_size": 2 }),
+    )
+    .await
+    .expect_ok();
+
+    let session = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(session["today_free_from_minutes"], 1_080, "{session}");
+    assert!(
+        app.get("/api/session", &Caller::new("Глеб"))
+            .await
+            .expect_ok()["today_free_from_minutes"]
+            .is_null(),
+        "for anybody else the evening is still sold out"
+    );
+}
+
+#[tokio::test]
+async fn the_day_rail_does_not_count_the_guests_own_booking_against_them() {
+    let app = harness_at(morning(), one_table_one_sitting()).await;
+    let guest = Caller::new("Тимур");
+    app.book(
+        &guest,
+        serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1080, "party_size": 2 }),
+    )
+    .await
+    .expect_ok();
+
+    let rail = app
+        .get("/api/days?party_size=2", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(rail["days"][0]["free_from_minutes"], 1_080, "{rail}");
+}
+
 #[tokio::test]
 async fn the_first_screen_says_when_tonight_opens_up() {
     let app = harness().await;
@@ -595,5 +905,928 @@ async fn the_first_screen_says_when_tonight_opens_up() {
     assert_eq!(
         body["bar"]["now_minutes"], 480,
         "eight in the morning, in the bar's own timezone rather than the phone's"
+    );
+}
+
+/// Party of two, expecting to replace exactly `replacing`.
+fn book_replacing(service_date: &str, start_minutes: i32, replacing: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "service_date": service_date, "start_minutes": start_minutes, "party_size": 2,
+        "replacing": replacing
+    })
+}
+
+#[tokio::test]
+async fn a_guest_who_has_gone_home_can_book_again_the_same_night() {
+    let app = harness().await;
+    let guest = Caller::new("Жора");
+    let id = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let later = app.at(utc(2026, 7, 30, 18, 30));
+    let staff = Caller::manager();
+    later.mark(&staff, &id, "arrived").await.expect_ok();
+    later.mark(&staff, &id, "left").await.expect_ok();
+
+    later
+        .book(&guest, book_on("2026-07-30", 1320))
+        .await
+        .expect_ok();
+}
+
+#[tokio::test]
+async fn a_guest_already_at_their_table_is_told_they_have_tonight_rather_than_an_error() {
+    let app = harness().await;
+    let guest = Caller::new("Лёва");
+    let id = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let later = app.at(utc(2026, 7, 30, 18, 30));
+    later
+        .mark(&Caller::manager(), &id, "arrived")
+        .await
+        .expect_ok();
+
+    let answer = later.book(&guest, book_on("2026-07-30", 1320)).await;
+    assert_eq!(answer.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(answer.error_code(), Some("already_booked_tonight"));
+}
+
+#[tokio::test]
+async fn an_evening_nobody_marked_as_over_does_not_stop_the_guest_booking_again() {
+    for marked in [None, Some("arrived")] {
+        let app = harness().await;
+        let guest = Caller::new("Сева");
+        let id = app
+            .book(&guest, book_on("2026-07-30", 1200))
+            .await
+            .booking_id();
+        if let Some(attendance) = marked {
+            app.at(utc(2026, 7, 30, 18, 30))
+                .mark(&Caller::manager(), &id, attendance)
+                .await
+                .expect_ok();
+        }
+
+        // 20:00 to 22:00 Belgrade is over at 22:30, whatever staff pressed.
+        let after = app.at(utc(2026, 7, 30, 20, 30));
+        let session = after.get("/api/session", &guest).await.expect_ok().clone();
+        assert_eq!(
+            session["bookings"],
+            serde_json::json!([]),
+            "{marked:?}: the app shows no booking"
+        );
+        after
+            .book(&guest, book_on("2026-07-30", 1380))
+            .await
+            .expect_ok();
+    }
+}
+
+/// Staff view of fixture Thursday bookings under guest username.
+async fn live_bookings_of(
+    app: &common::Harness,
+    staff: &Caller,
+    guest: &Caller,
+) -> Vec<serde_json::Value> {
+    let shift = app
+        .get("/api/admin/shift?service_date=2026-07-30", staff)
+        .await
+        .expect_ok()
+        .clone();
+    shift["bookings"]
+        .as_array()
+        .expect("bookings")
+        .iter()
+        .filter(|booking| booking["guest_username"] == serde_json::json!(guest.username))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn a_guest_whose_table_is_still_held_through_the_grace_period_books_again_in_its_place() {
+    let app = harness().await;
+    let guest = Caller::new("Рита");
+    let id = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let late = app.at(utc(2026, 7, 30, 18, 5));
+    let staff = Caller::manager();
+    late.mark(&staff, &id, "no_show").await.expect_ok();
+
+    let answer = late
+        .book(&guest, book_replacing("2026-07-30", 1320, &[&id]))
+        .await;
+    assert_eq!(answer.expect_ok()["replaced"], serde_json::json!([id]));
+    let live = live_bookings_of(&late, &staff, &guest).await;
+    assert_eq!(
+        live.len(),
+        1,
+        "one table held for them tonight, not two: {live:?}"
+    );
+    assert_eq!(live[0]["start_minutes"], 1320);
+}
+
+#[tokio::test]
+async fn a_guest_marked_as_not_coming_before_their_time_can_book_a_later_one() {
+    // Called at 19:00 to cancel 20:00. Staff pressed «Не пришли» then; table held until 20:15.
+    let app = harness().await;
+    let guest = Caller::new("Стас");
+    let id = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let phoned = app.at(utc(2026, 7, 30, 17, 0));
+    phoned
+        .mark(&Caller::manager(), &id, "no_show")
+        .await
+        .expect_ok();
+
+    let answer = phoned
+        .book(&guest, book_replacing("2026-07-30", 1320, &[&id]))
+        .await;
+    assert_eq!(answer.expect_ok()["replaced"], serde_json::json!([id]));
+}
+
+#[tokio::test]
+async fn staff_cannot_restore_a_no_show_that_would_give_the_guest_two_tables_tonight() {
+    let app = harness().await;
+    let guest = Caller::new("Нина");
+    let first = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let staff = Caller::manager();
+    let later = app.at(utc(2026, 7, 30, 18, 20));
+    later.mark(&staff, &first, "no_show").await.expect_ok();
+    later
+        .book(&guest, book_on("2026-07-30", 1320))
+        .await
+        .expect_ok();
+
+    let answer = later.mark(&staff, &first, "confirmed").await;
+    assert_eq!(
+        answer.status,
+        axum::http::StatusCode::CONFLICT,
+        "{}",
+        answer.body
+    );
+    assert_eq!(answer.error_code(), Some("already_booked_tonight"));
+}
+
+#[tokio::test]
+async fn a_party_marked_gone_cannot_be_held_again_while_the_guest_has_another_table() {
+    let app = harness().await;
+    let guest = Caller::new("Оля");
+    let first = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let staff = Caller::manager();
+    let early = app.at(utc(2026, 7, 30, 18, 5));
+    early.mark(&staff, &first, "arrived").await.expect_ok();
+    early.mark(&staff, &first, "left").await.expect_ok();
+    early
+        .book(&guest, book_on("2026-07-30", 1320))
+        .await
+        .expect_ok();
+
+    // No-show held until grace ends, 20:15.
+    let answer = early.mark(&staff, &first, "no_show").await;
+    assert_eq!(
+        answer.status,
+        axum::http::StatusCode::CONFLICT,
+        "{}",
+        answer.body
+    );
+    assert_eq!(answer.error_code(), Some("already_booked_tonight"));
+}
+
+#[tokio::test]
+async fn staff_can_correct_an_evening_that_is_over_while_the_guest_sits_at_another_table() {
+    let app = harness().await;
+    let guest = Caller::new("Гена");
+    let first = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let staff = Caller::manager();
+    let later = app.at(utc(2026, 7, 30, 18, 20));
+    later.mark(&staff, &first, "no_show").await.expect_ok();
+    later
+        .book(&guest, book_on("2026-07-30", 1320))
+        .await
+        .expect_ok();
+
+    // They came after all. Recording it holds nothing: booking ended 22:00.
+    app.at(utc(2026, 7, 30, 20, 30))
+        .mark(&staff, &first, "arrived")
+        .await
+        .expect_ok();
+}
+
+/// Thursday 20:00 plan marked not coming at 19:00 by phone, then Friday plan; plus marking staff.
+async fn not_coming_tonight_with_a_plan_for_friday(
+    app: &common::Harness,
+    guest: &Caller,
+) -> (common::Harness, Caller, String) {
+    let tonight = app
+        .book(guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let phoned = app.at(utc(2026, 7, 30, 17, 0));
+    let staff = Caller::manager();
+    phoned.mark(&staff, &tonight, "no_show").await.expect_ok();
+    let friday = phoned
+        .book(guest, book_replacing("2026-07-31", 1200, &[]))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(friday["replaced"], serde_json::json!([]), "{friday}");
+    (phoned, staff, tonight)
+}
+
+#[tokio::test]
+async fn staff_cannot_make_a_no_show_a_plan_again_while_the_guest_holds_another_plan() {
+    let app = harness().await;
+    let guest = Caller::new("Рома");
+    let (phoned, staff, tonight) = not_coming_tonight_with_a_plan_for_friday(&app, &guest).await;
+
+    let answer = phoned.mark(&staff, &tonight, "confirmed").await;
+
+    assert_eq!(
+        answer.status,
+        axum::http::StatusCode::CONFLICT,
+        "{}",
+        answer.body
+    );
+    assert_eq!(answer.error_code(), Some("guest_has_another_plan"));
+    let live = live_bookings_of(&phoned, &staff, &guest).await;
+    assert_eq!(live[0]["status"], "no_show", "nothing changed: {live:?}");
+}
+
+#[tokio::test]
+async fn staff_cannot_move_a_no_show_to_a_new_time_while_the_guest_holds_another_plan() {
+    let app = harness().await;
+    let guest = Caller::new("Рома");
+    let (phoned, staff, tonight) = not_coming_tonight_with_a_plan_for_friday(&app, &guest).await;
+
+    let answer = phoned
+        .move_booking(
+            &staff,
+            &tonight,
+            serde_json::json!({ "start_minutes": 1320 }),
+        )
+        .await;
+
+    assert_eq!(
+        answer.status,
+        axum::http::StatusCode::CONFLICT,
+        "{}",
+        answer.body
+    );
+    assert_eq!(answer.error_code(), Some("guest_has_another_plan"));
+    let live = live_bookings_of(&phoned, &staff, &guest).await;
+    assert_eq!(
+        (live[0]["status"].clone(), live[0]["start_minutes"].clone()),
+        (serde_json::json!("no_show"), serde_json::json!(1200)),
+        "nothing changed: {live:?}"
+    );
+}
+
+#[tokio::test]
+async fn booking_again_without_naming_the_plan_it_would_replace_is_refused_and_nothing_changes() {
+    let app = harness().await;
+    let guest = Caller::new("Дина");
+    let plan = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+
+    let refused = app
+        .book(&guest, book_replacing("2026-07-31", 1200, &[]))
+        .await;
+
+    assert_eq!(
+        refused.status,
+        axum::http::StatusCode::CONFLICT,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refused.error_code(), Some("booking_changed"));
+    let session = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![plan]);
+}
+
+#[tokio::test]
+async fn a_promise_read_before_the_plan_began_is_refused_once_it_has_begun() {
+    // At 19:59 app sees rebooking replaces 20:00 plan, shows «Перенести». Tap at 20:01: plan under
+    // way, nothing replaces it, so Friday booking is not promised move. Tonight refused regardless:
+    // plan under way holds tonight, and refusal says so.
+    let app = harness().await;
+    let guest = Caller::new("Лев");
+    let plan = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let read = app
+        .at(utc(2026, 7, 30, 17, 59))
+        .get("/api/session", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        read["bookings"][0]["rebooking_replaces"], "any_evening",
+        "{read}"
+    );
+
+    let tapped = app.at(utc(2026, 7, 30, 18, 1));
+    for (body, code) in [
+        (
+            book_replacing("2026-07-31", 1200, &[&plan]),
+            "booking_changed",
+        ),
+        (
+            book_replacing("2026-07-30", 1320, &[&plan]),
+            "already_booked_tonight",
+        ),
+    ] {
+        let refused = tapped.book(&guest, body.clone()).await;
+        assert_eq!(
+            refused.status,
+            axum::http::StatusCode::CONFLICT,
+            "{body}: {}",
+            refused.body
+        );
+        assert_eq!(refused.error_code(), Some(code), "{body}");
+    }
+    let session = tapped.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(
+        ids_of(&session["bookings"]),
+        vec![plan],
+        "no second booking"
+    );
+}
+
+#[tokio::test]
+async fn a_booking_that_could_not_be_taken_anyway_says_why_before_its_promise_is_compared() {
+    // Guest holds 20:00 plan, which any own booking replaces. Each request fails whatever it
+    // promises to replace, and says why. As changed-booking refusal, app would reload and retry,
+    // learning reason late or never.
+    let app = harness_at(morning(), config_with(vec![table(1, 2, "Бар")])).await;
+    let guest = Caller::new("Нина");
+    let plan = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    app.book(&Caller::new("Глеб"), book_on("2026-07-30", 1320))
+        .await
+        .expect_ok();
+    let noon = app.at(utc(2026, 7, 30, 10, 0));
+
+    for (what, date, start_minutes, code) in [
+        (
+            "a time the grid does not have",
+            "2026-07-30",
+            1215,
+            "not_an_arrival_time",
+        ),
+        ("a time that has gone", "2026-07-30", 600, "in_the_past"),
+        (
+            "an evening beyond the horizon",
+            "2026-08-05",
+            1200,
+            "shift_not_bookable",
+        ),
+        (
+            "a time somebody else has",
+            "2026-07-30",
+            1320,
+            "no_table_free",
+        ),
+    ] {
+        for promised in [Vec::new(), vec![plan.as_str()]] {
+            let refused = noon
+                .book(&guest, book_replacing(date, start_minutes, &promised))
+                .await;
+            assert_eq!(
+                refused.error_code(),
+                Some(code),
+                "{what}, promising {promised:?}: {}",
+                refused.body
+            );
+        }
+    }
+    let changed = noon
+        .book(&guest, book_replacing("2026-07-31", 1200, &[]))
+        .await;
+    assert_eq!(
+        changed.error_code(),
+        Some("booking_changed"),
+        "{}",
+        changed.body
+    );
+    let session = noon.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(
+        ids_of(&session["bookings"]),
+        vec![plan],
+        "nothing was written"
+    );
+}
+
+#[tokio::test]
+async fn rebooking_another_evening_gives_the_table_left_behind_to_a_party_without_one() {
+    let app = harness_at(
+        morning(),
+        config_with(vec![table(1, 2, "Бар"), table(2, 2, "Бар")]),
+    )
+    .await;
+    let guest = Caller::new("Ира");
+    let thursday = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let staff = Caller::manager();
+    let phoned = app
+        .post(
+            "/api/admin/bookings",
+            &staff,
+            serde_json::json!({
+                "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2,
+                "guest_name": "Пётр"
+            }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    app.post(
+        "/api/admin/blocks",
+        &staff,
+        serde_json::json!({
+            "service_date": "2026-07-30",
+            "table_ids": [phoned["booking"]["table_id"]],
+            "reason": "Сломан"
+        }),
+    )
+    .await
+    .expect_ok();
+
+    app.book(&guest, book_replacing("2026-07-31", 1200, &[&thursday]))
+        .await
+        .expect_ok();
+
+    let shift = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    let peter = shift["bookings"]
+        .as_array()
+        .expect("bookings")
+        .iter()
+        .find(|booking| booking["guest_name"] == "Пётр")
+        .expect("still booked");
+    assert!(
+        !peter["table_id"].is_null(),
+        "the table Ира gave back should seat Пётр: {peter}"
+    );
+}
+
+#[tokio::test]
+async fn the_first_screen_says_how_to_reach_a_person_at_the_bar() {
+    let mut config = config_with(common::default_tables());
+    config.contact = Some("+381 11 123 45 67".to_owned());
+    let app = harness_at(morning(), config).await;
+    let body = app
+        .get("/api/session", &Caller::new("Юля"))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(body["bar"]["contact"]["label"], "+381 11 123 45 67");
+    assert_eq!(body["bar"]["contact"]["url"], "tel:+381111234567");
+}
+
+#[tokio::test]
+async fn a_bar_without_a_contact_says_so_rather_than_inventing_one() {
+    let app = harness().await;
+    let body = app
+        .get("/api/session", &Caller::new("Юля"))
+        .await
+        .expect_ok()
+        .clone();
+    assert!(body["bar"]["contact"].is_null());
+}
+
+fn book_on(service_date: &str, start_minutes: i32) -> serde_json::Value {
+    serde_json::json!({ "service_date": service_date, "start_minutes": start_minutes, "party_size": 2 })
+}
+
+fn ids_of(list: &serde_json::Value) -> Vec<String> {
+    list.as_array()
+        .expect("a list")
+        .iter()
+        .map(|booking| booking["id"].as_str().expect("an id").to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_guest_whose_table_is_held_tonight_books_another_evening_and_tonight_stays_as_it_was() {
+    let app = harness().await;
+    let guest = Caller::new("Стас");
+    let staff = Caller::manager();
+    let tonight = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    // 19:00: called to cancel 20:00; table held until 20:15.
+    let phoned = app.at(utc(2026, 7, 30, 17, 0));
+    phoned.mark(&staff, &tonight, "no_show").await.expect_ok();
+
+    let friday = phoned
+        .book(&guest, book_on("2026-07-31", 1200))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(friday["replaced"], serde_json::json!([]), "{friday}");
+
+    let thursday = live_bookings_of(&phoned, &staff, &guest).await;
+    assert_eq!(thursday.len(), 1);
+    assert_eq!(
+        thursday[0]["status"], "no_show",
+        "Thursday still says who did not come"
+    );
+
+    let session = phoned.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(
+        ids_of(&session["bookings"]),
+        vec![
+            tonight.clone(),
+            friday["booking"]["id"].as_str().expect("an id").to_owned()
+        ]
+    );
+    assert_eq!(session["bookings"][0]["rebooking_replaces"], "same_evening");
+    assert_eq!(session["bookings"][1]["rebooking_replaces"], "any_evening");
+}
+
+#[tokio::test]
+async fn a_no_show_is_offered_a_move_to_tonight_only_while_tonight_has_an_arrival_time_left() {
+    // Ninety-minute sittings: last arrival by hours 00:30. Hourly grid: midnight, so at 00:10
+    // nothing to move to; half-hourly grid: 00:30 still ahead.
+    for (step, offered) in [
+        (60, serde_json::Value::Null),
+        (30, serde_json::json!("same_evening")),
+    ] {
+        let mut config = config_with(common::default_tables());
+        config.turn_minutes = 90;
+        config.slot_step_minutes = step;
+        let app = harness_at(morning(), config).await;
+        let guest = Caller::new("Стас");
+        let id = app
+            .book(&guest, book_on("2026-07-30", 1440))
+            .await
+            .booking_id();
+        app.at(utc(2026, 7, 30, 21, 0))
+            .mark(&Caller::manager(), &id, "no_show")
+            .await
+            .expect_ok();
+
+        let session = app
+            .at(utc(2026, 7, 30, 22, 10))
+            .get("/api/session", &guest)
+            .await
+            .expect_ok()
+            .clone();
+        assert_eq!(
+            ids_of(&session["bookings"]),
+            vec![id],
+            "step {step}: {session}"
+        );
+        assert_eq!(
+            session["bookings"][0]["rebooking_replaces"], offered,
+            "step {step}: {session}"
+        );
+    }
+}
+
+/// Guest seated at tonight's only table, with Friday plan for same table.
+async fn seated_tonight_with_a_plan_for_friday(
+    app: &common::Harness,
+    guest: &Caller,
+) -> (common::Harness, String, String) {
+    let tonight = app
+        .book(guest, book_on("2026-07-30", 1080))
+        .await
+        .booking_id();
+    app.at(utc(2026, 7, 30, 16, 0))
+        .mark(&Caller::manager(), &tonight, "arrived")
+        .await
+        .expect_ok();
+    let seated = app.at(utc(2026, 7, 30, 16, 10));
+    let friday = seated
+        .book(guest, book_on("2026-07-31", 1080))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        friday["replaced"],
+        serde_json::json!([]),
+        "a party at its table is never replaced"
+    );
+    let friday = friday["booking"]["id"].as_str().expect("an id").to_owned();
+    (seated, tonight, friday)
+}
+
+#[tokio::test]
+async fn a_seated_guest_is_refused_tonight_and_told_so_before_they_tap_it() {
+    let app = harness_at(morning(), one_table_one_sitting()).await;
+    let guest = Caller::new("Лёва");
+    let (seated, _, friday) = seated_tonight_with_a_plan_for_friday(&app, &guest).await;
+
+    // App shows tonight would replace Friday plan; tonight still refused, guest sits at its table.
+    let refused = seated
+        .book(&guest, book_replacing("2026-07-30", 1080, &[&friday]))
+        .await;
+    assert_eq!(
+        refused.status,
+        axum::http::StatusCode::CONFLICT,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refused.error_code(), Some("already_booked_tonight"));
+
+    let rail = seated
+        .get("/api/days?party_size=2", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(rail["days"][0]["booked"], true, "{rail}");
+    assert_eq!(rail["days"][1]["booked"], false, "{rail}");
+    assert_eq!(
+        rail["days"][1]["free_from_minutes"], 1080,
+        "their own Friday is what a Friday booking replaces, so it does not fill Friday: {rail}"
+    );
+}
+
+#[tokio::test]
+async fn a_seated_guest_sees_both_bookings_and_friday_sets_their_own_plan_aside() {
+    let app = harness_at(morning(), one_table_one_sitting()).await;
+    let guest = Caller::new("Лёва");
+    let (seated, tonight, friday) = seated_tonight_with_a_plan_for_friday(&app, &guest).await;
+
+    let session = seated.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![tonight, friday]);
+    assert_eq!(session["bookings"][0]["started"], true);
+    assert_eq!(
+        session["bookings"][0]["rebooking_replaces"],
+        serde_json::Value::Null
+    );
+    assert_eq!(session["bookings"][1]["started"], false);
+    assert_eq!(session["bookings"][1]["rebooking_replaces"], "any_evening");
+
+    let state_at_six = |body: &serde_json::Value| {
+        body["slots"]
+            .as_array()
+            .expect("slots")
+            .iter()
+            .find(|slot| slot["start_minutes"] == 1080)
+            .map(|slot| slot["state"].clone())
+    };
+    let theirs = seated
+        .get(
+            "/api/availability?service_date=2026-07-31&party_size=2",
+            &guest,
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        state_at_six(&theirs),
+        Some(serde_json::json!("free")),
+        "{theirs}"
+    );
+    let anybody = seated
+        .get(
+            "/api/availability?service_date=2026-07-31&party_size=2",
+            &Caller::new("Глеб"),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(state_at_six(&anybody), Some(serde_json::json!("taken")));
+}
+
+#[tokio::test]
+async fn a_no_show_on_an_evening_the_manager_took_off_the_horizon_is_offered_nothing_and_holds_nothing()
+ {
+    // Booked Sunday under four-day horizon. Manager lowers to two; staff mark party not coming
+    // early: only Sunday booking replaces it, and Sunday is refused.
+    let app = harness().await;
+    let guest = Caller::new("Стас");
+    let manager = Caller::manager();
+    let id = app
+        .book(&guest, book_on("2026-08-02", 1200))
+        .await
+        .booking_id();
+    let settings_path = "/api/admin/settings";
+    let settings = app.get(settings_path, &manager).await.expect_ok().clone();
+    let mut draft = common::draft_from(&settings);
+    draft["horizon_days"] = serde_json::json!(2);
+    app.send("PUT", settings_path, &manager, draft)
+        .await
+        .expect_ok();
+    app.mark(&manager, &id, "no_show").await.expect_ok();
+
+    let session = app.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![id.clone()], "{session}");
+    assert_eq!(
+        session["bookings"][0]["rebooking_replaces"],
+        serde_json::Value::Null,
+        "{session}"
+    );
+    assert_eq!(session["bookings"][0]["holds_evening"], false, "{session}");
+    let refused = app
+        .book(&guest, book_replacing("2026-08-02", 1200, &[&id]))
+        .await;
+    assert_eq!(
+        refused.error_code(),
+        Some("shift_not_bookable"),
+        "{}",
+        refused.body
+    );
+}
+
+#[tokio::test]
+async fn a_plan_is_not_offered_a_move_once_no_evening_is_left_to_move_it_to() {
+    // 20:20: guest sits at tonight's table, holds Sunday plan. Manager lowers horizon to one day:
+    // tonight only bookable evening, and it is theirs.
+    let app = harness().await;
+    let guest = Caller::new("Лёва");
+    let manager = Caller::manager();
+    let tonight = app
+        .book(&guest, book_on("2026-07-30", 1200))
+        .await
+        .booking_id();
+    let during = app.at(utc(2026, 7, 30, 18, 20));
+    during.mark(&manager, &tonight, "arrived").await.expect_ok();
+    let sunday = during
+        .book(&guest, book_on("2026-08-02", 1200))
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        sunday["booking"]["rebooking_replaces"], "any_evening",
+        "{sunday}"
+    );
+    let sunday = sunday["booking"]["id"].as_str().expect("an id").to_owned();
+
+    let settings_path = "/api/admin/settings";
+    let settings = during
+        .get(settings_path, &manager)
+        .await
+        .expect_ok()
+        .clone();
+    let mut draft = common::draft_from(&settings);
+    draft["horizon_days"] = serde_json::json!(1);
+    during
+        .send("PUT", settings_path, &manager, draft)
+        .await
+        .expect_ok();
+
+    let session = during.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(
+        ids_of(&session["bookings"]),
+        vec![tonight, sunday],
+        "{session}"
+    );
+    assert_eq!(
+        session["bookings"][1]["rebooking_replaces"],
+        serde_json::Value::Null,
+        "{session}"
+    );
+}
+
+#[tokio::test]
+async fn a_no_show_on_an_evening_with_no_arrival_time_left_holds_nothing_and_a_booking_there_replaces_it()
+ {
+    // Ninety-minute sittings, hourly grid, closing 02:00: last arrival midnight. Midnight party
+    // marked not coming; at 00:10 table still held.
+    let mut config = config_with(common::default_tables());
+    config.turn_minutes = 90;
+    config.slot_step_minutes = 60;
+    let app = harness_at(morning(), config).await;
+    let guest = Caller::new("Стас");
+    let id = app
+        .book(&guest, book_on("2026-07-30", 1440))
+        .await
+        .booking_id();
+    app.at(utc(2026, 7, 30, 21, 0))
+        .mark(&Caller::manager(), &id, "no_show")
+        .await
+        .expect_ok();
+    let ten_past = app.at(utc(2026, 7, 30, 22, 10));
+
+    let session = ten_past
+        .get("/api/session", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(ids_of(&session["bookings"]), vec![id.clone()], "{session}");
+    assert_eq!(
+        session["bookings"][0]["rebooking_replaces"],
+        serde_json::Value::Null,
+        "{session}"
+    );
+    assert_eq!(session["bookings"][0]["holds_evening"], false, "{session}");
+    let rail = ten_past
+        .get("/api/days?party_size=2", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(rail["days"][0]["service_date"], "2026-07-30", "{rail}");
+    assert_eq!(rail["days"][0]["booked"], false, "{rail}");
+
+    // Midnight gone, whatever booking names as replaced. Changed-booking refusal would loop: app
+    // reloads, finds nothing, resends, refused again.
+    let naming_it = ten_past
+        .book(&guest, book_replacing("2026-07-30", 1440, &[&id]))
+        .await;
+    assert_eq!(
+        naming_it.error_code(),
+        Some("in_the_past"),
+        "{}",
+        naming_it.body
+    );
+    let five_past = app.at(utc(2026, 7, 30, 22, 5));
+    let not_naming_it = five_past
+        .book(&guest, book_replacing("2026-07-30", 1440, &[]))
+        .await;
+    assert_eq!(
+        not_naming_it.error_code(),
+        Some("in_the_past"),
+        "{}",
+        not_naming_it.body
+    );
+}
+
+#[tokio::test]
+async fn on_the_night_the_clocks_go_forward_tonight_is_saturday_until_its_last_sitting_is_over() {
+    // Saturday 28 March 2026 closes 03:00; at 02:00 clocks jump to 03:00. Last sitting (01:00)
+    // holds table two real hours, to 04:00 wall. Until then tonight is Saturday; after, Sunday, and
+    // booking tonight replaces guest's Sunday 10:00 plan.
+    let mut config = config_with(vec![table(1, 2, "Бар")]);
+    config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
+        open_minutes: 600,
+        close_minutes: 1620,
+        closed: false,
+    });
+    let app = harness_at(utc(2026, 3, 28, 10, 0), config).await;
+    let guest = Caller::new("Тимур");
+    let saturday = app
+        .book(&guest, book_on("2026-03-28", 1500))
+        .await
+        .booking_id();
+    app.at(utc(2026, 3, 29, 0, 0))
+        .mark(&Caller::manager(), &saturday, "arrived")
+        .await
+        .expect_ok();
+    let sunday = app
+        .at(utc(2026, 3, 29, 0, 10))
+        .book(&guest, book_on("2026-03-29", 600))
+        .await
+        .booking_id();
+
+    let half_past_three = app.at(utc(2026, 3, 29, 1, 30));
+    let session = half_past_three
+        .get("/api/session", &guest)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        session["bar"]["today"], "2026-03-28",
+        "the last sitting still holds its table: {session}"
+    );
+    assert_eq!(
+        ids_of(&session["bookings"]),
+        vec![saturday, sunday.clone()],
+        "{session}"
+    );
+
+    let four = app.at(utc(2026, 3, 29, 2, 0));
+    let session = four.get("/api/session", &guest).await.expect_ok().clone();
+    assert_eq!(session["bar"]["today"], "2026-03-29", "{session}");
+    assert_eq!(ids_of(&session["bookings"]), vec![sunday], "{session}");
+    assert_eq!(
+        session["today_free_from_minutes"], 600,
+        "their own Sunday plan is what a booking tonight replaces: {session}"
+    );
+    assert_eq!(
+        four.get("/api/session", &Caller::new("Глеб"))
+            .await
+            .expect_ok()["today_free_from_minutes"],
+        720,
+        "for anybody else the plan holds the table until noon"
     );
 }

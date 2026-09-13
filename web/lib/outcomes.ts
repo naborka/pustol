@@ -1,14 +1,12 @@
 /**
- * What the app says after it has done something, and what the way back is.
+ * What app says after acting, and way back.
  *
- * These were closures inside the page, which meant the two things most worth pinning down — that a
- * report names every booking it moved *and* every one it could not, and that an undo goes back to
- * the status the booking actually had — could not be tested at all.
+ * Outside page so tests pin it: report names every booking moved and every one not placed.
  */
 
 import type { Attendance, Reconciliation, ShiftBooking } from "./api";
 import { time } from "./format";
-import type { StrandedBooking } from "./errors";
+import { invalidReasons, strandedBookings, type ApiFailure, type StrandedBooking } from "./errors";
 
 /** Something the app just did, and — where the act is reversible — the way back. */
 export interface Outcome {
@@ -44,19 +42,6 @@ export function reconciliationReport(
   return parts.join(" ");
 }
 
-/** The status an attendance change goes back to, so undo restores what was there rather than a guess. */
-export function previousAttendance(booking: ShiftBooking): Attendance {
-  switch (booking.status) {
-    case "arrived":
-    case "left":
-      return "arrived";
-    case "cancelled":
-    case "confirmed":
-    case "no_show":
-      return "confirmed";
-  }
-}
-
 /**
  * What to say after seating a party, marking them gone, or marking them absent.
  *
@@ -80,6 +65,20 @@ export function attendanceOutcome(updated: ShiftBooking, attendance: Attendance)
   }
 }
 
+export interface Closure {
+  tableIds: string[];
+  reason: string;
+}
+
+/** Undo for reopening: close each removed closure again with server's reason, not reason phone showed. */
+export function closuresToRestore(reopened: { table_id: string; reason: string }[]): Closure[] {
+  const byReason = new Map<string, string[]>();
+  for (const { table_id: tableId, reason } of reopened) {
+    byReason.set(reason, [...(byReason.get(reason) ?? []), tableId]);
+  }
+  return [...byReason].map(([reason, tableIds]) => ({ tableIds, reason }));
+}
+
 /** The bookings a refused settings save would have stranded, each named with its time. */
 export function strandedLines(stranded: StrandedBooking[]): string[] {
   return stranded.map((booking) =>
@@ -87,4 +86,27 @@ export function strandedLines(stranded: StrandedBooking[]): string[] {
       ? booking.guestName
       : `${booking.guestName} · ${time(booking.startMinutes)}`,
   );
+}
+
+/** Why settings save refused; kept until next edit or save so it can be reread. */
+export interface Refusal {
+  lead: string;
+  reasons: string[];
+}
+
+export function refusalOf(failure: ApiFailure): Refusal | null {
+  switch (failure.code) {
+    case "would_strand_bookings":
+      return {
+        lead: "Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их — тогда настройку можно будет сохранить.",
+        reasons: strandedLines(strandedBookings(failure)),
+      };
+    case "settings_invalid":
+      return {
+        lead: "Сервер не принял эти значения. Исправьте их и сохраните снова.",
+        reasons: invalidReasons(failure),
+      };
+    default:
+      return null;
+  }
 }

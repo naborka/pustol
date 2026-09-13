@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
+use pustol_api::inbox::Inbox;
 use pustol_api::{AppState, Assets, Clock, bind_address, interrupt_signal, router, worker};
 use pustol_db::Store;
 use pustol_telegram::{Bot, BotToken};
@@ -46,19 +47,17 @@ async fn main() -> Result<()> {
         .await
         .context("no bar is configured; seed one before starting the API")?;
 
-    let bot = Bot::new(bot_token.clone(), reqwest::Client::new());
+    let bot = Bot::new(bot_token.clone());
     let state = AppState::new(store.clone(), bot.clone(), bar, bot_token, Clock::System);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let inbox = tokio::spawn(
+        Inbox::new(store.clone(), bot.clone(), bar, Clock::System).run(shutdown_rx.clone()),
+    );
     let outbox = tokio::spawn(worker::run(store, bot, Clock::System, shutdown_rx));
 
-    // Routes win over a fallback, so `/health` and everything under `/api` keep answering as the
-    // API however the app's build is laid out.
     let serving_app = assets.is_some();
-    let app = match assets {
-        Some(assets) => router(state).fallback_service(assets.into_router()),
-        None => router(state),
-    };
+    let app = router(state, assets);
 
     let interrupt = interrupt_signal()?;
     let listener = tokio::net::TcpListener::bind(bind)
@@ -74,9 +73,10 @@ async fn main() -> Result<()> {
         .await
         .context("the server stopped unexpectedly")?;
 
-    // Let the outbox finish the batch it is on rather than dropping a message mid-flight.
+    // Let outbox and inbox finish work in hand, not drop message or tap mid-flight.
     let _ = shutdown_tx.send(true);
     let _ = outbox.await;
+    let _ = inbox.await;
     Ok(())
 }
 

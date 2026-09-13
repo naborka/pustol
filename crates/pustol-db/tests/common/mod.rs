@@ -17,18 +17,22 @@
 
 #![allow(dead_code)]
 
+pub mod database;
+
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use chrono_tz::Tz;
-use pustol_db::ids::{BarId, TelegramUserId};
-use pustol_db::bookings::{Channel, NewBooking};
-use pustol_db::identity::TelegramAccount;
 use pustol_db::Store;
+use pustol_db::bookings::{Channel, NewBooking};
+use pustol_db::identity::{Signature, TelegramAccount};
+use pustol_db::ids::{BarId, TelegramUserId};
 use pustol_domain::config::{BarConfig, DayHours, StaffMember, ValidConfig, WeekSchedule};
 use pustol_domain::draft::{DayHoursDraft, Draft, StaffDraft, TableDraft};
 use pustol_domain::schedule::{BarTable, TableId, Zone};
 use pustol_domain::service_day::{Interval, ServiceDay};
+use pustol_domain::slots::{Slot, slot_list};
+use pustol_domain::{BlockReason, BookingId, GuestName};
 use uuid::Uuid;
 
 pub const BELGRADE: Tz = chrono_tz::Europe::Belgrade;
@@ -41,53 +45,54 @@ pub const DEFAULT_HOURS: DayHours = DayHours {
 };
 
 static NEXT_ACCOUNT: AtomicI64 = AtomicI64::new(1);
-static NEXT_DATABASE: AtomicI64 = AtomicI64::new(1);
 
-fn cluster_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres@127.0.0.1:55432/pustol".to_owned())
+pub struct Offered {
+    pub slots: Vec<Slot>,
 }
 
-/// The same connection string pointed at another database on the same cluster.
-fn pointing_at(url: &str, database: &str) -> String {
-    let (base, query) = url.split_once('?').map_or((url, ""), |(base, query)| (base, query));
-    let stem = base.rsplit_once('/').map_or(base, |(stem, _)| stem);
-    if query.is_empty() {
-        format!("{stem}/{database}")
-    } else {
-        format!("{stem}/{database}?{query}")
+#[allow(async_fn_in_trait)]
+pub trait Availability {
+    async fn availability(
+        &self,
+        bar: BarId,
+        day: ServiceDay,
+        party_size: i32,
+        now: DateTime<Utc>,
+        ignoring: &[BookingId],
+    ) -> pustol_db::Result<Offered>;
+}
+
+impl Availability for Store {
+    async fn availability(
+        &self,
+        bar: BarId,
+        day: ServiceDay,
+        party_size: i32,
+        now: DateTime<Utc>,
+        ignoring: &[BookingId],
+    ) -> pustol_db::Result<Offered> {
+        let room = self.room(bar, day).await?;
+        Ok(Offered {
+            slots: slot_list(&room.query(party_size, now, ignoring)),
+        })
     }
 }
 
+pub fn reason(text: &str) -> BlockReason {
+    BlockReason::new(text).expect("fixture reasons are not blank")
+}
+
 /// A migrated database of this test's own, with a pool belonging to this test's runtime.
-///
-/// Databases are named after the process so a crashed run leaves droppings that
-/// `scripts/pg.sh start` clears, rather than droppings that collide with the next run.
 pub async fn store() -> Store {
-    let cluster = cluster_url();
-    let name = format!(
-        "pustol_t{}_{}",
-        std::process::id(),
-        NEXT_DATABASE.fetch_add(1, Ordering::Relaxed)
-    );
+    database::fresh_store().await
+}
 
-    let maintenance = pointing_at(&cluster, "postgres");
-    let admin = sqlx::PgPool::connect(&maintenance).await.unwrap_or_else(|error| {
-        panic!("no cluster at {maintenance}: {error}\nrun scripts/pg.sh start")
-    });
-    // `create database` takes no bind parameters, so the name has to be interpolated. It is built
-    // here from a process id and a counter and never from anything a caller supplies.
-    sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
-        .execute(&admin)
-        .await
-        .unwrap_or_else(|error| panic!("cannot create {name}: {error}"));
-    admin.close().await;
-
-    let store = Store::connect(&pointing_at(&cluster, &name), 12)
-        .await
-        .expect("the database just created accepts connections");
-    store.migrate().await.expect("migrations apply");
-    store
+/// Zero clock skew, for tests not about clock.
+pub fn signed(at: DateTime<Utc>) -> Signature {
+    Signature {
+        stamped_at: at,
+        clock_skew: TimeDelta::zero(),
+    }
 }
 
 /// A Telegram account number no other test will use.
@@ -170,6 +175,7 @@ pub fn config_with(tables: Vec<BarTable>, staff: &str) -> BarConfig {
             username: staff.to_owned(),
             telegram_user_id: None,
         }],
+        contact: None,
     }
 }
 
@@ -181,7 +187,10 @@ pub fn default_config() -> BarConfig {
 pub async fn bar_with(store: &Store, config: BarConfig) -> (BarId, ValidConfig) {
     let config = ValidConfig::new(config)
         .unwrap_or_else(|errors| panic!("fixture config is illegal: {errors:?}"));
-    let bar = store.create_bar(&config).await.expect("bar is created");
+    let bar = store
+        .create_bar(&config, morning())
+        .await
+        .expect("bar is created");
     (bar, config)
 }
 
@@ -217,9 +226,12 @@ pub fn numbered(tables: &[BarTable], number: i32) -> &BarTable {
         .unwrap_or_else(|| panic!("fixture room has no table {number}"))
 }
 
-/// A proposal that changes nothing, ready to be edited by a test.
-pub fn draft_of(config: &BarConfig) -> Draft {
+/// No-op proposal from current settings, ready to edit.
+pub async fn draft_of(store: &Store, bar: BarId) -> Draft {
+    let settings = store.settings(bar).await.expect("the settings load");
+    let config = &settings.config;
     Draft {
+        version: settings.version,
         name: config.name.clone(),
         address: config.address.clone(),
         timezone: config.timezone.name().to_owned(),
@@ -234,7 +246,7 @@ pub fn draft_of(config: &BarConfig) -> Draft {
         zones: config.zones.iter().map(ToString::to_string).collect(),
         tables: config
             .active_tables()
-            .map(|table| TableDraft::Existing {
+            .map(|table| TableDraft {
                 id: table.id.0,
                 seats: table.seats,
                 zone: table.zone.to_string(),
@@ -255,6 +267,7 @@ pub fn draft_of(config: &BarConfig) -> Draft {
                 username: member.username.clone(),
             })
             .collect(),
+        contact: config.contact.clone().unwrap_or_default(),
     }
 }
 
@@ -274,9 +287,19 @@ pub fn guest_booking(
             user: account.id,
             name: account.first_name.clone(),
             username: account.username.clone(),
+            replacing: Vec::new(),
         },
         reminder: Some(reminder_wording),
     }
+}
+
+/// Guest `request` replacing exactly `ids`, as guest app sends it.
+pub fn replacing(mut request: NewBooking, ids: &[pustol_domain::BookingId]) -> NewBooking {
+    let Channel::Guest { replacing, .. } = &mut request.channel else {
+        panic!("only a guest's booking replaces anything");
+    };
+    *replacing = ids.to_vec();
+    request
 }
 
 /// A booking staff took by telephone or at the door.
@@ -287,7 +310,7 @@ pub fn staff_booking(bar: BarId, name: &str, minutes: i32, party_size: i32) -> N
         start_minutes: minutes,
         party_size,
         channel: Channel::Staff {
-            guest_name: name.to_owned(),
+            guest_name: GuestName::new(name).expect("fixture names are not blank"),
             table: None,
         },
         // Nobody to remind: a booking taken at the door has no account behind it.
@@ -310,17 +333,20 @@ pub fn cancellation_wording(
     record: &pustol_db::records::BookingRecord,
     reason: &str,
 ) -> String {
-    format!("{}: бронь {} отменена — {reason}", config.name, record.guest_name)
+    format!(
+        "{}: бронь {} отменена — {reason}",
+        config.name, record.guest_name
+    )
 }
 
 pub fn move_words() -> pustol_db::bookings::MoveWords {
     pustol_db::bookings::MoveWords {
-        notice: |config, record, moved_to| {
+        notice: |config, was, now| {
             format!(
                 "{}: бронь {} перенесена на {}",
                 config.name,
-                record.guest_name,
-                moved_to.start()
+                was.guest_name,
+                now.booking.window.start()
             )
         },
         reminder: reminder_wording,

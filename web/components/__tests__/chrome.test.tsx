@@ -230,3 +230,15 @@ describe("a full-screen state", () => {
     expect(frame.style.paddingBottom).toBe("34px");
   });
 });
+
+describe("a guest screen with no bar at the bottom", () => {
+  it("still keeps its last card clear of the home indicator", () => {
+    const { container } = render(
+      <AppShell staff={false} tab="client" onTab={noop} insets={{ ...ZERO_INSETS, bottom: 34 }}>
+        главная
+      </AppShell>,
+    );
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.paddingBottom).toBe("34px");
+  });
+});

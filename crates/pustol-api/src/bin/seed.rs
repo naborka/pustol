@@ -15,8 +15,9 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let admin = std::env::var("TELEGRAM_ADMIN_USERNAME")
-        .context("TELEGRAM_ADMIN_USERNAME must be set: without one, nobody can open the admin side")?;
+    let admin = std::env::var("TELEGRAM_ADMIN_USERNAME").context(
+        "TELEGRAM_ADMIN_USERNAME must be set: without one, nobody can open the admin side",
+    )?;
 
     let store = Store::connect(&database_url, 4).await?;
     store.migrate().await?;
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
 
     let config = ValidConfig::new(default_bar(&admin))
         .map_err(|errors| anyhow::anyhow!("the seed configuration is not legal: {errors:?}"))?;
-    let bar = store.create_bar(&config).await?;
+    let bar = store.create_bar(&config, chrono::Utc::now()).await?;
     println!("created bar {bar} with @{admin} as its first admin");
     Ok(())
 }
@@ -93,5 +94,6 @@ fn default_bar(admin: &str) -> BarConfig {
             username: admin.trim().trim_start_matches('@').to_owned(),
             telegram_user_id: None,
         }],
+        contact: None,
     }
 }

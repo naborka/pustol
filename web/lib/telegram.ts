@@ -77,6 +77,9 @@ export interface WebApp {
    * than the room it was given and was part of why its bottom bar ended up under Telegram's chrome.
    */
   requestFullscreen?: () => void;
+  /** Bot API 6.2 and later: Telegram asks before closing while on. */
+  enableClosingConfirmation?: () => void;
+  disableClosingConfirmation?: () => void;
   setHeaderColor?: (color: string) => void;
   setBackgroundColor?: (color: string) => void;
   safeAreaInset?: Insets;
@@ -129,26 +132,32 @@ export const haptics = {
   },
 };
 
+/**
+ * `t.me` link: Telegram inside Telegram, else new tab unless `outside` is `in_place`. Other links,
+ * such as phone, in place, so device hands them to dialer.
+ */
+export function openLink(url: string, outside: "new_tab" | "in_place" = "new_tab"): void {
+  if (typeof window === "undefined") return;
+  const app = webApp();
+  if (url.startsWith("https://t.me/") && app) app.openTelegramLink(url);
+  else if (url.startsWith("https://t.me/") && outside === "new_tab") {
+    window.open(url, "_blank", "noopener");
+  } else window.location.href = url;
+}
+
 /** Opens the bot's own chat, which is how a guest starts one so the bot may write to them. */
 export function openBotChat(botUsername: string, startParam = "reminders"): void {
-  const app = webApp();
-  const url = `https://t.me/${botUsername}?start=${encodeURIComponent(startParam)}`;
-  if (app) {
-    app.openTelegramLink(url);
-  } else if (typeof window !== "undefined") {
-    window.open(url, "_blank", "noopener");
-  }
+  openLink(`https://t.me/${botUsername}?start=${encodeURIComponent(startParam)}`);
 }
 
 /** Opens a chat with a guest, from their username. */
 export function openChatWith(username: string): void {
-  const app = webApp();
-  const url = `https://t.me/${username}`;
-  if (app) {
-    app.openTelegramLink(url);
-  } else if (typeof window !== "undefined") {
-    window.open(url, "_blank", "noopener");
-  }
+  openLink(`https://t.me/${username}`);
+}
+
+/** Server already made link a Telegram account or phone. */
+export function openContact(url: string): void {
+  openLink(url, "in_place");
 }
 
 /** Device safe area plus Telegram's remaining chrome. Both are zero on old clients. */

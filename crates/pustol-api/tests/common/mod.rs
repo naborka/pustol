@@ -6,6 +6,9 @@
 
 #![allow(dead_code)]
 
+#[path = "../../../pustol-db/tests/common/database.rs"]
+mod database;
+
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::Router;
@@ -18,8 +21,8 @@ use pustol_db::Store;
 use pustol_db::ids::BarId;
 use pustol_domain::config::{BarConfig, DayHours, StaffMember, ValidConfig, WeekSchedule};
 use pustol_domain::schedule::{BarTable, TableId, Zone};
-use pustol_telegram::init_data::{BotToken, sign_for_tests};
 use pustol_telegram::Bot;
+use pustol_telegram::init_data::{BotToken, sign_for_tests};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -27,57 +30,15 @@ pub const TOKEN: &str = "123456:AAHfakeTokenForTestsOnly-000000000000000";
 pub const BELGRADE: chrono_tz::Tz = chrono_tz::Europe::Belgrade;
 
 static NEXT_ACCOUNT: AtomicI64 = AtomicI64::new(1);
-static NEXT_DATABASE: AtomicI64 = AtomicI64::new(1);
 
 /// A running app: the router, the state it was built with, and the bar it serves.
 pub struct Harness {
     pub app: Router,
+    pub state: AppState,
     pub bar: BarId,
     pub store: Store,
     pub config: ValidConfig,
     pub now: DateTime<Utc>,
-}
-
-fn cluster_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres@127.0.0.1:55432/pustol".to_owned())
-}
-
-fn pointing_at(url: &str, database: &str) -> String {
-    let (base, query) = url
-        .split_once('?')
-        .map_or((url, ""), |(base, query)| (base, query));
-    let stem = base.rsplit_once('/').map_or(base, |(stem, _)| stem);
-    if query.is_empty() {
-        format!("{stem}/{database}")
-    } else {
-        format!("{stem}/{database}?{query}")
-    }
-}
-
-async fn fresh_store() -> Store {
-    let cluster = cluster_url();
-    let name = format!(
-        "pustol_t{}_api{}",
-        std::process::id(),
-        NEXT_DATABASE.fetch_add(1, Ordering::Relaxed)
-    );
-    let maintenance = pointing_at(&cluster, "postgres");
-    let admin = sqlx::PgPool::connect(&maintenance)
-        .await
-        .unwrap_or_else(|error| panic!("no cluster at {maintenance}: {error}"));
-    // `create database` takes no bind parameters; the name is built here and never supplied.
-    sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
-        .execute(&admin)
-        .await
-        .unwrap_or_else(|error| panic!("cannot create {name}: {error}"));
-    admin.close().await;
-
-    let store = Store::connect(&pointing_at(&cluster, &name), 12)
-        .await
-        .expect("the new database accepts connections");
-    store.migrate().await.expect("migrations apply");
-    store
 }
 
 /// Thursday 30 July 2026 at 06:00 UTC — early morning in Belgrade, before any fixture booking.
@@ -161,23 +122,64 @@ pub fn config_with(tables: Vec<BarTable>) -> BarConfig {
             username: "anna_mgr".to_owned(),
             telegram_user_id: None,
         }],
+        contact: None,
     }
 }
 
+/// Settings payload turned back into draft settings screen would send.
+pub fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "version": settings["version"],
+        "name": settings["name"],
+        "address": settings["address"],
+        "timezone": settings["timezone"],
+        "week": settings["week"],
+        "zones": settings["zones"],
+        "tables": settings["tables"]
+            .as_array()
+            .expect("tables")
+            .iter()
+            .map(|table| serde_json::json!({
+                "id": table["id"],
+                "seats": table["seats"],
+                "zone": table["zone"],
+            }))
+            .collect::<Vec<_>>(),
+        "turn_minutes": settings["turn_minutes"],
+        "slot_step_minutes": settings["slot_step_minutes"],
+        "max_party": settings["max_party"],
+        "horizon_days": settings["horizon_days"],
+        "remind_hours": settings["remind_hours"],
+        "grace_minutes": settings["grace_minutes"],
+        "message_templates": settings["message_templates"],
+        "cancel_reasons": settings["cancel_reasons"],
+        "staff": settings["staff"]
+            .as_array()
+            .expect("staff")
+            .iter()
+            .map(|member| serde_json::json!({ "username": member["username"] }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// Builds an app whose clock is stopped at `now`.
+///
+/// Bar created hour earlier, so manager payload is signed after seat offer beyond clock skew.
 pub async fn harness_at(now: DateTime<Utc>, config: BarConfig) -> Harness {
-    let store = fresh_store().await;
+    let store = database::fresh_store().await;
     let config = ValidConfig::new(config)
         .unwrap_or_else(|errors| panic!("fixture config is illegal: {errors:?}"));
-    let bar = store.create_bar(&config).await.expect("bar created");
+    let bar = store
+        .create_bar(&config, now - chrono::TimeDelta::hours(1))
+        .await
+        .expect("bar created");
     stopped_at(store, bar, config, now)
 }
 
 fn stopped_at(store: Store, bar: BarId, config: ValidConfig, now: DateTime<Utc>) -> Harness {
     // The bot points at an address nothing listens on: no test here exercises delivery, and a stub
     // that silently accepted sends would make a broken outbox look healthy.
-    let bot = Bot::new(BotToken::new(TOKEN), reqwest::Client::new())
-        .with_base_url("http://127.0.0.1:1");
+    let bot = Bot::new(BotToken::new(TOKEN)).with_base_url("http://127.0.0.1:1");
     let state = AppState::new(
         store.clone(),
         bot,
@@ -186,7 +188,8 @@ fn stopped_at(store: Store, bar: BarId, config: ValidConfig, now: DateTime<Utc>)
         Clock::Fixed(now),
     );
     Harness {
-        app: router(state),
+        app: router(state.clone(), None),
+        state,
         bar,
         store,
         config,
@@ -279,6 +282,13 @@ impl Answer {
         );
         &self.body
     }
+
+    pub fn booking_id(&self) -> String {
+        self.expect_ok()["booking"]["id"]
+            .as_str()
+            .expect("an id")
+            .to_owned()
+    }
 }
 
 impl Harness {
@@ -288,6 +298,11 @@ impl Harness {
     /// an hour goes by, they go home — and a clock that cannot move cannot show any of it.
     pub fn at(&self, now: DateTime<Utc>) -> Self {
         stopped_at(self.store.clone(), self.bar, self.config.clone(), now)
+    }
+
+    /// Production router: API plus built app assets.
+    pub fn serving(&self, assets: pustol_api::Assets) -> Router {
+        router(self.state.clone(), Some(assets))
     }
 
     async fn call(&self, request: Request<Body>) -> Answer {
@@ -346,6 +361,72 @@ impl Harness {
 
     pub async fn post(&self, path: &str, caller: &Caller, body: serde_json::Value) -> Answer {
         self.send("POST", path, caller, body).await
+    }
+
+    pub async fn book(&self, guest: &Caller, body: serde_json::Value) -> Answer {
+        self.post("/api/booking", guest, body).await
+    }
+
+    pub async fn mark(&self, staff: &Caller, id: &str, attendance: &str) -> Answer {
+        self.send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/attendance"),
+            staff,
+            serde_json::json!({ "attendance": attendance }),
+        )
+        .await
+    }
+
+    pub async fn move_booking(&self, staff: &Caller, id: &str, to: serde_json::Value) -> Answer {
+        self.send(
+            "PATCH",
+            &format!("/api/admin/bookings/{id}/move"),
+            staff,
+            to,
+        )
+        .await
+    }
+
+    /// Sets `Content-Length`, as browser does.
+    pub async fn send_sized(
+        &self,
+        method: &str,
+        path: &str,
+        caller: &Caller,
+        body: String,
+    ) -> Answer {
+        self.call(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::AUTHORIZATION, caller.credentials(self.now))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_LENGTH, body.len())
+                .body(Body::from(body))
+                .expect("a request"),
+        )
+        .await
+    }
+
+    /// Raw body under given content type, for non-JSON bodies.
+    pub async fn send_text(
+        &self,
+        method: &str,
+        path: &str,
+        caller: &Caller,
+        content_type: &str,
+        body: &str,
+    ) -> Answer {
+        self.call(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::AUTHORIZATION, caller.credentials(self.now))
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(body.to_owned()))
+                .expect("a request"),
+        )
+        .await
     }
 
     /// A call with no credentials at all.

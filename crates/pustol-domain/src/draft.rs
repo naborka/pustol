@@ -1,9 +1,9 @@
 //! A proposed change to the bar's configuration, before identities have been settled.
 //!
 //! The settings screen edits a list of tables in which some rows exist and some have only just
-//! been tapped into being. Letting the client mint identities for the new ones would let it name
-//! a table that already exists somewhere else, so a proposal says only *which existing table* it
-//! refers to and leaves the rest to be resolved here.
+//! been tapped into being. App names every row, new ones too, so save sent twice (answer lost)
+//! adds nothing second time. Here identity resolves to this bar's table, live or retired, or new
+//! table. Another bar's identity refused in storage, which sees every bar.
 //!
 //! Resolution is also where "removed" is turned into "retired". A table the proposal does not
 //! mention keeps its number, its seats and its history, and simply stops being part of the live
@@ -17,18 +17,57 @@ use uuid::Uuid;
 use crate::config::{BarConfig, DayHours, StaffMember, WeekSchedule};
 use crate::schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 
-/// A table in a proposal: one that exists, or one that does not yet.
+/// Table in proposal, under identity app gave it.
+///
+/// One shape for existing and added tables: by time save arrives, earlier attempt may have added it.
+///
+/// Old app shapes still read, since app opened before upgrade keeps sending them: `kind: "existing"`
+/// with id means id alone; `kind: "new"` without id gets server-made id, so old app's save sent twice
+/// still adds two.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TableDraft {
-    /// A table already in the room, possibly resized or moved to another zone.
-    Existing {
-        id: Uuid,
-        seats: i32,
-        zone: String,
-    },
-    /// A table the proposal is adding. Its identity and printed number are assigned here.
-    New { seats: i32, zone: String },
+#[serde(try_from = "TableShape")]
+pub struct TableDraft {
+    pub id: Uuid,
+    pub seats: i32,
+    pub zone: String,
+}
+
+/// Any shape apps send, before settling into [`TableDraft`].
+#[derive(Deserialize)]
+struct TableShape {
+    #[serde(default)]
+    kind: Option<TableKind>,
+    #[serde(default)]
+    id: Option<Uuid>,
+    seats: i32,
+    zone: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TableKind {
+    Existing,
+    New,
+}
+
+impl TryFrom<TableShape> for TableDraft {
+    type Error = &'static str;
+
+    fn try_from(shape: TableShape) -> Result<Self, Self::Error> {
+        let id = match (shape.kind, shape.id) {
+            (None | Some(TableKind::Existing), Some(id)) => id,
+            (Some(TableKind::New), None) => Uuid::new_v4(),
+            (None | Some(TableKind::Existing), None) => {
+                return Err("a table needs an id, or to be marked new");
+            }
+            (Some(TableKind::New), Some(_)) => return Err("a table marked new carries no id"),
+        };
+        Ok(Self {
+            id,
+            seats: shape.seats,
+            zone: shape.zone,
+        })
+    }
 }
 
 /// One weekday's proposed hours.
@@ -51,6 +90,9 @@ pub struct StaffDraft {
 /// projections, so a field added to this struct cannot accidentally appear in a guest's payload.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Draft {
+    /// Settings version proposal was made from. Saving over other version would undo changes in
+    /// between, so refused.
+    pub version: i64,
     pub name: String,
     pub address: String,
     pub timezone: String,
@@ -67,14 +109,15 @@ pub struct Draft {
     pub message_templates: Vec<String>,
     pub cancel_reasons: Vec<String>,
     pub staff: Vec<StaffDraft>,
+    /// Empty: no contact.
+    #[serde(default)]
+    pub contact: String,
 }
 
 /// A proposal that cannot even be understood, as distinct from one that is understood and
 /// illegal — the latter is [`crate::config::ConfigError`].
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 pub enum DraftError {
-    #[error("the proposal refers to table {id}, which this bar does not have")]
-    UnknownTable { id: Uuid },
     #[error("the proposal refers to table {id} twice")]
     RepeatedTable { id: Uuid },
     #[error("{name} is not a timezone this system can compute in")]
@@ -86,18 +129,14 @@ pub enum DraftError {
 impl Draft {
     /// Settles the proposal against the room as it is now.
     ///
-    /// `new_id` supplies identities for added tables. It is injected rather than called directly
-    /// so that nothing in this crate needs a source of randomness, which is what lets the
-    /// resolution be asserted exactly in a test.
-    ///
     /// The result is a [`BarConfig`] — a proposal, not yet in force. Whether it is *legal* is a
     /// separate question, asked by [`crate::config::ValidConfig::new`], so that the two failure
     /// modes stay distinguishable to whoever has to fix them.
-    pub fn resolve(
-        &self,
-        current: &BarConfig,
-        mut new_id: impl FnMut() -> Uuid,
-    ) -> Result<BarConfig, DraftError> {
+    ///
+    /// # Errors
+    ///
+    /// [`DraftError`] on unknown timezone, repeated table or blank zone.
+    pub fn resolve(&self, current: &BarConfig) -> Result<BarConfig, DraftError> {
         let timezone: Tz = self
             .timezone
             .parse()
@@ -105,7 +144,7 @@ impl Draft {
                 name: self.timezone.clone(),
             })?;
 
-        let tables = self.resolve_tables(current, &mut new_id)?;
+        let tables = self.resolve_tables(current)?;
         let zones = self
             .zones
             .iter()
@@ -136,15 +175,16 @@ impl Draft {
                 .map(|text| text.trim().to_owned())
                 .collect(),
             staff: self.resolve_staff(current),
+            contact: Some(self.contact.trim())
+                .filter(|contact| !contact.is_empty())
+                .map(str::to_owned),
         })
     }
 
     /// Settles which tables the room has, and which have left it.
-    fn resolve_tables(
-        &self,
-        current: &BarConfig,
-        new_id: &mut impl FnMut() -> Uuid,
-    ) -> Result<Vec<BarTable>, DraftError> {
+    ///
+    /// Known table, live or retired, keeps its number. Any other identity added as is.
+    fn resolve_tables(&self, current: &BarConfig) -> Result<Vec<BarTable>, DraftError> {
         let mut tables = Vec::with_capacity(self.tables.len());
         let mut mentioned = Vec::new();
         // Numbers are drawn against every table the bar has ever had, the retired ones included, so
@@ -152,35 +192,28 @@ impl Draft {
         // which would rebuild and clone the whole room once for every table added.
         let mut next_number = next_table_number(&current.tables);
         for proposed in &self.tables {
-            match proposed {
-                TableDraft::Existing { id, seats, zone } => {
-                    if mentioned.contains(id) {
-                        return Err(DraftError::RepeatedTable { id: *id });
-                    }
-                    let existing = current
-                        .tables
-                        .iter()
-                        .find(|table| table.id == TableId(*id))
-                        .ok_or(DraftError::UnknownTable { id: *id })?;
-                    mentioned.push(*id);
-                    tables.push(BarTable {
-                        seats: *seats,
-                        zone: Zone::new(zone.clone())?,
-                        retired: false,
-                        ..existing.clone()
-                    });
-                }
-                TableDraft::New { seats, zone } => {
-                    tables.push(BarTable {
-                        id: TableId(new_id()),
-                        number: next_number,
-                        seats: *seats,
-                        zone: Zone::new(zone.clone())?,
-                        retired: false,
-                    });
-                    next_number += 1;
-                }
+            if mentioned.contains(&proposed.id) {
+                return Err(DraftError::RepeatedTable { id: proposed.id });
             }
+            mentioned.push(proposed.id);
+            let number = if let Some(existing) = current
+                .tables
+                .iter()
+                .find(|table| table.id == TableId(proposed.id))
+            {
+                existing.number
+            } else {
+                let added = next_number;
+                next_number += 1;
+                added
+            };
+            tables.push(BarTable {
+                id: TableId(proposed.id),
+                number,
+                seats: proposed.seats,
+                zone: Zone::new(proposed.zone.clone())?,
+                retired: false,
+            });
         }
 
         // Whatever the proposal leaves out is retired, not deleted: bookings that already

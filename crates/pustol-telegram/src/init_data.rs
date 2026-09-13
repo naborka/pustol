@@ -19,7 +19,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-type HmacSha256 = Hmac<Sha256>;
+pub(crate) type HmacSha256 = Hmac<Sha256>;
 
 /// The constant Telegram derives the signing key with.
 const KEY_SALT: &[u8] = b"WebAppData";
@@ -33,8 +33,14 @@ const HASH_FIELD: &str = "hash";
 /// here — that check exists for parties who do *not* hold the bot token, and we do.
 const SIGNATURE_FIELD: &str = "signature";
 
+/// Allowed drift between Telegram clock (`auth_date`) and this server, either way.
+///
+/// Payload slightly "in future" is drift, not forgery. Check that payload was signed after some
+/// server moment must compare against `auth_date` minus this.
+pub const CLOCK_SKEW: TimeDelta = TimeDelta::minutes(1);
+
 /// A Telegram account, as Telegram describes it.
-#[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
 pub struct TelegramUser {
     pub id: i64,
     pub first_name: String,
@@ -82,6 +88,8 @@ pub enum VerifyError {
     },
     #[error("the payload was signed in the future, which no clock skew explains")]
     SignedInTheFuture,
+    #[error("the session has ended")]
+    SessionEnded,
 }
 
 /// The bot's token, kept in a type that will not print itself.
@@ -97,15 +105,22 @@ pub struct BotToken {
     /// carries Telegram's newer signature field. Deriving it at construction keeps the verifier's
     /// per-request work to the one HMAC that actually depends on the payload.
     signing_key: [u8; 32],
+    /// `HMAC-SHA256("PustolSession", token)`. Own salt: session and Telegram signature never
+    /// pass for each other.
+    pub(crate) session_key: [u8; 32],
 }
 
 impl BotToken {
     pub fn new(token: impl Into<String>) -> Self {
         let token = token.into();
-        let mut derive = HmacSha256::new_from_slice(KEY_SALT).expect("hmac accepts any key length");
-        derive.update(token.as_bytes());
+        let derive = |salt: &[u8]| -> [u8; 32] {
+            let mut mac = HmacSha256::new_from_slice(salt).expect("hmac accepts any key length");
+            mac.update(token.as_bytes());
+            mac.finalize().into_bytes().into()
+        };
         Self {
-            signing_key: derive.finalize().into_bytes().into(),
+            signing_key: derive(KEY_SALT),
+            session_key: derive(b"PustolSession"),
             token,
         }
     }
@@ -113,6 +128,14 @@ impl BotToken {
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.token
+    }
+
+    /// Token part before colon; survives token reissue. `None` when token not in Telegram shape.
+    #[must_use]
+    pub fn bot_id(&self) -> Option<i64> {
+        self.token
+            .split_once(':')
+            .and_then(|(id, _)| id.parse().ok())
     }
 }
 
@@ -165,7 +188,7 @@ pub fn verify(
         .ok_or_else(|| VerifyError::MalformedAuthDate(auth_date.clone()))?;
 
     let age = now - auth_date;
-    if age < TimeDelta::zero() {
+    if age < -CLOCK_SKEW {
         return Err(VerifyError::SignedInTheFuture);
     }
     if age > max_age {
@@ -219,10 +242,13 @@ fn hmac_matches(data: &str, token: &BotToken, expected_hex: &str) -> bool {
 /// malformed escape — would reject every genuine payload, and one that differed the other way
 /// would accept forged ones.
 fn form_urlencoded_pairs(input: &str) -> impl Iterator<Item = (String, String)> + '_ {
-    input.split('&').filter(|pair| !pair.is_empty()).map(|pair| {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (percent_decode(key), percent_decode(value))
-    })
+    input
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
 }
 
 fn percent_decode(input: &str) -> String {

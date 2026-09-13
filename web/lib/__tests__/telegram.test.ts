@@ -9,6 +9,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   bootstrapTelegram,
   combinedInsets,
+  openBotChat,
+  openChatWith,
+  openContact,
+  openLink,
   ZERO_INSETS,
   type Insets,
   type WebApp,
@@ -145,5 +149,44 @@ describe("bootstrapTelegram", () => {
       insets: ZERO_INSETS,
       stableHeight: 420,
     });
+  });
+});
+
+describe("opening a link", () => {
+  it("opens a Telegram link inside Telegram rather than in a browser", () => {
+    const app = fakeWebApp();
+    window.Telegram = { WebApp: app };
+    try {
+      openContact("https://t.me/podval_bar");
+      openChatWith("sasha");
+      openBotChat("pustol_bot");
+      expect(vi.mocked(app.openTelegramLink).mock.calls).toEqual([
+        ["https://t.me/podval_bar"],
+        ["https://t.me/sasha"],
+        ["https://t.me/pustol_bot?start=reminders"],
+      ]);
+    } finally {
+      delete window.Telegram;
+    }
+  });
+
+  it("opens a Telegram link in a new tab outside Telegram", () => {
+    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
+    try {
+      openLink("https://t.me/sasha");
+      expect(opened).toHaveBeenCalledWith("https://t.me/sasha", "_blank", "noopener");
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it("opens the bar's contact in place outside Telegram, as its phone link would", () => {
+    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
+    try {
+      openContact("https://t.me/podval_bar");
+      expect(opened).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
   });
 });

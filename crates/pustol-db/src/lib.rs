@@ -16,8 +16,10 @@
 pub mod bar;
 pub mod bookings;
 pub mod error;
+pub mod evening;
 pub mod identity;
 pub mod ids;
+pub mod inbox;
 pub mod notifications;
 pub mod records;
 
@@ -42,6 +44,10 @@ pub struct Store {
 impl Store {
     /// Opens a pool. `max_connections` is a deployment decision, so it is asked for rather than
     /// guessed at.
+    ///
+    /// # Errors
+    ///
+    /// Database unreachable or refuses connection.
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
@@ -61,9 +67,21 @@ impl Store {
     }
 
     /// Brings the database up to date.
+    ///
+    /// # Errors
+    ///
+    /// Migration fails or database failure.
     pub async fn migrate(&self) -> Result<()> {
         MIGRATOR.run(&self.pool).await?;
         Ok(())
+    }
+
+    /// Read-only repeatable-read transaction: every read in it sees one moment.
+    pub(crate) async fn snapshot(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        Ok(self
+            .pool
+            .begin_with("begin isolation level repeatable read read only")
+            .await?)
     }
 }
 

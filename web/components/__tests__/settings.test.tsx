@@ -4,23 +4,33 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SECTIONS, SaveBar, SettingsScreen, sectionValue } from "../Settings";
+import { SECTIONS, SaveBar, SettingsScreen, sectionValue, type Section } from "../Settings";
 import { draftOf, type SettingsDraft } from "@/lib/api";
-import { firstReason } from "@/lib/settingsRules";
-import { LIMITS, noop, settingsView } from "./fixtures";
+import { edited, firstReason } from "@/lib/settingsRules";
+import { LIMITS, noop, settingsView, shift, shiftBooking } from "./fixtures";
 
 afterEach(cleanup);
 
-function open(overrides: Partial<Parameters<typeof SettingsScreen>[0]> = {}) {
+type ScreenProps = Parameters<typeof SettingsScreen>[0];
+
+/** Stands in for page, which holds open section. */
+function Settings(props: Omit<ScreenProps, "section" | "onSection">) {
+  const [section, setSection] = useState<Section | null>(null);
+  return <SettingsScreen {...props} section={section} onSection={setSection} />;
+}
+
+function open(overrides: Partial<Omit<ScreenProps, "section" | "onSection">> = {}) {
   const view = settingsView();
   return render(
-    <SettingsScreen
+    <Settings
       settings={view}
       draft={draftOf(view)}
+      room={null}
       editedWeekday={5}
-      onDraft={noop}
+      onEdit={noop}
       onEditWeekday={noop}
       {...overrides}
     />,
@@ -38,7 +48,7 @@ describe("the index", () => {
     expect(
       screen.getByText("4 и 4 — персонал выбирает только из них"),
     ).toBeDefined();
-    expect(screen.getByText("@nastya · @pavel · @marina")).toBeDefined();
+    expect(screen.getByText("@marina · @nastya · @pavel")).toBeDefined();
   });
 
   it("says a day off is a day off", () => {
@@ -66,12 +76,13 @@ describe("the index", () => {
     const view = settingsView();
     let current: SettingsDraft = draftOf(view);
     const draw = () => (
-      <SettingsScreen
+      <Settings
         settings={view}
+        room={null}
         draft={current}
         editedWeekday={5}
-        onDraft={(next) => {
-          current = next;
+        onEdit={(change) => {
+          current = edited(current, change);
           rerender(draw());
         }}
         onEditWeekday={noop}
@@ -89,6 +100,89 @@ describe("the index", () => {
     expect(screen.getByText("Новый · ул. Рубинштейна, 24")).toBeDefined();
   });
 
+  it("adds a message as an empty field to fill in, not as words nobody chose", async () => {
+    // Placeholder must never become message text: «Новое сообщение» could reach guest.
+    const view = settingsView();
+    let current: SettingsDraft = draftOf(view);
+    const draw = () => (
+      <Settings
+        settings={view}
+        room={null}
+        draft={current}
+        editedWeekday={5}
+        onEdit={(change) => {
+          current = edited(current, change);
+          rerender(draw());
+        }}
+        onEditWeekday={noop}
+      />
+    );
+    const { rerender } = render(draw());
+
+    await userEvent.click(screen.getByText("Сообщения и причины отмены"));
+    await userEvent.click(screen.getByText("+ Сообщение"));
+    expect(current.message_templates.at(-1)).toBe("");
+    expect(screen.queryByDisplayValue("Новое сообщение")).toBeNull();
+    expect(firstReason(current, LIMITS)).toBe("Пустое сообщение отправить нельзя.");
+  });
+
+  it("counts a table's bookings from the evening on screen, and none until that evening is read", async () => {
+    const view = settingsView({
+      tables: [{ id: "t1", number: 7, seats: 2, zone: "Стойка" }],
+      max_party: 2,
+    });
+    const evening = shift({
+      bookings: [
+        shiftBooking({ id: "a" }),
+        shiftBooking({ id: "b" }),
+        shiftBooking({ id: "c" }),
+        shiftBooking({ id: "d", table_id: "t2", table_number: 8 }),
+        shiftBooking({ id: "e", table_id: null, table_number: null }),
+      ],
+    });
+    const { rerender } = open({ settings: view, draft: draftOf(view), room: evening });
+    await userEvent.click(screen.getByText("Зал"));
+    expect(screen.getByText("3 брони")).toBeDefined();
+
+    rerender(
+      <Settings
+        settings={view}
+        draft={draftOf(view)}
+        room={null}
+        editedWeekday={5}
+        onEdit={noop}
+        onEditWeekday={noop}
+      />,
+    );
+    expect(screen.getByText("Стол 7")).toBeDefined();
+    expect(screen.queryByText("3 брони")).toBeNull();
+  });
+
+  it("names a table it adds before saving, so a second save of it is the same table", async () => {
+    const view = settingsView();
+    let current: SettingsDraft = draftOf(view);
+    const draw = () => (
+      <Settings
+        settings={view}
+        room={null}
+        draft={current}
+        editedWeekday={5}
+        onEdit={(change) => {
+          current = edited(current, change);
+          rerender(draw());
+        }}
+        onEditWeekday={noop}
+      />
+    );
+    const { rerender } = render(draw());
+
+    await userEvent.click(screen.getByText("Зал"));
+    await userEvent.click(screen.getByText("+ Добавить стол"));
+    const added = current.tables.at(-1);
+    expect(added?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(added).toMatchObject({ seats: 4, zone: "Зал" });
+  });
+
   it("reaches every section it advertises", async () => {
     for (const item of SECTIONS) {
       const { unmount } = open();
@@ -96,6 +190,47 @@ describe("the index", () => {
       expect(screen.getByRole("button", { name: "Назад" }), item.id).toBeDefined();
       unmount();
     }
+  });
+});
+
+describe("a list at its bound", () => {
+  const disabled = (label: string) =>
+    (screen.getByText(label).closest("button") as HTMLButtonElement).disabled;
+
+  async function visit(section: string, check: () => Promise<void> | void) {
+    await userEvent.click(screen.getByText(section));
+    await check();
+    await userEvent.click(screen.getByRole("button", { name: "Назад" }));
+  }
+
+  it("will not add one more, and adds freely below it", async () => {
+    // Fixture: two tables, four messages, four reasons, three staff.
+    const full = { ...LIMITS, lists: { zones: 3, tables: 2, message_templates: 4, cancel_reasons: 4, staff: 3 } };
+    for (const [limits, blocked] of [
+      [full, true],
+      [LIMITS, false],
+    ] as const) {
+      const view = settingsView({ limits });
+      const { unmount } = open({ settings: view, draft: draftOf(view) });
+      await visit("Зал", () => expect(disabled("+ Добавить стол")).toBe(blocked));
+      await visit("Сообщения и причины отмены", () => {
+        expect(disabled("+ Сообщение")).toBe(blocked);
+        expect(disabled("+ Причина")).toBe(blocked);
+      });
+      await visit("Персонал", async () => {
+        await userEvent.type(screen.getByPlaceholderText("@username"), "@aaron_bar");
+        expect(disabled("Добавить")).toBe(blocked);
+      });
+      unmount();
+    }
+  });
+});
+
+describe("the reason a list cannot be saved", () => {
+  it("names the list and its bound", () => {
+    const draft = draftOf(settingsView());
+    draft.cancel_reasons = Array.from({ length: LIMITS.lists.cancel_reasons + 1 }, (_, index) => `Причина ${index}`);
+    expect(firstReason(draft, LIMITS)).toBe("Причин отмены больше 20 быть не может.");
   });
 });
 
@@ -109,6 +244,7 @@ describe("the save bar", () => {
         saving={false}
         onSave={onSave}
         onRevert={onRevert}
+        onWhy={null}
       />,
     );
     expect(
@@ -126,7 +262,19 @@ describe("the save bar", () => {
 
   it("saves once the proposal is legal", async () => {
     const onSave = vi.fn();
-    render(<SaveBar reason={null} saving={false} onSave={onSave} onRevert={noop} />);
+    render(<SaveBar reason={null} saving={false} onSave={onSave} onRevert={noop} onWhy={null} />);
+    await userEvent.click(screen.getByText("Сохранить"));
+    expect(onSave).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Не сохранено.")).toBeNull();
+  });
+
+  it("keeps a refused save's reasons one tap away, and lets it be saved again", async () => {
+    const onWhy = vi.fn();
+    const onSave = vi.fn();
+    render(<SaveBar reason={null} saving={false} onSave={onSave} onRevert={noop} onWhy={onWhy} />);
+    expect(screen.getByText("Не сохранено.")).toBeDefined();
+    await userEvent.click(screen.getByText("Почему"));
+    expect(onWhy).toHaveBeenCalledOnce();
     await userEvent.click(screen.getByText("Сохранить"));
     expect(onSave).toHaveBeenCalledOnce();
   });

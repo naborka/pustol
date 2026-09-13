@@ -16,12 +16,14 @@
 
 import { useState, type ReactNode } from "react";
 
-import type { Limits, SettingsDraft, SettingsView, TableDraft } from "@/lib/api";
+import type { Limits, SettingsDraft, SettingsView, ShiftView } from "@/lib/api";
 import * as fmt from "@/lib/format";
+import { uuid } from "@/lib/ids";
+import { moveTableTo, removeStaff, removeTable, resizeTable } from "@/lib/settingsEdits";
 import {
-  copyDraft,
   largestTable,
   lastArrivalMinutes,
+  roomFor,
   shortestShiftMinutes,
   wouldBeLegal,
   type Edit,
@@ -62,6 +64,8 @@ type Ask = (change: Edit) => boolean;
 interface Context {
   draft: SettingsDraft;
   settings: SettingsView;
+  /** Evening booking count per table id; null until read. */
+  bookingsByTable: ReadonlyMap<string, number> | null;
   limits: Limits;
   editedWeekday: number;
   onEditWeekday: (weekday: number) => void;
@@ -73,7 +77,7 @@ interface Context {
 export function sectionValue(section: Section, draft: SettingsDraft, weekday: number): string {
   switch (section) {
     case "bar":
-      return `${draft.name} · ${draft.address}`;
+      return [draft.name, draft.address, draft.contact.trim()].filter(Boolean).join(" · ");
     case "room":
       return `${fmt.tables(draft.tables.length)} · ${draft.zones.join(", ")}`;
     case "hours": {
@@ -91,36 +95,51 @@ export function sectionValue(section: Section, draft: SettingsDraft, weekday: nu
   }
 }
 
+function bookingsByTableOf(room: ShiftView): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const booking of room.bookings) {
+    if (booking.table_id !== null) {
+      counts.set(booking.table_id, (counts.get(booking.table_id) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
 export function SettingsScreen({
   settings,
   draft,
+  room,
   editedWeekday,
-  onDraft,
+  onEdit,
   onEditWeekday,
+  section,
+  onSection,
 }: {
   settings: SettingsView;
   draft: SettingsDraft;
+  /** Shown evening, source of per-table counts; null until read. */
+  room: ShiftView | null;
   editedWeekday: number;
-  onDraft: (next: SettingsDraft) => void;
+  onEdit: (change: Edit) => void;
   onEditWeekday: (weekday: number) => void;
+  /**
+   * Open section, or index. Page holds it so shift detour returns to section and Telegram back button
+   * can close it.
+   */
+  section: Section | null;
+  onSection: (section: Section | null) => void;
 }) {
-  const [section, setSection] = useState<Section | null>(null);
   const limits = settings.limits;
 
-  // One notion of "an edit", built here and handed to every section: a change is described once and
-  // then both asked about and made, rather than written out twice in two shapes.
-  const edit: Apply = (change) => {
-    const next = copyDraft(draft);
-    change(next);
-    onDraft(next);
-  };
+  // One edit shape for every section: change described once, then both asked about and applied.
   const context: Context = {
     draft,
     settings,
+    bookingsByTable: room === null ? null : bookingsByTableOf(room),
     limits,
     editedWeekday,
     onEditWeekday,
-    edit,
+    edit: onEdit,
     allowed: (change) => wouldBeLegal(draft, change, limits),
   };
 
@@ -137,7 +156,7 @@ export function SettingsScreen({
         {SECTIONS.map((item) => (
           <Pressable
             key={item.id}
-            onClick={() => setSection(item.id)}
+            onClick={() => onSection(item.id)}
             tone="card"
             style={{
               minHeight: 62,
@@ -193,7 +212,7 @@ export function SettingsScreen({
     >
       <Pressable
         ariaLabel="Назад"
-        onClick={() => setSection(null)}
+        onClick={() => onSection(null)}
         style={{
           alignSelf: "flex-start",
           fontSize: TEXT.base,
@@ -237,6 +256,19 @@ function sectionBody(section: Section, ctx: Context): ReactNode {
               })
             }
           />
+          <TextField
+            value={ctx.draft.contact}
+            placeholder="Телефон или @ник для гостей"
+            onChange={(value) =>
+              ctx.edit((next) => {
+                next.contact = value;
+              })
+            }
+          />
+          <Note>
+            Контакт видят гости, чья компания больше предела, и бот называет его в ответ на сообщения.
+            Пусто — значит некуда.
+          </Note>
           <Note>
             Часовой пояс — {ctx.draft.timezone}. Все времена в приложении показаны по нему.
           </Note>
@@ -255,6 +287,7 @@ function sectionBody(section: Section, ctx: Context): ReactNode {
             title="Сообщения гостю"
             addLabel="+ Сообщение"
             items={ctx.draft.message_templates}
+            canAdd={roomFor(ctx.draft, ctx.limits, "message_templates", 1)}
             placeholder="Новое сообщение"
             onChange={(items) =>
               ctx.edit((next) => {
@@ -266,6 +299,7 @@ function sectionBody(section: Section, ctx: Context): ReactNode {
             title="Причины отмены"
             addLabel="+ Причина"
             items={ctx.draft.cancel_reasons}
+            canAdd={roomFor(ctx.draft, ctx.limits, "cancel_reasons", 1)}
             placeholder="Новая причина"
             onChange={(items) =>
               ctx.edit((next) => {
@@ -419,7 +453,7 @@ function HoursSection({ ctx }: { ctx: Context }) {
 }
 
 function RoomSection({ ctx }: { ctx: Context }) {
-  const { draft, settings, limits, edit, allowed } = ctx;
+  const { draft, settings, bookingsByTable, limits, edit, allowed } = ctx;
   const totalSeats = draft.tables.reduce((total, table) => total + table.seats, 0);
   const largest = largestTable(draft);
   /** The number a row that has only just been tapped into being will be given. */
@@ -431,31 +465,21 @@ function RoomSection({ ctx }: { ctx: Context }) {
         {fmt.tables(draft.tables.length)} · {fmt.seats(totalSeats)} · самый большой на {largest}
       </Note>
 
-      {draft.tables.map((table, index) => {
-        const existing =
-          table.kind === "existing"
-            ? settings.tables.find((stored) => stored.id === table.id)
-            : undefined;
+      {draft.tables.map((table) => {
+        const existing = settings.tables.find((stored) => stored.id === table.id);
         const number = existing?.number ?? provisional++;
-        const bookingsToday = existing?.bookings_today ?? 0;
+        const bookingsToday = bookingsByTable?.get(table.id) ?? 0;
         const zoneIndex = draft.zones.indexOf(table.zone);
         const nextZone =
           draft.zones[(zoneIndex + 1) % Math.max(1, draft.zones.length)] ?? table.zone;
 
-        const resize =
-          (delta: number): Edit =>
-          (next) => {
-            const target = next.tables[index];
-            if (target) target.seats += delta;
-          };
-        const remove: Edit = (next) => {
-          next.tables.splice(index, 1);
-        };
+        const resize = (delta: number) => resizeTable(table.id, delta);
+        const remove = removeTable(table.id);
         const canRemove = allowed(remove);
 
         return (
           <div
-            key={table.kind === "existing" ? table.id : `new-${index}`}
+            key={table.id}
             style={{
               display: "flex",
               alignItems: "center",
@@ -467,12 +491,7 @@ function RoomSection({ ctx }: { ctx: Context }) {
           >
             <Pressable
               ariaLabel={`Стол ${number}: сменить зону`}
-              onClick={() =>
-                edit((next) => {
-                  const target = next.tables[index];
-                  if (target) target.zone = nextZone;
-                })
-              }
+              onClick={() => edit(moveTableTo(table.id, nextZone))}
               style={{
                 flex: 1,
                 minWidth: 0,
@@ -549,13 +568,15 @@ function RoomSection({ ctx }: { ctx: Context }) {
 
       <CardAction
         label="+ Добавить стол"
-        onClick={() =>
+        disabled={!roomFor(draft, limits, "tables", 1)}
+        onClick={() => {
+          // Id outside edit: edit made during save replays on top of stored save and must add same
+          // table.
+          const id = uuid();
           edit((next) => {
-            const zone = next.zones[0] ?? "Зал";
-            const added: TableDraft = { kind: "new", seats: 4, zone };
-            next.tables.push(added);
-          })
-        }
+            next.tables.push({ id, seats: 4, zone: next.zones[0] ?? "Зал" });
+          });
+        }}
       />
 
       <Note>
@@ -661,12 +682,14 @@ function ListSection({
   title,
   addLabel,
   items,
+  canAdd,
   placeholder,
   onChange,
 }: {
   title: string;
   addLabel: string;
   items: string[];
+  canAdd: boolean;
   placeholder: string;
   onChange: (items: string[]) => void;
 }) {
@@ -677,6 +700,7 @@ function ListSection({
         <div key={index} style={{ display: "flex", alignItems: "center", gap: SPACE[1] + 2 }}>
           <TextField
             value={text}
+            placeholder={placeholder}
             ariaLabel={`${title}: ${index + 1}`}
             onChange={(value) => {
               const next = [...items];
@@ -702,9 +726,19 @@ function ListSection({
           </Pressable>
         </div>
       ))}
-      <CardAction label={addLabel} onClick={() => onChange([...items, placeholder])} />
+      <CardAction label={addLabel} disabled={!canAdd} onClick={() => onChange([...items, ""])} />
     </section>
   );
+}
+
+/**
+ * Username plus occurrence among same-spelled rows: roster may hold duplicate until save refuses, and
+ * index alone would hand removed row's focus to next member.
+ */
+function staffRowKey(staff: { username: string }[], index: number): string {
+  const username = staff[index]?.username ?? "";
+  const before = staff.slice(0, index).filter((other) => other.username === username).length;
+  return `${username}#${before}`;
 }
 
 function StaffSection({ ctx }: { ctx: Context }) {
@@ -713,7 +747,7 @@ function StaffSection({ ctx }: { ctx: Context }) {
     <section style={{ display: "flex", flexDirection: "column", gap: SPACE[2] + 2 }}>
       {draft.staff.map((member, index) => (
         <div
-          key={member.username}
+          key={staffRowKey(draft.staff, index)}
           style={{
             display: "flex",
             alignItems: "center",
@@ -729,11 +763,7 @@ function StaffSection({ ctx }: { ctx: Context }) {
           <Pressable
             ariaLabel={`Убрать @${member.username}`}
             disabled={draft.staff.length <= 1}
-            onClick={() =>
-              edit((next) => {
-                next.staff.splice(index, 1);
-              })
-            }
+            onClick={() => edit(removeStaff(member.username))}
             style={{
               width: TAP,
               minHeight: 48,
@@ -748,6 +778,7 @@ function StaffSection({ ctx }: { ctx: Context }) {
         </div>
       ))}
       <AddStaff
+        canAdd={roomFor(draft, ctx.limits, "staff", 1)}
         onAdd={(username) =>
           edit((next) => {
             next.staff.push({ username });
@@ -762,11 +793,18 @@ function StaffSection({ ctx }: { ctx: Context }) {
   );
 }
 
-function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
+function AddStaff({
+  canAdd,
+  onAdd,
+}: {
+  canAdd: boolean;
+  onAdd: (username: string) => void;
+}) {
   // Half-typed text is kept here rather than in the proposal: a username being spelled out is not
   // yet a change to the roster, and the Save button must not light up because somebody pressed a key.
   const [pending, setPending] = useState("");
   const cleaned = pending.trim().replace(/^@/, "");
+  const ready = canAdd && cleaned.length > 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: SPACE[1] + 2 }}>
       <TextField
@@ -776,7 +814,7 @@ function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
         style={{ flex: 1, minWidth: 0 }}
       />
       <Pressable
-        disabled={cleaned.length === 0}
+        disabled={!ready}
         onClick={() => {
           onAdd(cleaned);
           setPending("");
@@ -785,8 +823,8 @@ function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
           padding: `0 ${SPACE[4] + 2}px`,
           minHeight: TAP,
           borderRadius: RADIUS.md,
-          background: cleaned.length > 0 ? "var(--btn)" : "var(--chip)",
-          color: cleaned.length > 0 ? "var(--btn-text)" : "var(--hint)",
+          background: ready ? "var(--btn)" : "var(--chip)",
+          color: ready ? "var(--btn-text)" : "var(--hint)",
           fontSize: TEXT.base,
           fontWeight: 600,
           justifyContent: "center",
@@ -803,22 +841,49 @@ function AddStaff({ onAdd }: { onAdd: (username: string) => void }) {
  *
  * Only then: a save button that is always there and usually inert teaches people to ignore it. When
  * the draft is illegal the button is inert and the line beside it names the first reason, so the
- * refusal arrives before the request rather than after it.
+ * refusal arrives before the request rather than after it. Server refusal stays here until next edit
+ * or save, reasons one tap away, whatever sheet came and went.
  */
 export function SaveBar({
   reason,
   saving,
   onSave,
   onRevert,
+  onWhy,
 }: {
   reason: string | null;
   saving: boolean;
   onSave: () => void;
   onRevert: () => void;
+  /** Opens last save refusal; null when none. */
+  onWhy: (() => void) | null;
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
       {reason ? <Note tone="dest">Так сохранить нельзя. {reason}</Note> : null}
+      {onWhy ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: SPACE[2],
+          }}
+        >
+          <Note tone="dest">Не сохранено.</Note>
+          <Pressable
+            onClick={onWhy}
+            style={{
+              fontSize: TEXT.base,
+              fontWeight: 600,
+              color: "var(--link)",
+              padding: `0 ${SPACE[1]}px`,
+            }}
+          >
+            Почему
+          </Pressable>
+        </div>
+      ) : null}
       <div style={{ display: "flex", gap: SPACE[2] }}>
         <Pressable
           onClick={onRevert}

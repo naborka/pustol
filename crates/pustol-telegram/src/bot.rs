@@ -4,11 +4,14 @@
 //! no way to ask whether a chat exists, so the outcome of a send is the only evidence there is —
 //! which is why the failures here are classified by whether retrying could ever help.
 
+use std::time::Duration;
+
 use serde::Serialize;
 
 use crate::init_data::BotToken;
+use crate::updates::Update;
 
-/// Where an outgoing message failed, and whether trying again could help.
+/// Telegram call failure, classed by whether retry can help.
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     /// The guest has blocked the bot, deleted their account, or never started a chat. No number of
@@ -21,9 +24,8 @@ pub enum SendError {
     /// Something transient: a network blip, a 5xx.
     #[error("telegram could not be reached: {0}")]
     Transient(String),
-    /// A request Telegram refused on its merits — a malformed message, a bad token. Retrying sends
-    /// the same broken request again, so it is terminal, but it is a bug rather than a fact about
-    /// the guest.
+    /// Telegram refused request itself: malformed message, bad token, other process polling bot.
+    /// Retry resends same request, so terminal. Bug or deploy fault, not fact about guest.
     #[error("telegram refused the request: {description}")]
     Refused { description: String },
 }
@@ -55,16 +57,33 @@ pub struct Bot {
     client: reqwest::Client,
     token: BotToken,
     base_url: String,
+    timeout: Duration,
 }
 
+/// Unbounded, one proxy connection that never answers stalls outbox and shutdown waiting on it.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl Bot {
-    /// Builds a client against Telegram.
-    pub fn new(token: BotToken, client: reqwest::Client) -> Self {
+    /// Builds own HTTP client so no caller can skip timeouts.
+    pub fn new(token: BotToken) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .expect("a client with only a connect timeout always builds");
         Self {
             client,
             token,
             base_url: "https://api.telegram.org".to_owned(),
+            timeout: REQUEST_TIMEOUT,
         }
+    }
+
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Points the client at another host, so the send path can be tested end to end against a stub
@@ -73,6 +92,12 @@ impl Bot {
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
+    }
+
+    /// Bot account id, parsed from token.
+    #[must_use]
+    pub fn id(&self) -> Option<i64> {
+        self.token.bot_id()
     }
 
     /// Sends a message, optionally with buttons under it.
@@ -95,22 +120,79 @@ impl Bot {
                 "inline_keyboard": [buttons],
             });
         }
+        self.call("sendMessage", &body, self.timeout)
+            .await
+            .map(drop)
+    }
 
+    /// Long-polls up to `wait`. `offset` past last handled id confirms those to Telegram.
+    ///
+    /// # Errors
+    ///
+    /// [`SendError`] when Telegram is unreachable, refuses, rate limits, or sends unreadable body.
+    pub async fn get_updates(
+        &self,
+        offset: Option<i64>,
+        wait: Duration,
+    ) -> Result<Vec<Update>, SendError> {
+        let body = serde_json::json!({
+            "offset": offset,
+            "timeout": wait.as_secs(),
+            "allowed_updates": ["message", "callback_query"],
+        });
+        let response = self.call("getUpdates", &body, wait + self.timeout).await?;
+        let reply: Reply = response.json().await.map_err(transient)?;
+        Ok(reply.result)
+    }
+
+    /// Telegram shows tap as pending until answered.
+    ///
+    /// # Errors
+    ///
+    /// [`SendError`] when Telegram is unreachable, refuses, or rate limits.
+    pub async fn answer_callback_query(&self, query_id: &str, text: &str) -> Result<(), SendError> {
+        let body = serde_json::json!({ "callback_query_id": query_id, "text": text });
+        self.call("answerCallbackQuery", &body, self.timeout)
+            .await
+            .map(drop)
+    }
+
+    /// # Errors
+    ///
+    /// [`SendError`] when Telegram is unreachable, refuses, or rate limits.
+    pub async fn remove_buttons(&self, chat_id: i64, message_id: i64) -> Result<(), SendError> {
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": { "inline_keyboard": [] },
+        });
+        self.call("editMessageReplyMarkup", &body, self.timeout)
+            .await
+            .map(drop)
+    }
+
+    async fn call(
+        &self,
+        method: &str,
+        body: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, SendError> {
         let response = self
             .client
             .post(format!(
-                "{}/bot{}/sendMessage",
+                "{}/bot{}/{method}",
                 self.base_url,
                 self.token.expose()
             ))
-            .json(&body)
+            .json(body)
+            .timeout(timeout)
             .send()
             .await
-            .map_err(|error| SendError::Transient(error.to_string()))?;
+            .map_err(transient)?;
 
         let status = response.status();
         if status.is_success() {
-            return Ok(());
+            return Ok(response);
         }
 
         let payload: ApiError = response.json().await.unwrap_or_else(|_| ApiError {
@@ -119,6 +201,17 @@ impl Bot {
         });
         Err(classify(status, &payload))
     }
+}
+
+/// Drops URL: it carries token, and this text is stored in outbox.
+fn transient(error: reqwest::Error) -> SendError {
+    SendError::Transient(error.without_url().to_string())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Reply {
+    #[serde(default)]
+    result: Vec<Update>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -262,6 +355,18 @@ mod tests {
         assert!(
             !failure.means_unreachable(),
             "a broken request must not mark a reachable guest unreachable"
+        );
+        assert!(matches!(failure, SendError::Refused { .. }));
+    }
+
+    #[test]
+    fn another_process_polling_the_same_bot_is_a_refusal_not_a_blip() {
+        let failure = classify(
+            reqwest::StatusCode::CONFLICT,
+            &error(
+                "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
+                None,
+            ),
         );
         assert!(matches!(failure, SendError::Refused { .. }));
     }

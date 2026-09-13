@@ -8,7 +8,9 @@ use uuid::Uuid;
 ///
 /// Bookings reference this, never the printed number, so renumbering or retiring a table can
 /// never make an existing booking point at a different piece of furniture.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct TableId(pub Uuid);
 
@@ -20,7 +22,9 @@ impl fmt::Display for TableId {
 
 /// A named part of the room that can be opened or closed as a unit — the terrace when it
 /// rains, the back room for a private party.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct Zone(String);
 

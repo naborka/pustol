@@ -161,6 +161,15 @@ export function contrastRatio(foreground: string, background: string): number | 
 /** The smallest contrast this app will ship: WCAG AA for ordinary text. */
 export const MIN_CONTRAST = 4.5;
 
+/** First candidate readable on every ground. Non-hex colour taken on trust: no evidence unreadable. */
+function readableOn(candidates: (string | undefined)[], grounds: string[]): string | undefined {
+  return candidates.find(
+    (color) =>
+      color !== undefined &&
+      grounds.every((ground) => (contrastRatio(color, ground) ?? MIN_CONTRAST) >= MIN_CONTRAST),
+  );
+}
+
 /** `#rrggbb` or `#rgb` as an `rgba(...)` with the alpha applied, or null if it is neither. */
 export function withAlpha(color: string, alpha: number): string | null {
   const parts = channels(color);
@@ -187,12 +196,16 @@ export function paletteFrom(
   const washAlpha = WASH_ALPHA[scheme];
   const sec = theme.secondary_bg_color ?? theme.section_bg_color ?? base.sec;
   const btn = theme.button_color ?? base.btn;
+  const bg = theme.bg_color ?? base.bg;
+  const txt = theme.text_color ?? base.txt;
 
   return {
-    bg: theme.bg_color ?? base.bg,
+    bg,
     sec,
-    txt: theme.text_color ?? base.txt,
-    hint: theme.hint_color ?? base.hint,
+    txt,
+    // User hint colour if readable, else nearest readable. Telegram default dark hint is under 4.5:1
+    // on its own card colour, and half of small text uses it.
+    hint: readableOn([theme.hint_color, base.hint, txt], [bg, sec]) ?? base.hint,
     btn,
     buttonText: theme.button_text_color ?? base.buttonText,
     link: theme.link_color ?? base.link,

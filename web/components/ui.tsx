@@ -12,9 +12,10 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
+import { canRetry, readFailureText, type ApiFailure, type Audience } from "@/lib/errors";
 import { guests as guestsLabel, time as clockLabel } from "@/lib/format";
 import { haptics } from "@/lib/telegram";
-import { RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
+import { LAYER, RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
 import { useViewport } from "./ThemeProvider";
 
 // ---- the one interactive primitive -------------------------------------------------------------
@@ -36,6 +37,7 @@ export function Pressable({
   style,
   ariaLabel,
   ariaPressed,
+  ariaSelected,
   ariaCurrent,
   role,
   haptic = "tap",
@@ -48,6 +50,7 @@ export function Pressable({
   style?: CSSProperties;
   ariaLabel?: string;
   ariaPressed?: boolean;
+  ariaSelected?: boolean;
   ariaCurrent?: boolean;
   role?: string;
   haptic?: "tap" | "none";
@@ -64,6 +67,7 @@ export function Pressable({
       }}
       {...(ariaLabel === undefined ? {} : { "aria-label": ariaLabel })}
       {...(ariaPressed === undefined ? {} : { "aria-pressed": ariaPressed })}
+      {...(ariaSelected === undefined ? {} : { "aria-selected": ariaSelected })}
       {...(ariaCurrent === undefined ? {} : { "aria-current": ariaCurrent })}
       {...(role === undefined ? {} : { role })}
       {...(title === undefined ? {} : { title })}
@@ -303,6 +307,7 @@ export function SlotGrid({
   height = TAP,
   fontSize = TEXT.lg,
   gap = SPACE[2],
+  stale = false,
 }: {
   slots: { start_minutes: number; state: "free" | "taken" | "past" }[];
   chosen: number | null;
@@ -311,22 +316,40 @@ export function SlotGrid({
   height?: number;
   fontSize?: number;
   gap?: number;
+  /**
+   * Times answer question before last change; new answer pending. Kept so page does not jump,
+   * untappable so nobody books old question.
+   */
+  stale?: boolean;
 }) {
   const offered = slots.filter((slot) => slot.state !== "past");
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap }}>
+    <div
+      aria-busy={stale}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(4, 1fr)",
+        gap,
+        opacity: stale ? 0.55 : 1,
+      }}
+    >
       {offered.map((slot) => {
         const taken = slot.state === "taken";
+        const label = clockLabel(slot.start_minutes);
         return (
           <Chip
             key={slot.start_minutes}
-            label={clockLabel(slot.start_minutes)}
+            label={label}
+            // Strike-through invisible to screen reader, so name says it.
+            {...(taken ? { ariaLabel: `${label}, занято` } : {})}
             height={height}
             fontSize={fontSize}
             state={
               slot.start_minutes === chosen ? "chosen" : taken ? "unavailable" : "available"
             }
-            onClick={taken ? onTaken : () => onPick(slot.start_minutes)}
+            {...(stale
+              ? {}
+              : { onClick: taken ? onTaken : () => onPick(slot.start_minutes) })}
           />
         );
       })}
@@ -367,7 +390,7 @@ export function Segmented<T extends string | number>({
           <Pressable
             key={String(option.value)}
             role="tab"
-            ariaPressed={chosen}
+            ariaSelected={chosen}
             onClick={() => onChange(option.value)}
             style={{
               flex: 1,
@@ -681,10 +704,14 @@ export function Sheet({
 }) {
   const panel = useRef<HTMLDivElement>(null);
 
-  // Once, on opening. Kept apart from the key listener, which has to track the current `onClose`
-  // — sharing an effect meant every keystroke stole the focus and shut the phone keyboard.
+  // Once on open. Separate from key listener, which tracks current `onClose`: shared effect steals
+  // focus each keystroke and shuts phone keyboard. On close focus returns to opener, so keyboard or
+  // screen reader user not left at page top.
   useEffect(() => {
-    if (open) panel.current?.focus();
+    if (!open) return undefined;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    panel.current?.focus();
+    return () => opener?.focus();
   }, [open]);
 
   useEffect(() => {
@@ -736,7 +763,7 @@ export function Sheet({
           // darkness. Deriving it from the palette would make it white in a light scheme, which
           // is a fog rather than a dim.
           background: "rgba(0,0,0,.5)",
-          zIndex: 10,
+          zIndex: LAYER.backdrop,
           animation: "fadeIn .16s ease both",
         }}
       />
@@ -751,7 +778,7 @@ export function Sheet({
           left: 0,
           right: 0,
           bottom: 0,
-          zIndex: 11,
+          zIndex: LAYER.sheet,
           background: "var(--bg)",
           borderRadius: `${RADIUS.lg}px ${RADIUS.lg}px 0 0`,
           padding: `${SPACE[2]}px ${SPACE[4]}px calc(${SPACE[5]}px + var(--inset-bottom, 0px))`,
@@ -761,17 +788,46 @@ export function Sheet({
           animation: "sheetUp .24s cubic-bezier(.2,.8,.3,1) both",
         }}
       >
+        {/*
+          The grab handle and a close button share one row. The backdrop closes the sheet for a
+          finger but is hidden from assistive technology, so without a button there was no way out.
+        */}
         <div
-          aria-hidden
           style={{
             flex: "none",
-            width: 36,
-            height: 4,
-            borderRadius: RADIUS.pill,
-            background: "var(--sep)",
-            margin: `0 auto ${SPACE[3]}px`,
+            position: "relative",
+            display: "flex",
+            justifyContent: "flex-end",
+            margin: `-${SPACE[1]}px -${SPACE[2]}px 0`,
           }}
-        />
+        >
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: SPACE[2],
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: 36,
+              height: 4,
+              borderRadius: RADIUS.pill,
+              background: "var(--sep)",
+            }}
+          />
+          <Pressable
+            ariaLabel="Закрыть"
+            onClick={onClose}
+            style={{
+              width: TAP,
+              minHeight: TAP,
+              justifyContent: "center",
+              color: "var(--hint)",
+              fontSize: TEXT.xl,
+            }}
+          >
+            ×
+          </Pressable>
+        </div>
         <div
           style={{
             flex: "1 1 auto",
@@ -856,7 +912,8 @@ export function Toast({ message }: { message: ToastMessage | null }) {
         left: SPACE[3],
         right: SPACE[3],
         bottom: SPACE[2],
-        zIndex: 9,
+        // Above sheet backdrop and panel, so failure reported from inside sheet stays visible.
+        zIndex: LAYER.toast,
         background: "var(--txt)",
         borderRadius: RADIUS.md,
         padding: `${SPACE[3]}px ${SPACE[3]}px ${SPACE[3]}px ${SPACE[4]}px`,
@@ -943,6 +1000,98 @@ export function Empty({ title, detail }: { title: string; detail?: string }) {
       <span style={{ fontSize: TEXT.lg, fontWeight: 600, color: "var(--txt)" }}>{title}</span>
       {detail ? <Note>{detail}</Note> : null}
     </div>
+  );
+}
+
+/**
+ * Reread of shown data failed. Said where data is shown, never as toast: toast for read nobody watches
+ * tells nobody.
+ */
+export function StaleNotice({
+  failure,
+  audience,
+  onRetry,
+}: {
+  failure: ApiFailure;
+  audience: Audience;
+  onRetry: () => void;
+}) {
+  return (
+    <Card gap={SPACE[2]}>
+      <ReadFailed
+        failure={failure}
+        audience={audience}
+        generic="Не удалось обновить — показано прежнее."
+        retryLabel="Повторить"
+        onRetry={onRetry}
+      />
+    </Card>
+  );
+}
+
+/** Read failed: why, plus retry where retry can help. */
+export function ReadFailed({
+  failure,
+  audience,
+  generic,
+  retryLabel = "Попробовать снова",
+  onRetry,
+}: {
+  failure: ApiFailure;
+  audience: Audience;
+  /** Text while retry may help. */
+  generic: string;
+  retryLabel?: string;
+  onRetry: () => void;
+}) {
+  return (
+    <>
+      <Note tone="warn">{readFailureText(failure, audience, generic)}</Note>
+      {canRetry(failure) ? <CardAction label={retryLabel} onClick={onRetry} /> : null}
+    </>
+  );
+}
+
+/**
+ * Read state: spinner until answer, failure while none, then answer with notice when reread failed.
+ */
+export function ReadView<T>({
+  value,
+  failure,
+  audience,
+  generic,
+  loading,
+  onRetry,
+  padding,
+  children,
+}: {
+  value: T | null;
+  failure: ApiFailure | null;
+  audience: Audience;
+  /** Failure text with nothing shown, while retry may help. */
+  generic: string;
+  /** Spinner text. */
+  loading: string;
+  onRetry: () => void;
+  /** Wraps failure and notice, for answer that sets own padding. */
+  padding?: string;
+  children: (value: T) => ReactNode;
+}) {
+  const framed = (node: ReactNode) =>
+    padding === undefined ? node : <div style={{ padding }}>{node}</div>;
+  if (value === null) {
+    if (failure === null) return <Spinner label={loading} />;
+    return framed(
+      <Card gap={SPACE[2]}>
+        <ReadFailed failure={failure} audience={audience} generic={generic} onRetry={onRetry} />
+      </Card>,
+    );
+  }
+  return (
+    <>
+      {failure ? framed(<StaleNotice failure={failure} audience={audience} onRetry={onRetry} />) : null}
+      {children(value)}
+    </>
   );
 }
 

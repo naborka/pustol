@@ -3,9 +3,9 @@
  */
 
 import type {
-  Availability,
   BarView,
   DayOffer,
+  GuestAvailability,
   GuestBooking,
   Limits,
   Session,
@@ -13,6 +13,7 @@ import type {
   ShiftBooking,
   ShiftTable,
   ShiftView,
+  StaffAvailability,
 } from "@/lib/api";
 
 export const bar: BarView = {
@@ -28,8 +29,12 @@ export const bar: BarView = {
   today_hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
   last_arrival_minutes: 1_440,
   now_minutes: 1_280,
+  opens_at_minutes: null,
+  open_now: true,
+  contact: null,
 };
 
+/** Tonight 21:30, not begun; booking on any evening replaces it. */
 export const booking: GuestBooking = {
   id: "b1",
   service_date: "2026-09-11",
@@ -37,15 +42,42 @@ export const booking: GuestBooking = {
   end_minutes: 1_410,
   party_size: 4,
   status: "confirmed",
+  started: false,
+  rebooking_replaces: "any_evening",
+  holds_evening: false,
+};
+
+/** Same guest seated tonight: never replaced, holds tonight. */
+export const seated: GuestBooking = {
+  ...booking,
+  id: "b0",
+  start_minutes: 1_260,
+  end_minutes: 1_380,
+  status: "arrived",
+  started: true,
+  rebooking_replaces: null,
+  holds_evening: true,
+};
+
+/** No-show, table still held tonight: only booking tonight replaces it. */
+export const heldNoShow: GuestBooking = {
+  ...booking,
+  id: "b9",
+  start_minutes: 1_260,
+  end_minutes: 1_380,
+  status: "no_show",
+  started: true,
+  rebooking_replaces: "same_evening",
 };
 
 export function session(overrides: Partial<Session> = {}): Session {
   return {
+    session_token: "claims.signature",
     user: { id: 999, first_name: "Алексей", username: "alexey" },
     is_staff: false,
     reminders: { opted_in: false, deliverable: true, should_ask: true },
     bar,
-    booking: null,
+    bookings: [],
     bookable_days: ["2026-09-11", "2026-09-12"],
     today_free_from_minutes: 1_290,
     today_free_for_party: 2,
@@ -58,6 +90,7 @@ export function dayOffer(overrides: Partial<DayOffer> = {}): DayOffer {
     service_date: "2026-09-11",
     closed: false,
     free_from_minutes: 1_290,
+    booked: false,
     ...overrides,
   };
 }
@@ -67,23 +100,31 @@ export function rail(length: number): DayOffer[] {
   const days: DayOffer[] = [];
   for (let offset = 0; offset < length; offset += 1) {
     const date = new Date(Date.UTC(2026, 8, 11 + offset)).toISOString().slice(0, 10);
-    days.push({ service_date: date, closed: false, free_from_minutes: 1_290 });
+    days.push(dayOffer({ service_date: date }));
   }
   return days;
 }
 
-export function availability(overrides: Partial<Availability> = {}): Availability {
+/** Guest: nothing held to replace or refuse. Staff: every table free at each untaken time, moved booking set aside. */
+export function availability(
+  overrides: Partial<GuestAvailability & StaffAvailability> = {},
+): GuestAvailability & StaffAvailability {
+  const everyTable = ["t1", "t2", "t3"];
   return {
     service_date: "2026-09-11",
     party_size: 2,
     turn_minutes: 120,
     slots: [
-      { start_minutes: 1_080, state: "past", evening: true },
-      { start_minutes: 1_290, state: "free", evening: true },
-      { start_minutes: 1_320, state: "taken", evening: true },
-      { start_minutes: 1_350, state: "free", evening: true },
+      { start_minutes: 1_080, state: "past", evening: true, free_table_ids: everyTable },
+      { start_minutes: 1_260, state: "past", evening: true, free_table_ids: everyTable },
+      { start_minutes: 1_290, state: "free", evening: true, free_table_ids: everyTable },
+      { start_minutes: 1_320, state: "taken", evening: true, free_table_ids: [] },
+      { start_minutes: 1_350, state: "free", evening: true, free_table_ids: everyTable },
     ],
     free_count: 2,
+    kept_free_table_ids: null,
+    replacing: [],
+    booked: false,
     ...overrides,
   };
 }
@@ -104,6 +145,8 @@ export function shiftBooking(overrides: Partial<ShiftBooking> = {}): ShiftBookin
     source: "app",
     note: null,
     reachable_by_bot: true,
+    started: false,
+    finished: false,
     ...overrides,
   };
 }
@@ -115,6 +158,8 @@ export function shiftTable(overrides: Partial<ShiftTable> = {}): ShiftTable {
 export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
   return {
     service_date: "2026-09-11",
+    today: "2026-09-11",
+    version: 1,
     hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
     tables: [
       shiftTable(),
@@ -122,8 +167,11 @@ export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
       shiftTable({ id: "t3", number: 10, seats: 8, zone: "Зал" }),
     ],
     bookings: [shiftBooking()],
-    stats: { bookings: 1, guests: 2, free_now: 2 },
+    stats: { bookings: 1, guests: 2, free_now: 2, seated_now: 2 },
     now_minutes: 1_280,
+    walk_in_until_minutes: 1_400,
+    // Table 7 held by Саша until 23:00.
+    walk_in_free_table_ids: ["t2", "t3"],
     largest_party_seatable_now: 8,
     days: [
       { service_date: "2026-09-11", closed: false, bookings: 1 },
@@ -147,6 +195,8 @@ export const LIMITS: Limits = {
   grace_minutes: { min: 5, max: 60 },
   seats: { min: 1, max: 12 },
   slot_step_minutes: [15, 30, 60],
+  text: { name: 100, address: 200, message: 1_000, reason: 200 },
+  lists: { zones: 12, tables: 60, message_templates: 20, cancel_reasons: 20, staff: 30 },
 };
 
 export function settingsView(overrides: Partial<SettingsView> = {}): SettingsView {
@@ -161,8 +211,8 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     })),
     zones: ["Зал", "Стойка", "Веранда"],
     tables: [
-      { id: "t1", number: 7, seats: 2, zone: "Стойка", bookings_today: 0 },
-      { id: "t2", number: 8, seats: 6, zone: "Зал", bookings_today: 0 },
+      { id: "t1", number: 7, seats: 2, zone: "Стойка" },
+      { id: "t2", number: 8, seats: 6, zone: "Зал" },
     ],
     turn_minutes: 120,
     slot_step_minutes: 30,
@@ -172,13 +222,16 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     grace_minutes: 15,
     message_templates: ["Ваш стол готов", "Опаздываете?", "Мы рядом", "Ждём вас"],
     cancel_reasons: ["Дождь", "Авария", "Частное мероприятие", "Технические проблемы"],
+    // Server order: by username, whatever case typed.
     staff: [
+      { username: "marina", bound: false },
       { username: "nastya", bound: true },
       { username: "pavel", bound: false },
-      { username: "marina", bound: false },
     ],
     next_table_number: 9,
     limits: LIMITS,
+    contact: "",
+    version: 1,
     ...overrides,
   };
 }

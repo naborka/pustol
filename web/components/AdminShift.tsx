@@ -23,7 +23,6 @@ import {
   hourlyLoad,
   occupancyEnd,
   peakHour,
-  seatedGuestsAt,
   shiftTotals,
 } from "@/lib/occupancy";
 import {
@@ -103,7 +102,7 @@ export function DayHeader({
         ‹
       </Pressable>
       <Pressable
-        ariaLabel="Выбрать день"
+        ariaLabel={`Выбрать день. Открыт: ${fmt.dayName(shift.service_date, today)}, ${fmt.dayStamp(shift.service_date)}`}
         onClick={onOpenDays}
         tone="card"
         style={{
@@ -146,7 +145,7 @@ export function Pulse({ shift }: { shift: ShiftView }) {
   // the whole room. Recomputing it here would be a second implementation of a number the two are
   // required to agree on, and the only way two implementations stay in step is by not existing.
   const free = shift.stats.free_now;
-  const seated = running ? seatedGuestsAt(shift.bookings, shift.now_minutes ?? 0) : null;
+  const seated = shift.stats.seated_now;
   const fits = shift.largest_party_seatable_now;
 
   return (
@@ -180,7 +179,7 @@ export function Pulse({ shift }: { shift: ShiftView }) {
               whiteSpace: "nowrap",
             }}
           >
-            {fmt.tables(free)} свободно
+            Свободно: {fmt.tables(free)}
           </span>
         )}
       </div>
@@ -188,7 +187,7 @@ export function Pulse({ shift }: { shift: ShiftView }) {
         <Note tone={fits === null ? "warn" : "hint"}>
           {fits === null
             ? "Посадить сейчас некуда: все подходящие столы заняты"
-            : `Сейчас можно посадить компанию до ${fmt.guests(fits)}`}
+            : `Сейчас можно посадить компанию до ${fmt.guestsGenitive(fits)}`}
         </Note>
       ) : null}
     </div>
@@ -626,11 +625,14 @@ export function TablesPane({
   const orphans = byTable.get(null) ?? [];
 
   /** One booking, drawn over the hours it actually holds its table for. */
-  const Block = ({ booking }: { booking: ShiftBooking }) => {
+  // Function, not inner component: component defined in render is new type each render, so React
+  // remounts every block on any change.
+  const block = (booking: ShiftBooking) => {
     const standing = standingOf(booking, shift.now_minutes, graceMinutes);
     const held = occupancyEnd(booking) - booking.start_minutes;
     return (
       <Pressable
+        key={booking.id}
         onClick={() => onOpenBooking(booking)}
         ariaLabel={`${booking.guest_name}, ${fmt.time(booking.start_minutes)}`}
         style={{
@@ -772,7 +774,7 @@ export function TablesPane({
               }}
             >
               {orphans.map((booking) => (
-                <Block key={booking.id} booking={booking} />
+                block(booking)
               ))}
             </div>
           ) : null}
@@ -808,7 +810,7 @@ export function TablesPane({
                   </span>
                 ) : null}
                 {seated.map((booking) => (
-                  <Block key={booking.id} booking={booking} />
+                  block(booking)
                 ))}
               </div>
             );
@@ -1028,17 +1030,17 @@ export function ShiftScreen({
 
 /** The action bar under the shift: what staff can start from here. */
 export function ShiftActions({
-  isToday,
+  seatsNow,
   onWalkIn,
   onManual,
 }: {
-  isToday: boolean;
+  /** Server takes walk-in party on this evening now. */
+  seatsNow: boolean;
   onWalkIn: () => void;
   onManual: () => void;
 }) {
-  if (!isToday) {
-    // Seating somebody "now" on a future evening is not a state this app may offer, so the button
-    // is not there to be pressed rather than there and refused.
+  if (!seatsNow) {
+    // Walk-in on another evening or before doors open is not offered: button absent, not refused.
     return <CardAction tone="primary" label="Записать гостя" onClick={onManual} />;
   }
   return (

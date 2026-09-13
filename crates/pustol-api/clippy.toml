@@ -1,0 +1,4 @@
+disallowed-types = [
+    { path = "axum::extract::Path", reason = "refuses in plain text; take pustol_api::params::RequestPath" },
+    { path = "axum::extract::Query", reason = "refuses in plain text; take pustol_api::params::RequestQuery" },
+]

@@ -141,8 +141,14 @@ export function seats(count: number): string {
   return `${count} ${plural(count, "место", "места", "мест")}`;
 }
 
-export function minutesWord(count: number): string {
-  return `${count} ${plural(count, "минута", "минуты", "минут")}`;
+/** "Держим стол 21 минуту": verb object, accusative. */
+export function minutesAccusative(count: number): string {
+  return `${count} ${plural(count, "минуту", "минуты", "минут")}`;
+}
+
+/** "до 21 гостя": genitive after «до». */
+export function guestsGenitive(count: number): string {
+  return `${count} ${plural(count, "гостя", "гостей", "гостей")}`;
 }
 
 export function daysWord(count: number): string {
@@ -200,23 +206,15 @@ export function dayStamp(date: IsoDate): string {
   return `${weekdayShort(date)}, ${dayDate(date)}`;
 }
 
-/** "Открыт до 02:00" or "Закрыт", from the bar's hours and the bar's own clock. */
-export function openLabel(
-  hours: { open_minutes: number; close_minutes: number; closed: boolean },
-  nowMinutes: number,
-): string {
-  if (hours.closed) return "Закрыт";
-  if (nowMinutes < hours.open_minutes) return `Откроется в ${time(hours.open_minutes)}`;
-  if (nowMinutes >= hours.close_minutes) return "Закрыт";
-  return `Открыт до ${time(hours.close_minutes)}`;
-}
-
-/** Whether the bar is serving at this minute — what the dot on the header pill is coloured by. */
-export function isOpenNow(
-  hours: { open_minutes: number; close_minutes: number; closed: boolean },
-  nowMinutes: number,
-): boolean {
-  return !hours.closed && nowMinutes >= hours.open_minutes && nowMinutes < hours.close_minutes;
+/** Open now and still opening today: server's word, decided on instants. */
+export function openLabel(bar: {
+  today_hours: { close_minutes: number };
+  open_now: boolean;
+  opens_at_minutes: number | null;
+}): string {
+  if (bar.open_now) return `Открыт до ${time(bar.today_hours.close_minutes)}`;
+  if (bar.opens_at_minutes !== null) return `Откроется в ${time(bar.opens_at_minutes)}`;
+  return "Закрыт";
 }
 
 /** A ratio as a whole percentage: "72 %" reads as a measurement, "72.4 %" as a spreadsheet. */

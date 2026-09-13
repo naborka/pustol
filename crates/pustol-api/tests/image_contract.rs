@@ -109,6 +109,21 @@ fn dockerfile_matches_the_image_contract() {
         }),
         "Node is build-only; the runtime stage mentions it: {runtime:?}"
     );
+    let user = runtime
+        .iter()
+        .filter_map(|line| line.strip_prefix("USER "))
+        .next_back()
+        .map(str::trim);
+    assert!(
+        user.is_some_and(|user| user != "root" && user != "0" && !user.starts_with("0:")),
+        "the server has no reason to run as root, got {user:?}"
+    );
+    assert!(
+        runtime
+            .iter()
+            .any(|line| line.starts_with("HEALTHCHECK ") && line.contains("/health")),
+        "the image should say how to tell it is alive"
+    );
     assert!(
         instructions
             .iter()

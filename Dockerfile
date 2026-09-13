@@ -31,5 +31,8 @@ COPY --from=rust /out/pustol-api /usr/local/bin/pustol-api
 COPY --from=rust /out/seed /usr/local/bin/seed
 COPY --from=web /src/web/out /var/lib/pustol/web
 ENV PUSTOL_ASSETS_DIR=/var/lib/pustol/web
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin pustol
+USER pustol
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s CMD curl -fsS http://localhost:8080/health || exit 1
 STOPSIGNAL SIGINT
 CMD ["pustol-api"]

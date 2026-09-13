@@ -12,6 +12,22 @@ export interface ApiFailure {
   detail?: Record<string, unknown>;
 }
 
+export class ApiError extends Error {
+  readonly failure: ApiFailure;
+  readonly status: number;
+
+  constructor(status: number, failure: ApiFailure) {
+    super(failure.message);
+    this.name = "ApiError";
+    this.status = status;
+    this.failure = failure;
+  }
+}
+
+export function failureOf(error: unknown): ApiFailure {
+  return error instanceof ApiError ? error.failure : { code: "internal", message: String(error) };
+}
+
 /** What each code means to a guest. */
 const GUEST: Record<string, string> = {
   no_credentials: "Откройте приложение из Telegram — так мы поймём, чья это бронь.",
@@ -26,15 +42,25 @@ const GUEST: Record<string, string> = {
   shift_not_bookable: "На этот день брони пока нет. Выберите другой.",
   impossible_time: "Такого времени в этот день не существует.",
   internal: "Что-то сломалось у нас. Попробуйте ещё раз через минуту.",
+  network: "Нет связи. Проверьте интернет и попробуйте ещё раз.",
+  already_booked_tonight: "На этот вечер у вас уже есть бронь.",
+  booking_finished: "Эта бронь уже закончилась — отменять нечего.",
+  booking_changed: "Ваши брони изменились — проверьте и нажмите ещё раз.",
+  text_invalid: "В тексте есть недопустимый символ.",
+  body_invalid: "Приложение устарело — закройте и откройте его заново.",
+  request_invalid: "Приложение устарело — закройте и откройте его заново.",
+  method_not_allowed: "Приложение устарело — закройте и откройте его заново.",
+  invalid_date: "Такой даты нет.",
 };
 
 /** What each code means to somebody working the shift. */
 const STAFF: Record<string, string> = {
   ...GUEST,
+  not_found: "Не нашли — бронь уже отменили или стол убрали из зала.",
   no_table_free: "На это время нет свободного стола для такой компании.",
   chosen_table_not_free: "Этот стол только что заняли или закрыли. Выберите другой.",
   booking_started: "Бронь уже началась — время не перенести. Стол поменять можно.",
-  booking_finished: "Этот вечер уже закончился — переносить нечего.",
+  booking_finished: "Эта бронь уже закончилась — её не перенести и не отменить.",
   not_an_arrival_time: "Бар в это время не работает.",
   party_too_large: "Компания больше лимита. Поднимите лимит в настройках или посадите вручную.",
   shift_not_bookable: "В этот день бар закрыт.",
@@ -42,12 +68,19 @@ const STAFF: Record<string, string> = {
   missing_block_reason: "Укажите, почему стол закрыт.",
   unknown_cancel_reason: "Такой причины нет в списке. Обновите настройки.",
   unknown_message: "Такого сообщения нет в списке. Обновите настройки.",
-  no_bot_chat: "Гость записан вручную — у бота нет с ним чата. Позвоните или откройте чат.",
-  settings_invalid: "Так сохранить нельзя — проверьте отмеченные значения.",
+  no_bot_chat: "Бот не может написать этому гостю — позвоните или откройте чат.",
+  settings_invalid: "Не сохранено: сервер не принял значения. Причины — по кнопке «Почему».",
   settings_unreadable: "Настройки не сходятся с текущим залом. Обновите страницу и попробуйте снова.",
+  settings_changed:
+    "Пока вы редактировали, кто-то другой изменил настройки. Сверяем их с вашими правками.",
   would_strand_bookings:
-    "Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их.",
+    "Не сохранено: настройки задевают уже принятые брони. Какие — по кнопке «Почему».",
   unknown_timezone: "Такого часового пояса нет.",
+  already_booked_tonight: "У гостя уже есть другая бронь на этот вечер.",
+  guest_has_another_plan:
+    "У гостя уже есть бронь на другой вечер — сначала перенесите или отмените её.",
+  table_taken: "Стол уже заняли — пересадите бронь через «Перенести».",
+  not_the_running_shift: "Смена сейчас не идёт — посадить без брони можно только пока бар открыт.",
 };
 
 const FALLBACK = "Не получилось. Попробуйте ещё раз.";
@@ -68,6 +101,16 @@ export function needsRelaunch(failure: ApiFailure | null): boolean {
     failure?.code === "not_telegram" ||
     failure?.code === "no_credentials"
   );
+}
+
+/** Same request with same proof meets same refusal; retry button would never work. */
+export function canRetry(failure: ApiFailure): boolean {
+  return !needsRelaunch(failure) && failure.code !== "forbidden";
+}
+
+/** `generic` while retry may help; failure's own words once it cannot. */
+export function readFailureText(failure: ApiFailure, audience: Audience, generic: string): string {
+  return canRetry(failure) ? generic : messageFor(failure, audience);
 }
 
 /** One booking a refused settings save would have stranded. */

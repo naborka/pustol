@@ -72,8 +72,7 @@ async fn stub_telegram(stub: Telegram) -> (Bot, SocketAddr) {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    let bot = Bot::new(BotToken::new(common::TOKEN), reqwest::Client::new())
-        .with_base_url(format!("http://{address}"));
+    let bot = Bot::new(BotToken::new(common::TOKEN)).with_base_url(format!("http://{address}"));
     (bot, address)
 }
 
@@ -83,8 +82,7 @@ async fn booked_and_opted_in(app: &common::Harness) -> Caller {
     app.post("/api/reminders/opt-in", &guest, serde_json::Value::Null)
         .await
         .expect_ok();
-    app.post(
-        "/api/booking",
+    app.book(
         &guest,
         serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
     )
@@ -122,10 +120,10 @@ async fn a_reminder_goes_out_with_a_button_that_cancels_it() {
     let button = &sent["reply_markup"]["inline_keyboard"][0][0];
     assert_eq!(button["text"], "Не смогу прийти");
     assert!(
-        button["callback_data"]
-            .as_str()
-            .expect("callback data")
-            .starts_with(worker::CANCEL_CALLBACK),
+        matches!(
+            pustol_api::callbacks::parse(button["callback_data"].as_str().expect("callback data")),
+            Some(pustol_api::callbacks::Callback::CancelBooking(_))
+        ),
         "a reminder without a way to cancel is a notification, not a service"
     );
 
@@ -147,8 +145,7 @@ async fn nothing_goes_out_before_its_hour() {
 async fn a_guest_who_never_asked_for_reminders_is_not_reminded() {
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     let guest = Caller::new("Вера");
-    app.post(
-        "/api/booking",
+    app.book(
         &guest,
         serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
     )
@@ -209,11 +206,49 @@ async fn a_rate_limit_waits_exactly_as_long_as_telegram_asked() {
     assert_eq!(stub.calls.load(Ordering::Relaxed), 2);
 }
 
+async fn booked_with_a_staff_message(app: &common::Harness) -> Caller {
+    let guest = Caller::new("Катя");
+    let id = booking_id(
+        app.book(
+            &guest,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .expect_ok(),
+    );
+    let staff = Caller::manager();
+    app.get("/api/session", &staff).await.expect_ok();
+    app.post(
+        &format!("/api/admin/bookings/{id}/message"),
+        &staff,
+        serde_json::json!({ "text": "Ваш стол готов, ждём вас!" }),
+    )
+    .await
+    .expect_ok();
+    guest
+}
+
+fn booking_id(body: &serde_json::Value) -> String {
+    body["booking"]["id"].as_str().expect("an id").to_owned()
+}
+
+/// `table_id` null: room picks table.
+async fn move_to(app: &common::Harness, staff: &Caller, id: &str, start_minutes: i32) {
+    app.move_booking(
+        staff,
+        id,
+        serde_json::json!({ "start_minutes": start_minutes, "table_id": null }),
+    )
+    .await
+    .expect_ok();
+}
+
 #[tokio::test]
-async fn a_server_fault_is_retried_and_eventually_given_up_on() {
+async fn a_server_fault_is_retried_ever_more_patiently_and_eventually_given_up_on() {
+    // Outage can outlast fixed two-minute backoff.
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
-    let _guest = booked_and_opted_in(&app).await;
-    let failures = (0..10)
+    booked_with_a_staff_message(&app).await;
+    let failures = (0..20)
         .map(|_| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -224,24 +259,217 @@ async fn a_server_fault_is_retried_and_eventually_given_up_on() {
     let stub = Telegram::new(failures);
     let (bot, _) = stub_telegram(stub.clone()).await;
 
-    // Each pass is a fresh attempt, well past the two-minute backoff. The steps stay small enough
-    // that the clock does not run past the booking itself, which would stop the reminder being
-    // eligible for its own reason.
-    let mut attempts = 0;
-    let mut clock = reminder_due();
-    for _ in 0..10 {
+    let start = morning();
+    assert_eq!(drain(&app.store, &bot, start).await, 1);
+    let second = start + TimeDelta::minutes(2);
+    assert_eq!(
+        drain(&app.store, &bot, second - TimeDelta::seconds(1)).await,
+        0
+    );
+    assert_eq!(drain(&app.store, &bot, second).await, 1);
+    let third = second + TimeDelta::minutes(4);
+    assert_eq!(
+        drain(&app.store, &bot, third - TimeDelta::seconds(1)).await,
+        0
+    );
+    assert_eq!(drain(&app.store, &bot, third).await, 1);
+
+    let mut attempts = 3;
+    let mut clock = third;
+    for _ in 0..12 {
+        clock += TimeDelta::hours(1);
         attempts += drain(&app.store, &bot, clock).await;
-        clock += TimeDelta::minutes(10);
     }
     assert_eq!(
-        attempts, 6,
+        attempts,
+        usize::try_from(worker::MAX_ATTEMPTS).expect("positive"),
         "a message Telegram keeps refusing is abandoned rather than retried for ever"
     );
+}
+
+#[tokio::test]
+async fn waiting_out_a_rate_limit_does_not_use_up_the_attempts() {
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    booked_with_a_staff_message(&app).await;
+    let limits = (0..10)
+        .map(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({
+                    "ok": false,
+                    "description": "Too Many Requests: retry after 1",
+                    "parameters": { "retry_after": 1 }
+                }),
+            )
+        })
+        .collect();
+    let stub = Telegram::new(limits);
+    let (bot, _) = stub_telegram(stub.clone()).await;
+
+    let mut clock = morning();
+    for _ in 0..11 {
+        assert_eq!(drain(&app.store, &bot, clock).await, 1);
+        clock += TimeDelta::seconds(1);
+    }
+    assert_eq!(stub.calls.load(Ordering::Relaxed), 11);
     assert_eq!(
-        drain(&app.store, &bot, clock).await,
+        drain(&app.store, &bot, clock + TimeDelta::hours(1)).await,
         0,
-        "and stays abandoned"
+        "delivered"
     );
+}
+
+#[tokio::test]
+async fn nothing_is_sent_about_an_evening_that_is_already_over() {
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    let guest = Caller::new("Катя");
+    let id = booking_id(
+        app.book(
+            &guest,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .expect_ok(),
+    );
+    app.post(
+        &format!("/api/admin/bookings/{id}/cancel"),
+        &Caller::manager(),
+        serde_json::json!({ "reason": "Частное мероприятие" }),
+    )
+    .await
+    .expect_ok();
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+
+    // 20:00 booking ended 22:00 Belgrade; cancel notice after that is noise.
+    assert_eq!(drain(&app.store, &bot, utc(2026, 7, 30, 20, 1)).await, 0);
+    assert_eq!(stub.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn a_message_staff_send_after_the_evening_still_reaches_the_guest() {
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    let guest = Caller::new("Дима");
+    let id = booking_id(
+        app.book(
+            &guest,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .expect_ok(),
+    );
+    let closing = app.at(utc(2026, 7, 30, 20, 30));
+    closing
+        .post(
+            &format!("/api/admin/bookings/{id}/message"),
+            &Caller::manager(),
+            serde_json::json!({ "text": "Ваш стол готов, ждём вас!" }),
+        )
+        .await
+        .expect_ok();
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+
+    // Staff were told it was sent.
+    assert_eq!(drain(&app.store, &bot, utc(2026, 7, 30, 20, 30)).await, 1);
+    assert_eq!(stub.seen.lock().await[0]["chat_id"], guest.id);
+}
+
+#[tokio::test]
+async fn a_booking_moved_later_gets_the_reminder_it_was_taken_too_late_for() {
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    let evening = app.at(utc(2026, 7, 30, 17, 0));
+    let guest = Caller::new("Олег");
+    evening
+        .post("/api/reminders/opt-in", &guest, serde_json::Value::Null)
+        .await
+        .expect_ok();
+    let id = booking_id(
+        evening
+            .book(
+                &guest,
+                serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+            )
+            .await
+            .expect_ok(),
+    );
+    move_to(&evening, &Caller::manager(), &id, 1410).await;
+
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+    assert_eq!(
+        drain(&app.store, &bot, utc(2026, 7, 30, 17, 0)).await,
+        1,
+        "the move notice"
+    );
+    assert_eq!(
+        drain(&app.store, &bot, utc(2026, 7, 30, 18, 30)).await,
+        1,
+        "the reminder"
+    );
+    let seen = stub.seen.lock().await;
+    assert!(
+        seen[1]["text"].as_str().expect("text").contains("23:30"),
+        "got {}",
+        seen[1]
+    );
+}
+
+#[tokio::test]
+async fn a_booking_moved_past_its_reminder_and_back_is_reminded_again() {
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    let guest = booked_and_opted_in(&app).await;
+    let id = app.get("/api/session", &guest).await.expect_ok()["bookings"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let staff = Caller::manager();
+    move_to(&app.at(utc(2026, 7, 30, 15, 30)), &staff, &id, 1110).await;
+    move_to(&app.at(utc(2026, 7, 30, 15, 40)), &staff, &id, 1410).await;
+
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+    assert_eq!(
+        drain(&app.store, &bot, utc(2026, 7, 30, 15, 40)).await,
+        2,
+        "two move notices"
+    );
+    assert_eq!(
+        drain(&app.store, &bot, utc(2026, 7, 30, 18, 30)).await,
+        1,
+        "the reminder"
+    );
+}
+
+#[tokio::test]
+async fn a_party_left_without_a_table_is_not_reminded_to_come_to_it() {
+    let app = harness_at(
+        morning(),
+        common::config_with(vec![common::table(1, 2, "Бар")]),
+    )
+    .await;
+    booked_and_opted_in(&app).await;
+    let staff = Caller::manager();
+    let shift = app
+        .get("/api/admin/shift?service_date=2026-07-30", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    app.post(
+        "/api/admin/blocks",
+        &staff,
+        serde_json::json!({
+            "service_date": "2026-07-30",
+            "table_ids": [shift["tables"][0]["id"]],
+            "reason": "Дождь"
+        }),
+    )
+    .await
+    .expect_ok();
+
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+    assert_eq!(drain(&app.store, &bot, reminder_due()).await, 0);
 }
 
 #[tokio::test]
@@ -268,9 +496,18 @@ async fn a_request_telegram_refuses_on_its_merits_is_not_retried() {
 async fn a_cancelled_booking_is_never_reminded_about() {
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     let guest = booked_and_opted_in(&app).await;
-    app.send("DELETE", "/api/booking", &guest, serde_json::Value::Null)
-        .await
-        .expect_ok();
+    let id = app.get("/api/session", &guest).await.expect_ok()["bookings"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    app.send(
+        "DELETE",
+        &format!("/api/bookings/{id}"),
+        &guest,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect_ok();
 
     let stub = Telegram::accepting();
     let (bot, _) = stub_telegram(stub.clone()).await;
@@ -283,16 +520,12 @@ async fn a_cancellation_by_staff_reaches_the_guest_with_the_reason_they_chose() 
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     let guest = Caller::new("Ксения");
     let booking = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
         )
         .await
-        .expect_ok()["booking"]["id"]
-        .as_str()
-        .expect("an id")
-        .to_owned();
+        .booking_id();
 
     let staff = Caller::manager();
     app.get("/api/session", &staff).await.expect_ok();
@@ -328,16 +561,12 @@ async fn a_message_staff_sent_goes_out_regardless_of_the_reminder_preference() {
     let app = harness_at(morning(), common::config_with(common::default_tables())).await;
     let guest = Caller::new("Катя");
     let booking = app
-        .post(
-            "/api/booking",
+        .book(
             &guest,
             serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
         )
         .await
-        .expect_ok()["booking"]["id"]
-        .as_str()
-        .expect("an id")
-        .to_owned();
+        .booking_id();
 
     let staff = Caller::manager();
     app.get("/api/session", &staff).await.expect_ok();
@@ -429,4 +658,36 @@ async fn the_kinds_of_message_are_distinguishable_to_the_worker() {
     // button breaks here.
     assert_ne!(NotificationKind::Reminder, NotificationKind::Cancelled);
     assert_ne!(NotificationKind::Reminder, NotificationKind::StaffMessage);
+}
+
+#[tokio::test]
+async fn a_party_grown_by_telephone_is_reminded_with_its_new_size() {
+    let app = harness_at(morning(), common::config_with(common::default_tables())).await;
+    let guest = booked_and_opted_in(&app).await;
+    let id = app.get("/api/session", &guest).await.expect_ok()["bookings"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let staff = Caller::manager();
+    app.move_booking(
+        &staff,
+        &id,
+        serde_json::json!({ "start_minutes": 1200, "table_id": null, "party_size": 4 }),
+    )
+    .await
+    .expect_ok();
+
+    let stub = Telegram::accepting();
+    let (bot, _) = stub_telegram(stub.clone()).await;
+    assert_eq!(
+        drain(&app.store, &bot, reminder_due()).await,
+        1,
+        "no notice, only the reminder"
+    );
+    let seen = stub.seen.lock().await;
+    assert!(
+        seen[0]["text"].as_str().expect("text").contains("4 гостя"),
+        "got {}",
+        seen[0]
+    );
 }

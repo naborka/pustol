@@ -55,7 +55,6 @@ describe("Russian noun agreement", () => {
     expect(fmt.tables(2)).toBe("2 стола");
     expect(fmt.seats(1)).toBe("1 место");
     expect(fmt.seats(52)).toBe("52 места");
-    expect(fmt.minutesWord(15)).toBe("15 минут");
     expect(fmt.hoursWord(3)).toBe("3 часа");
     expect(fmt.hoursWord(1)).toBe("1 час");
     expect(fmt.daysWord(4)).toBe("4 дня");
@@ -118,5 +117,22 @@ describe("dates", () => {
   it("names the weekday for the settings screen", () => {
     expect(fmt.weekdayLongByIndex(1)).toBe("Понедельник");
     expect(fmt.weekdayLongByIndex(0)).toBe("Воскресенье");
+  });
+});
+
+describe("counts inside a sentence", () => {
+  it("holds a table for minutes in the accusative", () => {
+    expect(fmt.minutesAccusative(1)).toBe("1 минуту");
+    expect(fmt.minutesAccusative(21)).toBe("21 минуту");
+    expect(fmt.minutesAccusative(3)).toBe("3 минуты");
+    expect(fmt.minutesAccusative(15)).toBe("15 минут");
+    expect(fmt.minutesAccusative(11)).toBe("11 минут");
+  });
+
+  it("seats up to guests in the genitive", () => {
+    expect(fmt.guestsGenitive(1)).toBe("1 гостя");
+    expect(fmt.guestsGenitive(2)).toBe("2 гостей");
+    expect(fmt.guestsGenitive(21)).toBe("21 гостя");
+    expect(fmt.guestsGenitive(8)).toBe("8 гостей");
   });
 });

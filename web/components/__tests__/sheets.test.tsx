@@ -16,19 +16,25 @@ import type { ShiftView } from "@/lib/api";
 
 import {
   BookingSheet,
+  CancelReasonSheet,
   ChoiceSheet,
   DaySheet,
   ManualBookingSheet,
+  MessageSheet,
   MoveBookingSheet,
   TableSheet,
   WalkInSheet,
 } from "../Sheets";
-import { Sheet, TextField } from "../ui";
+import { Sheet, TextField, Toast } from "../ui";
 import { availability, noop, shift, shiftBooking, shiftTable } from "./fixtures";
 
 afterEach(cleanup);
 
-function bookingSheet(booking = shiftBooking(), handlers: Record<string, () => void> = {}) {
+function bookingSheet(
+  booking = shiftBooking(),
+  handlers: Record<string, () => void> = {},
+  when: { nowMinutes?: number | null } = {},
+) {
   const props = {
     onAttendance: vi.fn(),
     onNote: vi.fn(),
@@ -42,7 +48,7 @@ function bookingSheet(booking = shiftBooking(), handlers: Record<string, () => v
     <BookingSheet
       open
       booking={booking}
-      nowMinutes={1_280}
+      nowMinutes={when.nowMinutes === undefined ? 1_280 : when.nowMinutes}
       graceMinutes={15}
       onClose={noop}
       onAttendance={props.onAttendance as never}
@@ -96,8 +102,9 @@ describe("one booking", () => {
   });
 
   it("says why the guest cannot be written to, rather than offering and failing", () => {
+    // Unreachable includes Telegram guest who stopped bot, so «без Telegram» wrong.
     bookingSheet(shiftBooking({ reachable_by_bot: false }));
-    const button = screen.getByText("Гость без Telegram — написать нельзя");
+    const button = screen.getByText("Бот не может написать гостю");
     expect(button.closest("button")?.disabled).toBe(true);
     expect(screen.queryByText("Написать гостю")).toBeNull();
   });
@@ -129,6 +136,59 @@ describe("one booking", () => {
   });
 });
 
+describe("a booking whose table is given back", () => {
+  it("offers a move and a cancel exactly while the server says the booking is not finished", () => {
+    // Server clock, not phone: minute cached on phone left open offers move server refuses.
+    const cases: [string, ReturnType<typeof shiftBooking>, number | null, boolean][] = [
+      ["waiting tonight", shiftBooking(), 1_280, true],
+      ["on an evening to come", shiftBooking(), null, true],
+      ["a no-show whose table is still held", shiftBooking({ status: "no_show", released_minutes: 1_290 }), 1_280, true],
+      ["gone home, while this phone's minute lags behind", shiftBooking({ status: "left", released_minutes: 1_270, finished: true }), 1_200, false],
+      ["past its window, never marked", shiftBooking({ start_minutes: 1_140, end_minutes: 1_260, finished: true }), 1_280, false],
+      ["on an evening already over", shiftBooking({ finished: true }), null, false],
+    ];
+    for (const [name, booking, nowMinutes, offered] of cases) {
+      bookingSheet(booking, {}, { nowMinutes });
+      expect(screen.queryByText("Перенести") !== null, `${name}: move`).toBe(offered);
+      expect(screen.queryByText("Отменить бронь") !== null, `${name}: cancel`).toBe(offered);
+      cleanup();
+    }
+  });
+});
+
+describe("choosing why a booking is cancelled", () => {
+  function reasonSheet(booking = shiftBooking(), onChoose: (reason: string) => void = noop) {
+    return render(
+      <CancelReasonSheet open booking={booking} reasons={["Дождь"]} onClose={noop} onChoose={onChoose} />,
+    );
+  }
+
+  it("promises the guest a message only when the bot can reach them", () => {
+    reasonSheet();
+    expect(
+      screen.getByText(
+        "Гость получит сообщение с этой причиной, и стол сразу освободится. Отменить это нельзя.",
+      ),
+    ).toBeDefined();
+    cleanup();
+
+    reasonSheet(shiftBooking({ reachable_by_bot: false }));
+    expect(screen.queryByText(/получит сообщение/)).toBeNull();
+    expect(
+      screen.getByText(
+        "Боту некуда написать гостю — предупредите его сами. Стол сразу освободится. Отменить это нельзя.",
+      ),
+    ).toBeDefined();
+  });
+
+  it("cancels with the reason chosen", async () => {
+    const onChoose = vi.fn();
+    reasonSheet(shiftBooking(), onChoose);
+    await userEvent.click(screen.getByText("Дождь"));
+    expect(onChoose).toHaveBeenCalledWith("Дождь");
+  });
+});
+
 describe("what cannot be undone", () => {
   it("makes a message a choice from the bar's own list, and says it cannot be taken back", () => {
     render(
@@ -143,6 +203,35 @@ describe("what cannot be undone", () => {
     );
     expect(screen.getByText(/отменить отправку нельзя/)).toBeDefined();
     expect(screen.getByText("Ваш стол готов")).toBeDefined();
+  });
+
+  it("offers nothing to send to a guest the bot cannot reach, and says what to do instead", async () => {
+    const onChoose = vi.fn();
+    const { rerender } = render(
+      <MessageSheet
+        open
+        booking={shiftBooking()}
+        templates={["Ваш стол готов"]}
+        onClose={noop}
+        onChoose={onChoose}
+      />,
+    );
+    await userEvent.click(screen.getByText("Ваш стол готов"));
+    expect(onChoose).toHaveBeenCalledWith("Ваш стол готов");
+    expect(screen.getByText(/Саша получит его сразу — отменить отправку нельзя/)).toBeDefined();
+
+    rerender(
+      <MessageSheet
+        open
+        booking={shiftBooking({ reachable_by_bot: false })}
+        templates={["Ваш стол готов"]}
+        onClose={noop}
+        onChoose={onChoose}
+      />,
+    );
+    expect(screen.queryByText("Ваш стол готов")).toBeNull();
+    expect(screen.queryByText(/Список пуст/)).toBeNull();
+    expect(screen.getByText("Бот не может написать гостю — позвоните или откройте чат.")).toBeDefined();
   });
 
   it("says so when the bar has left the list empty, rather than showing an empty sheet", () => {
@@ -237,7 +326,6 @@ describe("a party at the door", () => {
         open
         shift={view}
         maxParty={6}
-        turnMinutes={120}
         partySize={partySize}
         chosenTableId={chosenTableId}
         onClose={noop}
@@ -262,6 +350,33 @@ describe("a party at the door", () => {
       ),
     ).toBeDefined();
     expect(screen.getByText("Посадить за стол 8")).toBeDefined();
+  });
+
+  it("says the table is held until closing when a turn would run past it, as the server holds it", () => {
+    walkInSheet(shift({ now_minutes: 1_500, walk_in_until_minutes: 1_560, bookings: [] }), 2);
+    expect(
+      within(screen.getByRole("dialog")).getByText(
+        "Сверху — самый маленький подходящий: большие столы остаются для больших компаний. Стол будет занят до 02:00.",
+      ),
+    ).toBeDefined();
+  });
+
+  it("says the table is held until the end the server gave, not one worked out on the wall clock", () => {
+    // Clocks go back: turn from 00:30 ends at second 01:30, before 02:00 closing.
+    walkInSheet(shift({ now_minutes: 1_470, walk_in_until_minutes: 1_530, bookings: [] }), 2);
+    expect(
+      within(screen.getByRole("dialog")).getByText(
+        "Сверху — самый маленький подходящий: большие столы остаются для больших компаний. Стол будет занят до 01:30.",
+      ),
+    ).toBeDefined();
+  });
+
+  it("does not exist while the server takes no party at the door, even on tonight's shift", () => {
+    const { container } = walkInSheet(
+      shift({ walk_in_until_minutes: null, walk_in_free_table_ids: [] }),
+      2,
+    );
+    expect(container.firstChild).toBeNull();
   });
 
   it("seats them at the table staff chose rather than at the one it suggested", async () => {
@@ -310,6 +425,7 @@ describe("a party at the door", () => {
   it("refuses plainly when every table is taken, with the button inert", () => {
     const full = shift({
       largest_party_seatable_now: null,
+      walk_in_free_table_ids: [],
       bookings: [
         shiftBooking({ id: "a", table_id: "t1", table_number: 7 }),
         shiftBooking({ id: "b", table_id: "t2", table_number: 8 }),
@@ -327,6 +443,7 @@ describe("a party at the door", () => {
   it("says the free tables are too small rather than that there are none", () => {
     const onlySmall = shift({
       largest_party_seatable_now: 2,
+      walk_in_free_table_ids: ["t1"],
       bookings: [
         shiftBooking({ id: "b", table_id: "t2", table_number: 8 }),
         shiftBooking({ id: "c", table_id: "t3", table_number: 10 }),
@@ -343,7 +460,10 @@ describe("a party at the door", () => {
   });
 
   it("does not exist at all on an evening that is not tonight", () => {
-    const { container } = walkInSheet(shift({ now_minutes: null }), 2);
+    const { container } = walkInSheet(
+      shift({ now_minutes: null, walk_in_until_minutes: null, walk_in_free_table_ids: [] }),
+      2,
+    );
     expect(container.firstChild).toBeNull();
   });
 
@@ -354,9 +474,31 @@ describe("a party at the door", () => {
       now_minutes: 1_280,
       tables: [shiftTable()],
       bookings: [shiftBooking({ status: "left", released_minutes: 1_280 })],
+      walk_in_free_table_ids: ["t1"],
     });
     walkInSheet(view, 2);
     expect(screen.getByText("Посадить за стол 7")).toBeDefined();
+  });
+
+  it("offers only the tables the server names, not ones free by the wall clock on the night the clocks go back", () => {
+    // Seated first 02:00, one-hour turn ends second 02:00: wall minutes see empty window, so two-tops booked first 02:30 wrongly look free.
+    const view = shift({
+      hours: { open_minutes: 1_080, close_minutes: 1_680, closed: false },
+      now_minutes: 1_560,
+      walk_in_until_minutes: 1_560,
+      largest_party_seatable_now: null,
+      tables: [shiftTable(), shiftTable({ id: "t2", number: 8 })],
+      bookings: [
+        shiftBooking({ id: "a", table_id: "t1", table_number: 7, start_minutes: 1_590, end_minutes: 1_590 }),
+        shiftBooking({ id: "b", table_id: "t2", table_number: 8, start_minutes: 1_590, end_minutes: 1_590 }),
+      ],
+      walk_in_free_table_ids: [],
+    });
+    walkInSheet(view, 2);
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).queryByText("Стол 7 · Стойка")).toBeNull();
+    expect(within(sheet).queryByText("Стол 8 · Стойка")).toBeNull();
+    expect(screen.getByText("Посадить некуда").closest("button")?.disabled).toBe(true);
   });
 });
 
@@ -391,7 +533,7 @@ describe("moving a booking", () => {
     chosen: { minutes?: number | null; table?: string | null } = {},
     handlers: {
       onChooseTable?: (tableId: string) => void;
-      onMove?: (minutes: number, tableId: string) => void;
+      onMove?: (minutes: number, tableId: string, partySize: number) => void;
     } = {},
   ) {
     return render(
@@ -400,11 +542,21 @@ describe("moving a booking", () => {
         booking={booking}
         shift={shift()}
         turnMinutes={120}
-        availability={availability()}
+        maxParty={6}
+        partySize={booking.party_size}
+        // Booking set aside, so its own time free at every table.
+        availability={availability({
+          slots: [
+            { start_minutes: 1_260, state: "past", evening: true, free_table_ids: ["t1", "t2", "t3"] },
+            { start_minutes: 1_320, state: "free", evening: true, free_table_ids: ["t1", "t2", "t3"] },
+            { start_minutes: 1_350, state: "free", evening: true, free_table_ids: ["t1", "t2", "t3"] },
+          ],
+        })}
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
-        failedToLoad={false}
+        loadFailure={null}
         onClose={noop}
+        onPartySize={noop}
         onPick={noop}
         onTakenSlot={noop}
         onChooseTable={handlers.onChooseTable ?? noop}
@@ -413,6 +565,33 @@ describe("moving a booking", () => {
       />,
     );
   }
+
+  it("says in its own words why the times cannot be read, and offers no retry when retrying cannot help", () => {
+    render(
+      <MoveBookingSheet
+        open
+        booking={later}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={later.party_size}
+        availability={null}
+        chosenMinutes={null}
+        chosenTableId={null}
+        loadFailure={{ code: "forbidden", message: "not staff" }}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={noop}
+      />,
+    );
+    expect(screen.getByText("Этот раздел только для сотрудников бара.")).toBeDefined();
+    expect(screen.queryByText("Не удалось прочитать свободные окна.")).toBeNull();
+    expect(screen.queryByText("Попробовать снова")).toBeNull();
+  });
 
   it("starts on where the booking already is, with nothing to do", () => {
     moveSheet();
@@ -437,23 +616,127 @@ describe("moving a booking", () => {
     const onMove = vi.fn();
     moveSheet(later, { table: "t2" }, { onMove });
     await userEvent.click(screen.getByText("Пересадить за стол 8"));
-    expect(onMove).toHaveBeenCalledWith(1_320, "t2");
+    expect(onMove).toHaveBeenCalledWith(1_320, "t2", 2);
+  });
+
+  it("offers the tables the times name for the chosen time, not ones free by the wall clock", () => {
+    const onMove = vi.fn();
+    render(
+      <MoveBookingSheet
+        open
+        booking={later}
+        shift={shift({ bookings: [later] })}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability({
+          slots: [{ start_minutes: 1_350, state: "free", evening: true, free_table_ids: ["t3"] }],
+        })}
+        chosenMinutes={1_350}
+        chosenTableId={null}
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={onMove}
+      />,
+    );
+    expect(screen.queryByText("Стол 7 · Стойка")).toBeNull();
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+    expect(screen.getByText("Перенести на 22:30, стол 10")).toBeDefined();
+  });
+
+  it("offers a booking kept at its time the tables free for its own window, not for the slot's", () => {
+    // Walk-in seated 21:07, off slot grid, holds table to 23:07.
+    const walkIn = shiftBooking({
+      status: "arrived",
+      started: true,
+      source: "walk",
+      start_minutes: 1_267,
+      end_minutes: 1_387,
+    });
+    render(
+      <MoveBookingSheet
+        open
+        booking={walkIn}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability({ kept_free_table_ids: ["t1", "t3"] })}
+        chosenMinutes={null}
+        chosenTableId="t1"
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={noop}
+      />,
+    );
+    expect(screen.getByText("Стол 10 · Зал")).toBeDefined();
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+  });
+
+  it("offers a started booking the tables free for its own window", () => {
+    const started = shiftBooking({ status: "arrived", started: true });
+    render(
+      <MoveBookingSheet
+        open
+        booking={started}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability({
+          slots: [{ start_minutes: 1_260, state: "past", evening: true, free_table_ids: ["t2"] }],
+          kept_free_table_ids: ["t1", "t3"],
+        })}
+        chosenMinutes={null}
+        chosenTableId="t2"
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={noop}
+      />,
+    );
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+    expect(screen.getByText("Стол 10 · Зал")).toBeDefined();
+    expect(screen.getByText("Ничего не меняли")).toBeDefined();
   });
 
   it("keeps the time of a booking that has started, and still offers the tables", () => {
     // 21:20, and they sat down at 21:00. The window is history; where they sit is not.
-    moveSheet(shiftBooking({ status: "arrived" }), { table: "t2" });
+    moveSheet(shiftBooking({ status: "arrived", started: true }), { table: "t2" });
     expect(
       screen.getByText("Бронь уже началась — время не меняем. Стол можно поменять в любой момент."),
     ).toBeDefined();
     expect(screen.queryByText("Время")).toBeNull();
     expect(screen.getByText("Пересадить за стол 8")).toBeDefined();
   });
+
+  it("asks whether the booking has begun of the server's clock, not the minute this phone last read", () => {
+    moveSheet({ ...later, started: true });
+    expect(screen.queryByText("Время")).toBeNull();
+    cleanup();
+
+    moveSheet(shiftBooking({ started: false }));
+    expect(screen.getByText("Время")).toBeDefined();
+  });
 });
 
 describe("writing a booking down", () => {
   function manualSheet(
-    chosen: { minutes?: number | null; table?: string | null } = {},
+    chosen: { minutes?: number | null; table?: string | null; name?: string } = {},
     onCreate: (tableId: string) => void = noop,
   ) {
     return render(
@@ -461,13 +744,17 @@ describe("writing a booking down", () => {
         open
         shift={shift()}
         maxParty={6}
-        turnMinutes={120}
-        availability={availability()}
+        availability={availability({
+          slots: [
+            { start_minutes: 1_290, state: "free", evening: true, free_table_ids: ["t2", "t3"] },
+            { start_minutes: 1_350, state: "free", evening: true, free_table_ids: [] },
+          ],
+        })}
         partySize={2}
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
-        guestName="Глеб"
-        failedToLoad={false}
+        guestName={chosen.name ?? "Глеб"}
+        loadFailure={null}
         onClose={noop}
         onPartySize={noop}
         onPick={noop}
@@ -486,14 +773,130 @@ describe("writing a booking down", () => {
     expect(screen.getByText("Имя и время").closest("button")?.disabled).toBe(true);
   });
 
-  it("offers the tables free at the chosen time, and books the one staff picked", async () => {
+  it("offers the tables the times name for the chosen time, and books the one staff picked", async () => {
     const onCreate = vi.fn();
     manualSheet({ minutes: 1_290, table: "t3" }, onCreate);
-    // Table 7 is taken from 21:00 to 23:00, so it is not on offer for a 21:30 sitting.
     expect(screen.queryByText("Стол 7 · Стойка")).toBeNull();
     expect(screen.getByText("Стол 8 · Зал")).toBeDefined();
 
     await userEvent.click(screen.getByText("Записать на 21:30, стол 10"));
     expect(onCreate).toHaveBeenCalledWith("t3");
+  });
+
+  it("offers no table at a time the times name none for, whatever the wall clock says", () => {
+    manualSheet({ minutes: 1_350 });
+    expect(screen.queryByText("Стол 8 · Зал")).toBeNull();
+    expect(screen.getByText("Имя и время").closest("button")?.disabled).toBe(true);
+  });
+
+  it("calls a name blank exactly when the server would", () => {
+    const { unmount } = manualSheet({ minutes: 1_290, table: "t3", name: "　" });
+    expect(screen.getByText("Имя и время").closest("button")?.disabled).toBe(true);
+    unmount();
+
+    manualSheet({ minutes: 1_290, table: "t3", name: "﻿" });
+    expect(screen.getByText("Записать на 21:30, стол 10").closest("button")?.disabled).toBe(false);
+  });
+});
+
+describe("a message about something done in a sheet", () => {
+  it("is drawn over the sheet rather than under it", () => {
+    const { container } = render(
+      <div>
+        <Sheet open onClose={() => {}} title="Записать гостя">
+          <span>содержимое</span>
+        </Sheet>
+        <Toast message={{ text: "Это время занято." }} />
+      </div>,
+    );
+    const layer = (element: Element | null) => Number((element as HTMLElement | null)?.style.zIndex);
+    const panel = container.querySelector('[role="dialog"]');
+    const toast = screen.getByText("Это время занято.").parentElement;
+    expect(layer(toast)).toBeGreaterThan(layer(panel));
+  });
+});
+
+describe("leaving a sheet", () => {
+  function Opener() {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button type="button" onClick={() => setOpen(true)}>
+          Открыть
+        </button>
+        <Sheet open={open} onClose={() => setOpen(false)} title="Бронь">
+          <span>карточка</span>
+        </Sheet>
+      </>
+    );
+  }
+
+  it("can be done with a button a screen reader can find, and hands focus back", async () => {
+    // Backdrop hidden from assistive technology; button is only way out.
+    render(<Opener />);
+    const opener = screen.getByRole("button", { name: "Открыть" });
+    await userEvent.click(opener);
+    expect(screen.getByText("карточка")).toBeDefined();
+
+    await userEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(screen.queryByText("карточка")).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+});
+
+describe("changing how many are coming", () => {
+  it("asks the party size with the time and the table, and says what will change", async () => {
+    const onPartySize = vi.fn();
+    const onMove = vi.fn();
+    const booking = shiftBooking({ party_size: 2, table_id: "t1", table_number: 7 });
+    const { rerender } = render(
+      <MoveBookingSheet
+        open
+        booking={booking}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={2}
+        availability={availability()}
+        chosenMinutes={null}
+        chosenTableId={null}
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={onPartySize}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={onMove}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "4 гостя" }));
+    expect(onPartySize).toHaveBeenCalledWith(4);
+
+    rerender(
+      <MoveBookingSheet
+        open
+        booking={booking}
+        shift={shift()}
+        turnMinutes={120}
+        maxParty={6}
+        partySize={4}
+        availability={availability()}
+        chosenMinutes={null}
+        chosenTableId={null}
+        loadFailure={null}
+        onClose={noop}
+        onPartySize={onPartySize}
+        onPick={noop}
+        onTakenSlot={noop}
+        onChooseTable={noop}
+        onRetry={noop}
+        onMove={onMove}
+      />,
+    );
+    // Table 7 seats two; smallest free table for four is table 8.
+    const save = screen.getByText("4 гостя за столом 8");
+    await userEvent.click(save);
+    expect(onMove).toHaveBeenCalledWith(1_260, "t2", 4);
   });
 });

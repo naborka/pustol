@@ -27,8 +27,12 @@ body {
 }
 
 body {
-  background: var(--bg, #17212b);
-  color: var(--txt, #fff);
+  /*
+   * Telegram writes `--tg-theme-*` before paint; app palette arrives after hydration. Telegram
+   * colours as fallback stop dark flash for light-theme users on launch.
+   */
+  background: var(--bg, var(--tg-theme-bg-color, #17212b));
+  color: var(--txt, var(--tg-theme-text-color, #fff));
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -49,6 +53,15 @@ button:disabled {
 
 input {
   font: inherit;
+}
+
+/* Focus ring for keyboard only; tap draws nothing. */
+:focus-visible {
+  outline: 2px solid var(--link, #6ab7ff);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
   outline: none;
 }
 

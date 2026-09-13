@@ -16,17 +16,19 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 
 import type {
-  Availability,
   GuestBooking,
   ShiftBooking,
   ShiftDay,
   ShiftTable,
   ShiftView,
+  StaffAvailability,
 } from "@/lib/api";
+import type { ApiFailure } from "@/lib/errors";
 import * as fmt from "@/lib/format";
-import { tableOffers, walkInOffers } from "@/lib/occupancy";
-import type { TableOffer } from "@/lib/occupancy";
-import { hasStarted, isSettled, standingOf, statusLabel } from "@/lib/status";
+import { offersOf, slotOffers, walkInOffers, type TableOffer } from "@/lib/occupancy";
+import type { Refusal } from "@/lib/outcomes";
+import { trimmed } from "@/lib/settingsRules";
+import { standingOf, statusLabel } from "@/lib/status";
 import { openChatWith } from "@/lib/telegram";
 import { RADIUS, SPACE, TEXT } from "@/lib/tokens";
 import {
@@ -36,13 +38,13 @@ import {
   Note,
   PartySizeGrid,
   Pressable,
+  ReadView,
   SectionLabel,
   Separator,
   Sheet,
   SheetChoice,
   SheetTitle,
   SlotGrid,
-  Spinner,
   TextField,
 } from "./ui";
 
@@ -125,8 +127,9 @@ export function BookingSheet({
   const seated = booking.table_id !== null;
   const standing = standingOf(booking, nowMinutes, graceMinutes);
   const title = booking.source === "walk" ? "Гости без брони" : booking.guest_name;
-  // An evening that is over is a record, not a plan.
-  const movable = !isSettled(standing);
+  // Booking whose table was given back is record: server neither moves nor cancels it, so neither
+  // offered. Server clock decides, not phone's.
+  const changeable = !booking.finished;
 
   return (
     <Sheet open={open} onClose={onClose} title={title}>
@@ -154,7 +157,7 @@ export function BookingSheet({
           <Fact label="Откуда" value={SOURCE_LABEL[booking.source]} />
         </Card>
 
-        {movable ? <CardAction label="Перенести" onClick={onOpenMove} /> : null}
+        {changeable ? <CardAction label="Перенести" onClick={onOpenMove} /> : null}
 
         {!seated ? (
           <div
@@ -242,9 +245,7 @@ export function BookingSheet({
 
         <CardAction
           label={
-            booking.reachable_by_bot
-              ? "Написать гостю"
-              : "Гость без Telegram — написать нельзя"
+            booking.reachable_by_bot ? "Написать гостю" : "Бот не может написать гостю"
           }
           disabled={!booking.reachable_by_bot}
           onClick={onOpenTemplates}
@@ -264,7 +265,9 @@ export function BookingSheet({
           </Pressable>
         ) : null}
 
-        <CardAction tone="destructive" label="Отменить бронь" onClick={onOpenCancel} />
+        {changeable ? (
+          <CardAction tone="destructive" label="Отменить бронь" onClick={onOpenCancel} />
+        ) : null}
       </div>
     </Sheet>
   );
@@ -283,6 +286,7 @@ export function ChoiceSheet({
   title,
   hint,
   choices,
+  empty = "Список пуст — заполните его в настройках.",
   onClose,
   onChoose,
 }: {
@@ -290,6 +294,8 @@ export function ChoiceSheet({
   title: string;
   hint: string;
   choices: string[];
+  /** Empty-list text; null when hint already says why nothing to choose. */
+  empty?: string | null;
   onClose: () => void;
   onChoose: (choice: string) => void;
 }) {
@@ -300,7 +306,9 @@ export function ChoiceSheet({
         <Note>{hint}</Note>
         <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
           {choices.length === 0 ? (
-            <Note tone="warn">Список пуст — заполните его в настройках.</Note>
+            empty === null ? null : (
+              <Note tone="warn">{empty}</Note>
+            )
           ) : (
             choices.map((choice) => (
               <SheetChoice key={choice} text={choice} onClick={() => onChoose(choice)} />
@@ -309,6 +317,73 @@ export function ChoiceSheet({
         </div>
       </div>
     </Sheet>
+  );
+}
+
+/**
+ * Cancel reason from bar's list. Promises guest message only when bot reaches guest: false "guest
+ * will be told" sends party to table given away.
+ */
+export function CancelReasonSheet({
+  open,
+  booking,
+  reasons,
+  onClose,
+  onChoose,
+}: {
+  open: boolean;
+  booking: ShiftBooking | null;
+  reasons: string[];
+  onClose: () => void;
+  onChoose: (reason: string) => void;
+}) {
+  const told = booking?.reachable_by_bot
+    ? "Гость получит сообщение с этой причиной, и стол сразу освободится."
+    : "Боту некуда написать гостю — предупредите его сами. Стол сразу освободится.";
+  return (
+    <ChoiceSheet
+      open={open}
+      title="Причина отмены"
+      hint={`${told} Отменить это нельзя.`}
+      choices={reasons}
+      onClose={onClose}
+      onChoose={onChoose}
+    />
+  );
+}
+
+/**
+ * Guest message from bar's list, offered only while bot reaches guest. Refresh or refused send can
+ * revoke that; sheet then says what to do instead.
+ */
+export function MessageSheet({
+  open,
+  booking,
+  templates,
+  onClose,
+  onChoose,
+}: {
+  open: boolean;
+  booking: ShiftBooking | null;
+  templates: string[];
+  onClose: () => void;
+  onChoose: (text: string) => void;
+}) {
+  const reachable = booking?.reachable_by_bot ?? false;
+  return (
+    <ChoiceSheet
+      open={open}
+      title="Написать гостю"
+      hint={
+        reachable
+          ? `Уйдёт от бота в чат гостя. ${booking?.guest_name ?? ""} получит его сразу — отменить отправку нельзя.`
+          : "Бот не может написать гостю — позвоните или откройте чат."
+      }
+      choices={reachable ? templates : []}
+      {...(reachable ? {} : { empty: null })}
+      onClose={onClose}
+      onChoose={onChoose}
+    />
   );
 }
 
@@ -347,25 +422,23 @@ export function ConfirmSheet({
   );
 }
 
+/** Last settings save refusal, worded per refusal kind. */
 export function ConflictSheet({
   open,
-  reasons,
+  refusal,
   onClose,
 }: {
   open: boolean;
-  reasons: string[];
+  refusal: Refusal | null;
   onClose: () => void;
 }) {
   return (
     <Sheet open={open} onClose={onClose} title="Так сохранить нельзя">
       <div style={{ display: "flex", flexDirection: "column", gap: SPACE[3] }}>
         <SheetTitle tone="destructive">Так сохранить нельзя</SheetTitle>
-        <Note>
-          Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их — тогда
-          настройку можно будет сохранить.
-        </Note>
+        <Note>{refusal?.lead}</Note>
         <div style={{ display: "flex", flexDirection: "column", gap: SPACE[1] + 2 }}>
-          {reasons.map((reason) => (
+          {(refusal?.reasons ?? []).map((reason) => (
             <span
               key={reason}
               style={{
@@ -567,7 +640,6 @@ export function WalkInSheet({
   open,
   shift,
   maxParty,
-  turnMinutes,
   partySize,
   chosenTableId,
   onClose,
@@ -578,7 +650,6 @@ export function WalkInSheet({
   open: boolean;
   shift: ShiftView | null;
   maxParty: number;
-  turnMinutes: number;
   partySize: number;
   chosenTableId: string | null;
   onClose: () => void;
@@ -586,9 +657,9 @@ export function WalkInSheet({
   onChooseTable: (tableId: string) => void;
   onSeat: (tableId: string) => void;
 }) {
-  if (!shift || shift.now_minutes === null) return null;
-  const until = shift.now_minutes + turnMinutes;
-  const offers = walkInOffers(shift, partySize, turnMinutes);
+  const until = shift?.walk_in_until_minutes ?? null;
+  if (!shift || until === null) return null;
+  const offers = walkInOffers(shift, partySize);
   const chosen = chosenTable(offers, chosenTableId);
 
   return (
@@ -681,50 +752,93 @@ function TableChoiceList({
   );
 }
 
+/** Staff times read: spinner, failure reason, or `children`. */
+function TimesRead({
+  availability,
+  loadFailure,
+  onRetry,
+  children,
+}: {
+  availability: StaffAvailability | null;
+  loadFailure: ApiFailure | null;
+  onRetry: () => void;
+  children: (availability: StaffAvailability) => ReactNode;
+}) {
+  return (
+    <ReadView
+      value={availability}
+      failure={loadFailure}
+      audience="staff"
+      generic="Не удалось прочитать свободные окна."
+      loading="Считаем свободные окна"
+      onRetry={onRetry}
+    >
+      {children}
+    </ReadView>
+  );
+}
+
 /** The evening's arrival times, or why there are none to show. */
 function SlotSection({
   availability,
   chosen,
-  failedToLoad,
+  loadFailure,
+  stale,
   onPick,
   onTaken,
   onRetry,
 }: {
-  availability: Availability | null;
+  availability: StaffAvailability | null;
   chosen: number | null;
-  failedToLoad: boolean;
+  loadFailure: ApiFailure | null;
+  stale: boolean;
   onPick: (minutes: number) => void;
   onTaken: () => void;
   onRetry: () => void;
 }) {
-  const offered = (availability?.slots ?? []).filter((slot) => slot.state !== "past");
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
       <SectionLabel>Время</SectionLabel>
-      {availability === null ? (
-        failedToLoad ? (
-          <>
-            <Note tone="warn">Не удалось прочитать свободные окна.</Note>
-            <CardAction label="Попробовать снова" onClick={onRetry} />
-          </>
-        ) : (
-          <Spinner label="Считаем свободные окна" />
-        )
-      ) : offered.length === 0 ? (
-        <Note tone="warn">В этот вечер не осталось ни одного времени.</Note>
-      ) : (
-        <SlotGrid
-          slots={offered}
-          chosen={chosen}
-          onPick={onPick}
-          onTaken={onTaken}
-          height={40}
-          fontSize={TEXT.base}
-          gap={SPACE[1] + 2}
-        />
-      )}
+      <TimesRead availability={availability} loadFailure={loadFailure} onRetry={onRetry}>
+        {(times) => {
+          const offered = times.slots.filter((slot) => slot.state !== "past");
+          return offered.length === 0 ? (
+            <Note tone="warn">В этот вечер не осталось ни одного времени.</Note>
+          ) : (
+            <SlotGrid
+              slots={offered}
+              chosen={chosen}
+              onPick={onPick}
+              onTaken={onTaken}
+              height={40}
+              fontSize={TEXT.base}
+              gap={SPACE[1] + 2}
+              stale={stale}
+            />
+          );
+        }}
+      </TimesRead>
     </div>
   );
+}
+
+/**
+ * Tables shown times list free at `minutes`; none while times answer changed question. At `keptAt`
+ * (moved booking's own start): tables free for its stored window, which current grid need not show.
+ */
+function offersAt(
+  shift: ShiftView,
+  availability: StaffAvailability | null,
+  timesPending: boolean,
+  minutes: number,
+  partySize: number,
+  keptAt: number | null = null,
+): TableOffer[] {
+  if (availability === null || timesPending) return [];
+  if (minutes === keptAt && availability.kept_free_table_ids !== null) {
+    return offersOf(shift, availability.kept_free_table_ids, partySize);
+  }
+  return slotOffers(shift, availability.slots, minutes, partySize);
 }
 
 /** One table a party could be put at, or one standing empty that they do not fit at. */
@@ -776,13 +890,13 @@ export function ManualBookingSheet({
   open,
   shift,
   maxParty,
-  turnMinutes,
   availability,
   partySize,
   chosenMinutes,
   chosenTableId,
   guestName,
-  failedToLoad,
+  loadFailure,
+  timesPending = false,
   onClose,
   onPartySize,
   onPick,
@@ -795,13 +909,14 @@ export function ManualBookingSheet({
   open: boolean;
   shift: ShiftView | null;
   maxParty: number;
-  turnMinutes: number;
-  availability: Availability | null;
+  availability: StaffAvailability | null;
   partySize: number;
   chosenMinutes: number | null;
   chosenTableId: string | null;
   guestName: string;
-  failedToLoad: boolean;
+  loadFailure: ApiFailure | null;
+  /** Shown times answer party size before last change. */
+  timesPending?: boolean;
   onClose: () => void;
   onPartySize: (size: number) => void;
   onPick: (minutes: number) => void;
@@ -814,10 +929,10 @@ export function ManualBookingSheet({
   if (!open) return null;
   const offers =
     shift && chosenMinutes !== null
-      ? tableOffers(shift, partySize, chosenMinutes, chosenMinutes + turnMinutes)
+      ? offersAt(shift, availability, timesPending, chosenMinutes, partySize)
       : [];
   const table = chosenTable(offers, chosenTableId);
-  const ready = guestName.trim().length > 0 && chosenMinutes !== null && table !== null;
+  const ready = trimmed(guestName).length > 0 && chosenMinutes !== null && table !== null;
 
   return (
     <Sheet
@@ -855,7 +970,8 @@ export function ManualBookingSheet({
         <SlotSection
           availability={availability}
           chosen={chosenMinutes}
-          failedToLoad={failedToLoad}
+          loadFailure={loadFailure}
+          stale={timesPending}
           onPick={onPick}
           onTaken={onTakenSlot}
           onRetry={onRetry}
@@ -883,11 +999,15 @@ export function MoveBookingSheet({
   booking,
   shift,
   turnMinutes,
+  maxParty,
+  partySize,
   availability,
   chosenMinutes,
   chosenTableId,
-  failedToLoad,
+  loadFailure,
+  timesPending = false,
   onClose,
+  onPartySize,
   onPick,
   onTakenSlot,
   onChooseTable,
@@ -898,25 +1018,39 @@ export function MoveBookingSheet({
   booking: ShiftBooking | null;
   shift: ShiftView | null;
   turnMinutes: number;
-  availability: Availability | null;
+  maxParty: number;
+  /** Current party, not booking's stored size. «Нас будет шесть» is most common call. */
+  partySize: number;
+  availability: StaffAvailability | null;
   chosenMinutes: number | null;
   chosenTableId: string | null;
-  failedToLoad: boolean;
+  loadFailure: ApiFailure | null;
+  /** Shown times answer question sheet since changed. */
+  timesPending?: boolean;
   onClose: () => void;
+  onPartySize: (size: number) => void;
   onPick: (minutes: number) => void;
   onTakenSlot: () => void;
   onChooseTable: (tableId: string) => void;
   onRetry: () => void;
-  onMove: (startMinutes: number, tableId: string) => void;
+  onMove: (startMinutes: number, tableId: string, partySize: number) => void;
 }) {
   if (!open || !booking || !shift) return null;
-  const started = hasStarted(booking, shift.now_minutes);
+  const started = booking.started;
   const minutes = started ? booking.start_minutes : (chosenMinutes ?? booking.start_minutes);
   const until = minutes === booking.start_minutes ? booking.end_minutes : minutes + turnMinutes;
-  const offers = tableOffers(shift, booking.party_size, minutes, until, booking.id);
+  const offers = offersAt(
+    shift,
+    availability,
+    timesPending,
+    minutes,
+    partySize,
+    booking.start_minutes,
+  );
   const table = chosenTable(offers, chosenTableId ?? booking.table_id);
-  const moves =
-    table !== null && (minutes !== booking.start_minutes || table.id !== booking.table_id);
+  const retimed = minutes !== booking.start_minutes;
+  const resized = partySize !== booking.party_size;
+  const moves = table !== null && (retimed || resized || table.id !== booking.table_id);
 
   return (
     <Sheet
@@ -930,12 +1064,16 @@ export function MoveBookingSheet({
           label={
             !moves
               ? "Ничего не меняли"
-              : minutes === booking.start_minutes
-                ? `Пересадить за стол ${table.number}`
-                : `Перенести на ${fmt.time(minutes)}, стол ${table.number}`
+              : retimed
+                ? `Перенести на ${fmt.time(minutes)}, стол ${table.number}${
+                    resized ? ` · ${fmt.guests(partySize)}` : ""
+                  }`
+                : resized
+                  ? `${fmt.guests(partySize)} за столом ${table.number}`
+                  : `Пересадить за стол ${table.number}`
           }
           onClick={() => {
-            if (table) onMove(minutes, table.id);
+            if (table) onMove(minutes, table.id, partySize);
           }}
         />
       }
@@ -947,15 +1085,26 @@ export function MoveBookingSheet({
           {fmt.guests(booking.party_size)}
         </Note>
 
+        <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
+          <SectionLabel>Сколько гостей</SectionLabel>
+          <PartySizeGrid max={maxParty} value={partySize} onChange={onPartySize} />
+        </div>
+
         {started ? (
-          <Note tone="warn">
-            Бронь уже началась — время не меняем. Стол можно поменять в любой момент.
-          </Note>
+          <>
+            <Note tone="warn">
+              Бронь уже началась — время не меняем. Стол можно поменять в любой момент.
+            </Note>
+            <TimesRead availability={availability} loadFailure={loadFailure} onRetry={onRetry}>
+              {() => null}
+            </TimesRead>
+          </>
         ) : (
           <SlotSection
             availability={availability}
             chosen={minutes}
-            failedToLoad={failedToLoad}
+            loadFailure={loadFailure}
+            stale={timesPending}
             onPick={onPick}
             onTaken={onTakenSlot}
             onRetry={onRetry}
@@ -993,7 +1142,7 @@ export function GuestCancelSheet({
       restated={`${fmt.whenLabel(booking.service_date, today, booking.start_minutes)} · ${fmt.guests(
         booking.party_size,
       )}`}
-      detail="Стол сразу уйдёт другим гостям. Вернуть его получится, только если он останется свободен."
+      detail="Стол сразу уйдёт другим гостям — вернуть эту бронь не получится."
       confirmLabel="Отменить бронь"
       onConfirm={onConfirm}
       onClose={onClose}

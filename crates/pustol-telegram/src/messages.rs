@@ -25,7 +25,12 @@ pub fn reminder(bar_name: &str, starts_at: DateTime<Utc>, timezone: Tz, party_si
 
 /// The message that goes out when staff cancel a booking.
 #[must_use]
-pub fn cancellation(bar_name: &str, starts_at: DateTime<Utc>, timezone: Tz, reason: &str) -> String {
+pub fn cancellation(
+    bar_name: &str,
+    starts_at: DateTime<Utc>,
+    timezone: Tz,
+    reason: &str,
+) -> String {
     let local = starts_at.with_timezone(&timezone);
     format!(
         "{bar_name}: бронь на {time} отменена. Причина: {reason}. Извините за неудобство — \
@@ -55,18 +60,65 @@ pub fn moved(
 /// Russian counts the noun after the number, so a bare "3 гость" reads as broken software.
 #[must_use]
 pub fn guests(count: i32) -> String {
-    let hundreds = count % 100;
-    let units = count % 10;
-    let noun = if (11..=19).contains(&hundreds) {
-        "гостей"
-    } else if units == 1 {
-        "гость"
-    } else if (2..=4).contains(&units) {
-        "гостя"
-    } else {
-        "гостей"
+    plural(count, "гость", "гостя", "гостей")
+}
+
+/// Russian plural: `one` after 1, 21, 31; `few` after 2 to 4, 22 to 24; else `many`, teens too.
+fn plural(count: i32, one: &str, few: &str, many: &str) -> String {
+    let noun = match (count % 100, count % 10) {
+        (11..=19, _) => many,
+        (_, 1) => one,
+        (_, 2..=4) => few,
+        _ => many,
     };
     format!("{count} {noun}")
+}
+
+const IN_THE_APP: &str = "Забронировать, перенести или отменить стол можно в приложении.";
+
+/// Reply to «Не смогу прийти» once table freed.
+pub const CANCELLED_FROM_REMINDER: &str =
+    "Бронь отменена. Спасибо, что предупредили — стол ушёл другим гостям.";
+
+/// Reply to button whose booking is gone, started, or never this guest's.
+pub const NO_LONGER_ACTIVE: &str = "Эта бронь уже не действует.";
+
+/// Cancel failed on server side. Button stays so guest can retry.
+pub const COULD_NOT_CANCEL: &str =
+    "Не получилось отменить. Попробуйте ещё раз или отмените в приложении.";
+
+/// Reply to bot start from app reminder prompt.
+#[must_use]
+pub fn reminders_on(remind_hours: i32) -> String {
+    format!(
+        "Готово: напоминание о брони придёт сюда за {}.",
+        hours(remind_hours)
+    )
+}
+
+/// Reply to bot start any other way.
+#[must_use]
+pub fn welcome(bar_name: &str, contact: Option<&str>) -> String {
+    format!("Это бот бара «{bar_name}». {IN_THE_APP}{}", reach(contact))
+}
+
+/// Reply to typed message. Nobody reads chat; silence feels like being ignored, so name contact.
+#[must_use]
+pub fn nobody_reads_this(bar_name: &str, contact: Option<&str>) -> String {
+    format!(
+        "Это бот бара «{bar_name}», сообщения здесь никто не читает. {IN_THE_APP}{}",
+        reach(contact)
+    )
+}
+
+fn reach(contact: Option<&str>) -> String {
+    contact.map_or_else(String::new, |contact| {
+        format!(" Связаться с баром: {contact}.")
+    })
+}
+
+fn hours(count: i32) -> String {
+    plural(count, "час", "часа", "часов")
 }
 
 #[cfg(test)]

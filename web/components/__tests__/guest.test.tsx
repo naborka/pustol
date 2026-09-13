@@ -11,12 +11,24 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { BookScreen, DayRailStrip, DoneScreen, HomeScreen, bookingDecision } from "../GuestScreens";
+import {
+  BookScreen,
+  DayRailStrip,
+  DoneScreen,
+  HomeScreen,
+  bookingDecision,
+  heldAfter,
+  heldOn,
+  pickerStart,
+} from "../GuestScreens";
 import { GuestCancelSheet } from "../Sheets";
+import type { GuestBooking } from "@/lib/api";
 import { TAP } from "@/lib/tokens";
-import { availability, bar, booking, dayOffer, noop, rail, session } from "./fixtures";
+import { availability, bar, booking, dayOffer, heldNoShow, noop, rail, seated, session } from "./fixtures";
 
 afterEach(cleanup);
+
+const friday: GuestBooking = { ...booking, id: "b2", service_date: "2026-09-12" };
 
 function home(overrides: Parameters<typeof session>[0] = {}) {
   return render(
@@ -26,7 +38,7 @@ function home(overrides: Parameters<typeof session>[0] = {}) {
       onCancel={noop}
       onEnableReminders={noop}
       onDismissReminders={noop}
-      onWriteToBar={noop}
+      onContact={noop}
     />,
   );
 }
@@ -41,8 +53,25 @@ describe("the guest's home screen", () => {
   });
 
   it("says the bar is shut when it is", () => {
-    home({ bar: { ...bar, now_minutes: 600 } });
+    home({ bar: { ...bar, now_minutes: 600, open_now: false, opens_at_minutes: 1_080 } });
     expect(screen.getByText("Откроется в 18:00")).toBeDefined();
+  });
+
+  it("says when it opens as the server said, not by comparing wall minutes", () => {
+    home({ bar: { ...bar, now_minutes: 600, open_now: false, opens_at_minutes: 1_110 } });
+    expect(screen.getByText("Откроется в 18:30")).toBeDefined();
+    cleanup();
+    home({ bar: { ...bar, now_minutes: 600, open_now: false, opens_at_minutes: null } });
+    expect(screen.getByText("Закрыт")).toBeDefined();
+  });
+
+  it("says open or shut as the server decided on its own clock, not by comparing wall minutes", () => {
+    // Clocks go back: wall clock passes same minutes twice.
+    home({ bar: { ...bar, open_now: false } });
+    expect(screen.getByText("Закрыт")).toBeDefined();
+    cleanup();
+    home({ bar: { ...bar, now_minutes: 1_570, open_now: true } });
+    expect(screen.getByText("Открыт до 02:00")).toBeDefined();
   });
 
   it("invites a booking by saying what tonight still has", () => {
@@ -61,10 +90,11 @@ describe("the guest's home screen", () => {
   it("shows a booking without ever naming a table", () => {
     // The bar assigns tables and moves them when the room changes. A number on a guest's screen is
     // a number they arrive quoting.
-    const { container } = home({ booking });
+    const { container } = home({ bookings: [booking] });
     expect(screen.getByText("Стол ваш")).toBeDefined();
     expect(screen.getByText("Сегодня в 21:30")).toBeDefined();
     expect(screen.getByText("4 гостя")).toBeDefined();
+    expect(screen.queryByText("Столик на вечер")).toBeNull();
     // A table as a *place* — "стол 7 · Стойка", "стол 7." — never appears. "Держим стол 15 минут"
     // is about a duration, which is why the pattern ends where a place would.
     expect(container.textContent).not.toMatch(/стол\s+\d+\s*(·|,|\.|$)/i);
@@ -72,31 +102,67 @@ describe("the guest's home screen", () => {
   });
 
   it("quotes the grace period the bar actually configured", () => {
-    home({ booking, bar: { ...bar, grace_minutes: 25 } });
+    home({ bookings: [booking], bar: { ...bar, grace_minutes: 25 } });
     expect(screen.getByText(/Держим стол 25 минут после времени брони/)).toBeDefined();
   });
 
-  it("offers to move and to cancel, and hands both back to whoever asked", async () => {
+  it("offers to move and to cancel, and hands back which booking", async () => {
     const onMove = vi.fn();
     const onCancel = vi.fn();
     render(
       <HomeScreen
-        session={session({ booking })}
+        session={session({ bookings: [booking] })}
         onMove={onMove}
         onCancel={onCancel}
         onEnableReminders={noop}
         onDismissReminders={noop}
-        onWriteToBar={noop}
+        onContact={noop}
       />,
     );
     await userEvent.click(screen.getByText("Перенести"));
-    expect(onMove).toHaveBeenCalledOnce();
+    expect(onMove).toHaveBeenCalledWith(booking);
     await userEvent.click(screen.getByText("Отменить"));
-    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onCancel).toHaveBeenCalledWith(booking);
+  });
+
+  it("offers a move exactly when the server says a new booking would replace this one, and always a cancel", () => {
+    // Server decides by own clock and slot grid; card never recomputes. Held no-show past last arrival tonight is `null`.
+    const cases: [string, GuestBooking, typeof bar, boolean][] = [
+      ["a plan not yet begun", booking, bar, true],
+      ["a no-show whose table is still held", heldNoShow, bar, true],
+      ["a held no-show after the last arrival, even by a clock that disagrees", heldNoShow, { ...bar, now_minutes: 1_440 }, true],
+      ["a held no-show whose evening has no time left", { ...heldNoShow, rebooking_replaces: null }, bar, false],
+      ["a party at the table", seated, bar, false],
+    ];
+    for (const [name, held, clock, movable] of cases) {
+      home({ bookings: [held], bar: clock });
+      expect(screen.queryByText("Перенести") !== null, name).toBe(movable);
+      expect(screen.getByText("Отменить"), name).toBeDefined();
+      expect(screen.queryByText("Другой вечер"), name).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("shows a card for every booking the guest holds, each cancelling its own", async () => {
+    const onCancel = vi.fn();
+    render(
+      <HomeScreen
+        session={session({ bookings: [seated, friday] })}
+        onMove={noop}
+        onCancel={onCancel}
+        onEnableReminders={noop}
+        onDismissReminders={noop}
+        onContact={noop}
+      />,
+    );
+    expect(screen.getAllByText("Стол ваш")).toHaveLength(2);
+    const card = screen.getByRole("group", { name: "Завтра в 21:30" });
+    await userEvent.click(within(card).getByText("Отменить"));
+    expect(onCancel).toHaveBeenCalledWith(friday);
   });
 
   it("asks about reminders exactly once, and never again after «Не нужно»", () => {
-    const { unmount } = home({ booking });
+    const { unmount } = home({ bookings: [booking] });
     expect(screen.getByText("Напомнить за 3 часа?")).toBeDefined();
     expect(
       screen.getByText(
@@ -105,7 +171,7 @@ describe("the guest's home screen", () => {
     ).toBeDefined();
     unmount();
 
-    home({ booking, reminders: { opted_in: false, deliverable: true, should_ask: false } });
+    home({ bookings: [booking], reminders: { opted_in: false, deliverable: true, should_ask: false } });
     expect(screen.queryByText("Напомнить за 3 часа?")).toBeNull();
   });
 
@@ -174,6 +240,14 @@ describe("the day rail", () => {
     await userEvent.click(screen.getByText("Сегодня"));
     expect(onServiceDate).toHaveBeenCalledWith("2026-09-11");
   });
+
+  it("marks an evening the guest already holds as theirs, and will not let it be tapped", async () => {
+    const onServiceDate = vi.fn();
+    railOf([dayOffer({ booked: true }), dayOffer({ service_date: "2026-09-12" })], onServiceDate);
+    expect(screen.getByText("ваша бронь")).toBeDefined();
+    await userEvent.click(screen.getByText("Сегодня"));
+    expect(onServiceDate).not.toHaveBeenCalled();
+  });
 });
 
 describe("the picker", () => {
@@ -186,7 +260,8 @@ describe("the picker", () => {
         partySize={2}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        failedToLoad={false}
+        daysFailure={null}
+        timesFailure={null}
         onPartySize={noop}
         onServiceDate={noop}
         onPick={noop}
@@ -253,7 +328,8 @@ describe("the picker", () => {
         partySize={2}
         serviceDate="2026-09-11"
         chosenMinutes={null}
-        failedToLoad
+        daysFailure={{ code: "internal", message: "boom" }}
+        timesFailure={{ code: "network", message: "offline" }}
         onPartySize={noop}
         onServiceDate={noop}
         onPick={noop}
@@ -275,20 +351,79 @@ describe("the picker", () => {
 
 describe("the main button", () => {
   it("carries the whole decision once a time is chosen", () => {
-    expect(bookingDecision(4, "2026-09-11", "2026-09-11", 1_290)).toEqual({
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290)).toEqual({
       label: "Забронировать · 4 гостя · сегодня в 21:30",
       enabled: true,
     });
-    expect(bookingDecision(2, "2026-09-13", "2026-09-11", 1_320).label).toBe(
+    expect(bookingDecision(2, "2026-09-13", bar, 1_320).label).toBe(
       "Забронировать · 2 гостя · вс, 13 сен в 22:00",
     );
   });
 
   it("asks for the missing half of the decision until it has it", () => {
-    expect(bookingDecision(4, "2026-09-11", "2026-09-11", null)).toEqual({
+    expect(bookingDecision(4, "2026-09-11", bar, null)).toEqual({
       label: "Выберите время",
       enabled: false,
     });
+  });
+
+  it("will not book an evening the times say the guest already holds, and says why", () => {
+    const refused = { label: "На этот вечер у вас уже есть бронь", enabled: false };
+    const held = { replacing: [], booked: true };
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290, held)).toEqual(refused);
+    expect(bookingDecision(4, "2026-09-11", bar, null, held)).toEqual(refused);
+  });
+});
+
+describe("the evening the picker opens on", () => {
+  it("is today without a booking, and a plan's own evening when moving it", () => {
+    expect(pickerStart(session())).toBe("2026-09-11");
+    expect(pickerStart(session({ bookings: [booking] }), booking)).toBe("2026-09-11");
+    expect(pickerStart(session({ bookings: [friday] }), friday)).toBe("2026-09-12");
+  });
+
+  it("is never an evening the guest already holds while another is open", () => {
+    // Guest seated tonight tapping «Забронировать стол» books another evening.
+    expect(pickerStart(session({ bookings: [seated] }))).toBe("2026-09-12");
+  });
+
+  it("is that evening when it is the only one the bar takes, where the picker then says so", () => {
+    expect(pickerStart(session({ bookings: [seated], bookable_days: ["2026-09-11"] }))).toBe(
+      "2026-09-11",
+    );
+  });
+
+  it("is a held no-show's own evening, which is the only one that replaces it", () => {
+    const session_ = session({ bookings: [heldNoShow], bookable_days: ["2026-09-12"] });
+    expect(pickerStart(session_, heldNoShow)).toBe("2026-09-11");
+  });
+
+  it("falls back to the first open evening when a plan's own is out of reach", () => {
+    const far = { ...booking, service_date: "2026-09-20" };
+    expect(pickerStart(session({ bookings: [far] }), far)).toBe("2026-09-11");
+  });
+});
+
+describe("an evening the guest already holds", () => {
+  it("is the server's word on each booking, never worked out from what a new booking would replace", () => {
+    // No-show on evening no longer bookable: guest cannot replace it, and it blocks no booking that evening.
+    const outOfReach: GuestBooking = { ...heldNoShow, rebooking_replaces: null, holds_evening: false };
+    expect(heldOn([outOfReach], "2026-09-11")).toBe(false);
+    expect(heldOn([seated], "2026-09-11")).toBe(true);
+    expect(heldOn([seated], "2026-09-12")).toBe(false);
+    expect(pickerStart(session({ bookings: [outOfReach] }))).toBe("2026-09-11");
+  });
+});
+
+describe("the bookings a guest holds after a write", () => {
+  it("lose what a booking replaced, gain what it took, and read soonest first", () => {
+    const later = { ...booking, id: "b5", start_minutes: 1_350 };
+    expect(heldAfter([friday, booking], [booking.id], later)).toEqual([later, friday]);
+    expect(heldAfter([seated], [], friday)).toEqual([seated, friday]);
+  });
+
+  it("lose a cancelled booking and nothing else", () => {
+    expect(heldAfter([seated, friday], [friday.id], null)).toEqual([seated]);
   });
 });
 
@@ -310,7 +445,7 @@ describe("cancelling", () => {
     expect(within(sheet).getByText("Сегодня в 21:30 · 4 гостя")).toBeDefined();
     expect(
       within(sheet).getByText(
-        "Стол сразу уйдёт другим гостям. Вернуть его получится, только если он останется свободен.",
+        "Стол сразу уйдёт другим гостям — вернуть эту бронь не получится.",
       ),
     ).toBeDefined();
 
@@ -320,5 +455,112 @@ describe("cancelling", () => {
 
     await userEvent.click(within(sheet).getByText("Отменить бронь"));
     expect(onConfirm).toHaveBeenCalledOnce();
+  });
+});
+
+describe("reaching a person at the bar", () => {
+  it("offers the bar's own contact for a party the app does not take", async () => {
+    const onContact = vi.fn();
+    render(
+      <HomeScreen
+        session={session({
+          bar: { ...bar, contact: { label: "@podval_bar", url: "https://t.me/podval_bar" } },
+        })}
+        onMove={noop}
+        onCancel={noop}
+        onEnableReminders={noop}
+        onDismissReminders={noop}
+        onContact={onContact}
+      />,
+    );
+    await userEvent.click(screen.getByText("Связаться: @podval_bar"));
+    expect(onContact).toHaveBeenCalledWith("https://t.me/podval_bar");
+  });
+
+  it("points nowhere when the bar gave nowhere to point", () => {
+    // Nobody reads bot chat; link into it promises reply nobody sends.
+    home();
+    expect(screen.queryByText(/Написать бару|Связаться/)).toBeNull();
+    expect(screen.getByText(/Компания больше 6/)).toBeDefined();
+  });
+});
+
+describe("moving a booking the guest already holds", () => {
+  it("says «Перенести» on the button when the times name a booking it replaces, so nobody wonders whether they are about to hold two", () => {
+    expect(bookingDecision(4, "2026-09-11", bar, 1_290, { replacing: [booking.id], booked: false }).label).toBe(
+      "Перенести · 4 гостя · сегодня в 21:30",
+    );
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290, { replacing: [heldNoShow.id], booked: false }).label).toBe(
+      "Перенести · 4 гостя · завтра в 21:30",
+    );
+  });
+
+  it("says «Забронировать» when the times name no booking it replaces, whatever the guest holds", () => {
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290, { replacing: [], booked: false }).label).toBe(
+      "Забронировать · 4 гостя · завтра в 21:30",
+    );
+    expect(bookingDecision(4, "2026-09-12", bar, 1_290).label).toBe("Забронировать · 4 гостя · завтра в 21:30");
+  });
+
+  it("confirms a move as a move", () => {
+    render(<DoneScreen booking={booking} bar={bar} moved />);
+    expect(screen.getByText("Бронь перенесена")).toBeDefined();
+    expect(screen.queryByText("Стол забронирован")).toBeNull();
+  });
+
+  it("tells the guest how long the table is held in words that agree with the number", () => {
+    home({ bookings: [booking], bar: { ...bar, grace_minutes: 21 } });
+    expect(screen.getByText(/Держим стол 21 минуту после времени брони/)).toBeDefined();
+    expect(screen.queryByText(/стол дождётся/)).toBeNull();
+  });
+});
+
+describe("the time grid, for a screen reader and a slow phone", () => {
+  it("says a taken time is taken in its name, not only by a line through it", () => {
+    render(
+      <BookScreen
+        bar={bar}
+        days={rail(4)}
+        availability={availability()}
+        partySize={2}
+        serviceDate="2026-09-11"
+        chosenMinutes={null}
+        daysFailure={null}
+        timesFailure={null}
+        onPartySize={noop}
+        onServiceDate={noop}
+        onPick={noop}
+        onTakenSlot={noop}
+        onRetry={noop}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "22:00, занято" })).toBeDefined();
+  });
+
+  it("keeps the last answer on screen while it asks again, but will not take a tap on it", async () => {
+    // Spinner on every change makes page jump; tap on times for old party size books wrong question.
+    const onPick = vi.fn();
+    render(
+      <BookScreen
+        bar={bar}
+        days={rail(4)}
+        availability={availability()}
+        partySize={4}
+        serviceDate="2026-09-11"
+        chosenMinutes={null}
+        daysFailure={null}
+        timesFailure={null}
+        timesPending
+        onPartySize={noop}
+        onServiceDate={noop}
+        onPick={onPick}
+        onTakenSlot={noop}
+        onRetry={noop}
+      />,
+    );
+    const time = screen.getByRole("button", { name: "21:30" });
+    expect((time as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(time);
+    expect(onPick).not.toHaveBeenCalled();
   });
 });

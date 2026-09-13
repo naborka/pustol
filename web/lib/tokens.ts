@@ -43,3 +43,6 @@ export const TIMING = {
   /** A message with nothing to undo. */
   toastMs: 4200,
 } as const;
+
+/** Stacking order. Toast about sheet action must show over sheet. */
+export const LAYER = { backdrop: 10, sheet: 11, toast: 12 } as const;

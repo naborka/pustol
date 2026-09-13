@@ -37,7 +37,7 @@ pub enum Error {
     #[error("that booking has already started")]
     BookingHasStarted,
 
-    /// Moving a booking that no longer holds a table. It is the record of an evening now.
+    /// Moving or cancelling booking that no longer holds table. Record of an evening now.
     #[error("that booking is over")]
     BookingHasFinished,
 
@@ -65,19 +65,18 @@ pub enum Error {
     #[error("that is not one of this bar's messages")]
     UnknownMessage,
 
-    /// Closing a table without saying why. Guarded here so the reason can never be optional in
-    /// storage, where staff would find rows they cannot explain.
-    #[error("closing a table needs a reason")]
-    MissingBlockReason,
+    /// Guest bot cannot write to: booking without account, or account bot found unreachable. Staff
+    /// must call.
+    #[error("the bot has no chat with this guest")]
+    NoBotChat,
 
     /// A note longer than a row in a list can show.
     #[error("a note is at most {limit} characters")]
     NoteTooLong { limit: usize },
 
-    /// Seating somebody "now" on a shift that is not the one running.
+    /// Seating "now" on shift not running: other day, day off, not yet open, or past closing.
     ///
-    /// There is no now on next Tuesday. Refused here rather than in a handler, because the only
-    /// thing that knows which shift is running is the configuration this layer reads.
+    /// Refused here, not in handler: only config this layer reads knows running shift.
     #[error("{service_day} is not the shift that is running")]
     NotTheRunningShift { service_day: chrono::NaiveDate },
 
@@ -103,9 +102,39 @@ pub enum Error {
     #[error("the proposed configuration is not legal: {0:?}")]
     ProposedConfigInvalid(Vec<ConfigError>),
 
+    /// Proposal built on settings another save replaced. Saving would silently undo that save;
+    /// nothing written.
+    #[error("the settings have changed since this proposal was made from them")]
+    SettingsChanged,
+
     /// A proposed configuration would strand bookings that have already been promised.
     #[error("the proposed configuration would strand {} booking(s)", .0.len())]
     WouldStrandBookings(Vec<crate::bar::StrandedBooking>),
+
+    /// Guest already holds running confirmed or arrived booking that evening, which rebooking
+    /// cannot replace. Staff change refused same way when guest would hold two tables that
+    /// evening; no-show within grace counts. Checked under bar lock, not constraint: running
+    /// depends on clock.
+    #[error("this guest already has a booking on this shift")]
+    AlreadyBookedThisShift,
+
+    /// Staff change would leave guest two plans (bookings not yet begun). Rebooking replaces a
+    /// plan, so guest never makes two; staff must not either.
+    #[error("this guest already has another plan")]
+    GuestHasAnotherPlan,
+
+    /// Guest booking would replace other bookings than app said.
+    ///
+    /// App words button («Перенести» or «Забронировать») from what rebooking replaces; guest agreed
+    /// to that. Since then plan may have begun or been marked no-show, so carrying on would drop
+    /// booking guest meant to keep, or keep one meant to drop. Nothing written.
+    #[error("what this booking would replace is not what the app said it would")]
+    BookingChanged,
+
+    /// Restored status would hold table given to another party since release. Pick another table
+    /// or leave booking as is.
+    #[error("that table has been given to another party since")]
+    TableTaken,
 
     /// An instant could not be built from a service day and a wall-clock minute.
     #[error(transparent)]

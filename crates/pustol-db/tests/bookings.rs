@@ -3,12 +3,15 @@
 
 mod common;
 
-use pustol_db::bookings::{Attendance, Channel};
+use pustol_db::bookings::{Attendance, Channel, MoveTo};
 use pustol_db::{BookingSource, Error};
 use pustol_domain::{BookingStatus, SlotAvailability, TableId};
 use uuid::Uuid;
 
-use common::{at, config_with, default_bar, default_config, fresh_account, guest_booking, morning, staff_booking, store, table, thursday, utc};
+use common::{
+    Availability, at, config_with, default_bar, default_config, fresh_account, guest_booking,
+    morning, signed, staff_booking, store, table, thursday, utc,
+};
 
 #[tokio::test]
 async fn a_bar_round_trips_through_storage_unchanged() {
@@ -25,7 +28,7 @@ async fn a_guest_is_seated_at_the_smallest_table_that_fits() {
     let (bar, config) = default_bar(&store).await;
     let account = fresh_account("Алексей");
     store
-        .identify(bar, &account, morning())
+        .identify(bar, &account, signed(morning()), morning())
         .await
         .expect("identified");
 
@@ -36,7 +39,7 @@ async fn a_guest_is_seated_at_the_smallest_table_that_fits() {
     assert_eq!(created.record.table_number, Some(1));
     assert_eq!(created.record.source, BookingSource::App);
     assert_eq!(created.record.booking.status, BookingStatus::Confirmed);
-    assert_eq!(created.replaced, None);
+    assert!(created.replaced.is_empty());
     assert_eq!(
         created.record.booking.window.minutes(),
         i64::from(config.turn_minutes)
@@ -47,13 +50,13 @@ async fn a_guest_is_seated_at_the_smallest_table_that_fits() {
 async fn a_booking_takes_its_slot_out_of_the_picker() {
     let store = store().await;
     // One two-top, so the only slot for a couple at 20:00 disappears once it is taken.
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let account = fresh_account("Вера");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -61,9 +64,10 @@ async fn a_booking_takes_its_slot_out_of_the_picker() {
         .expect("free");
 
     let slots = store
-        .availability(bar, thursday(), 2, morning(), None)
+        .availability(bar, thursday(), 2, morning(), &[])
         .await
-        .expect("reads").slots;
+        .expect("reads")
+        .slots;
     let at_eight = slots
         .iter()
         .find(|slot| slot.start_minutes == 1200)
@@ -95,15 +99,18 @@ async fn a_booking_takes_its_slot_out_of_the_picker() {
 #[tokio::test]
 async fn a_time_that_no_longer_has_a_table_is_refused_by_name() {
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let first = fresh_account("Вера");
     let second = fresh_account("Марина");
-    store.identify(bar, &first, morning()).await.expect("ok");
-    store.identify(bar, &second, morning()).await.expect("ok");
+    store
+        .identify(bar, &first, signed(morning()), morning())
+        .await
+        .expect("ok");
+    store
+        .identify(bar, &second, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     store
         .create_booking(&guest_booking(bar, &first, 1200, 2), morning())
@@ -124,7 +131,10 @@ async fn a_time_that_has_gone_is_refused_as_past_rather_than_as_unavailable() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Егор");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     // 22:00 Belgrade, asking for a table at 20:00.
     let late = utc(2026, 7, 30, 20, 0);
@@ -140,7 +150,10 @@ async fn a_time_off_the_configured_step_is_not_an_arrival_time_at_all() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Настя");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     let refused = store
         .create_booking(&guest_booking(bar, &account, 1205, 2), morning())
@@ -157,7 +170,10 @@ async fn an_arrival_after_the_last_one_the_shift_allows_is_refused() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Глеб");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     // Closing is 02:00 and a turn is two hours, so the last arrival is midnight.
     let refused = store
@@ -179,7 +195,10 @@ async fn a_party_above_the_bars_limit_is_refused_with_the_limit_named() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Артур");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     let refused = store
         .create_booking(&guest_booking(bar, &account, 1200, 8), morning())
@@ -202,7 +221,10 @@ async fn a_guest_cannot_book_beyond_the_horizon_but_staff_can() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Мила");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     // The horizon is four days: Thursday through Sunday.
     let next_week = thursday().checked_add_days(9).expect("in range");
@@ -227,7 +249,7 @@ async fn a_guest_cannot_book_beyond_the_horizon_but_staff_can() {
         .expect("staff are not bound by the horizon");
     assert_eq!(created.record.source, BookingSource::Staff);
     assert!(
-        !created.record.has_telegram_account(),
+        created.record.telegram_user_id.is_none(),
         "a staff-entered guest has no account, so the bot has no chat with them"
     );
 }
@@ -237,31 +259,41 @@ async fn booking_again_replaces_the_booking_the_guest_had_not_yet_started() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Лиза");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     let first = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
         .expect("free");
     let second = store
-        .create_booking(&guest_booking(bar, &account, 1320, 4), morning())
+        .create_booking(
+            &common::replacing(
+                guest_booking(bar, &account, 1320, 4),
+                &[first.record.booking.id],
+            ),
+            morning(),
+        )
         .await
         .expect("free");
 
-    assert_eq!(second.replaced, Some(first.record.booking.id));
+    assert_eq!(second.replaced, vec![first.record.booking.id]);
     let mine = store
-        .booking_of_guest(bar, account.id, morning())
+        .bookings_of_guest(bar, account.id, morning())
         .await
-        .expect("reads")
-        .expect("one booking");
-    assert_eq!(mine.booking.id, second.record.booking.id);
-    assert_eq!(mine.booking.party_size, 4);
+        .expect("reads");
+    assert_eq!(mine.len(), 1, "the new booking and nothing else");
+    assert_eq!(mine[0].booking.id, second.record.booking.id);
+    assert_eq!(mine[0].booking.party_size, 4);
 
     // The released table is available again.
     let slots = store
-        .availability(bar, thursday(), 2, morning(), None)
+        .availability(bar, thursday(), 2, morning(), &[])
         .await
-        .expect("reads").slots;
+        .expect("reads")
+        .slots;
     assert!(
         slots
             .iter()
@@ -275,14 +307,22 @@ async fn booking_again_does_not_take_the_table_from_a_guest_already_sitting_at_i
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Тимур");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     let seated = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
         .expect("free");
     store
-        .set_attendance(bar, seated.record.booking.id, Attendance::Arrived, morning())
+        .set_attendance(
+            bar,
+            seated.record.booking.id,
+            Attendance::Arrived,
+            morning(),
+        )
         .await
         .expect("they turned up");
 
@@ -295,13 +335,13 @@ async fn booking_again_does_not_take_the_table_from_a_guest_already_sitting_at_i
         .create_booking(&tomorrow, evening)
         .await
         .expect("a different shift");
-    assert_eq!(
-        created.replaced, None,
+    assert!(
+        created.replaced.is_empty(),
         "a seating in progress is never cancelled by a later booking"
     );
 
     let still_seated = store
-        .shift(bar, thursday())
+        .evening(bar, thursday(), common::morning())
         .await
         .expect("reads")
         .bookings
@@ -316,16 +356,16 @@ async fn booking_again_does_not_take_the_table_from_a_guest_already_sitting_at_i
 async fn only_one_of_many_guests_racing_for_the_last_table_gets_it() {
     let store = store().await;
     // Exactly one table that can seat a couple.
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
 
     let mut accounts = Vec::new();
     for index in 0..8 {
         let account = fresh_account(&format!("Гость {index}"));
-        store.identify(bar, &account, morning()).await.expect("ok");
+        store
+            .identify(bar, &account, signed(morning()), morning())
+            .await
+            .expect("ok");
         accounts.push(account);
     }
 
@@ -353,14 +393,16 @@ async fn only_one_of_many_guests_racing_for_the_last_table_gets_it() {
         }
     }
 
-    let live = store.shift(bar, thursday()).await.expect("reads").bookings;
+    let live = store
+        .evening(bar, thursday(), common::morning())
+        .await
+        .expect("reads")
+        .bookings;
     assert_eq!(live.len(), 1, "and the room holds exactly one booking");
 }
 
 /// Awaits a set of spawned tasks, in order, without pulling in a futures crate for one test.
-async fn futures_lite<T>(
-    handles: impl IntoIterator<Item = tokio::task::JoinHandle<T>>,
-) -> Vec<T> {
+async fn futures_lite<T>(handles: impl IntoIterator<Item = tokio::task::JoinHandle<T>>) -> Vec<T> {
     let mut results = Vec::new();
     for handle in handles {
         results.push(handle.await.expect("task did not panic"));
@@ -375,20 +417,25 @@ async fn a_no_show_holds_its_table_through_the_grace_period_and_no_longer() {
     // holding it, which is the end of the grace period and not the moment a bartender got round
     // to pressing the button.
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let account = fresh_account("Марина");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
         .expect("free");
 
     let absent = store
-        .set_attendance(bar, created.record.booking.id, Attendance::NoShow, morning())
+        .set_attendance(
+            bar,
+            created.record.booking.id,
+            Attendance::NoShow,
+            morning(),
+        )
         .await
         .expect("recorded");
     assert_eq!(absent.record.booking.status, BookingStatus::NoShow);
@@ -399,7 +446,7 @@ async fn a_no_show_holds_its_table_through_the_grace_period_and_no_longer() {
     );
 
     let slots = store
-        .availability(bar, thursday(), 2, morning(), None)
+        .availability(bar, thursday(), 2, morning(), &[])
         .await
         .expect("reads")
         .slots;
@@ -423,13 +470,13 @@ async fn a_no_show_holds_its_table_through_the_grace_period_and_no_longer() {
 #[tokio::test]
 async fn a_party_that_leaves_gives_its_table_back_from_that_minute() {
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let account = fresh_account("Саша");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -444,7 +491,10 @@ async fn a_party_that_leaves_gives_its_table_back_from_that_minute() {
     assert_eq!(gone.record.booking.status, BookingStatus::Left);
     assert_eq!(gone.record.booking.released_at, Some(left_at));
     assert_eq!(
-        gone.record.booking.occupancy().map(pustol_domain::Interval::end),
+        gone.record
+            .booking
+            .occupancy()
+            .map(pustol_domain::Interval::end),
         Some(left_at),
         "the one occupancy rule: the table is theirs up to the minute they left"
     );
@@ -453,7 +503,7 @@ async fn a_party_that_leaves_gives_its_table_back_from_that_minute() {
         let store = &store;
         async move {
             store
-                .availability(bar, thursday(), 2, at(thursday(), 600), None)
+                .availability(bar, thursday(), 2, at(thursday(), 600), &[])
                 .await
                 .expect("reads")
                 .slots
@@ -472,13 +522,13 @@ async fn a_party_that_leaves_gives_its_table_back_from_that_minute() {
 #[tokio::test]
 async fn undoing_a_departure_puts_the_table_back_exactly_as_it_was() {
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let account = fresh_account("Глеб");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -517,7 +567,10 @@ async fn a_table_given_back_early_seats_a_party_that_had_none() {
     let first = fresh_account("Аня");
     let second = fresh_account("Борис");
     for account in [&first, &second] {
-        store.identify(bar, account, morning()).await.expect("ok");
+        store
+            .identify(bar, account, signed(morning()), morning())
+            .await
+            .expect("ok");
     }
     // Eight o'clock at the first table, nine at the second: the second party cannot move to the
     // first table while the first party is still sitting at it.
@@ -536,13 +589,16 @@ async fn a_table_given_back_early_seats_a_party_that_had_none() {
             bar,
             thursday(),
             &[config.tables[1].id],
-            "Дождь",
+            &common::reason("Дождь"),
             None,
             morning(),
         )
         .await
         .expect("closes");
-    assert_eq!(closed.outcome.orphaned, vec![stranded.record.booking.id]);
+    assert_eq!(
+        closed.reconciliation.outcome.orphaned,
+        vec![stranded.record.booking.id]
+    );
 
     // The party at the first table leaves early. Nobody asks for a reconciliation.
     let left_at = at(thursday(), 1260);
@@ -602,10 +658,13 @@ async fn staff_taking_a_booking_pick_the_table_themselves() {
 
     let mut request = staff_booking(bar, "Глеб", 1200, 2);
     request.channel = Channel::Staff {
-        guest_name: "Глеб".to_owned(),
+        guest_name: pustol_domain::GuestName::new("Глеб").expect("not blank"),
         table: Some(corner.id),
     };
-    let created = store.create_booking(&request, morning()).await.expect("free");
+    let created = store
+        .create_booking(&request, morning())
+        .await
+        .expect("free");
     assert_eq!(created.record.table_number, Some(2));
 
     // And a table somebody else has is refused, exactly as it is for a walk-in or a move.
@@ -626,7 +685,10 @@ async fn staff_move_a_booking_to_another_table_at_the_same_time() {
     )
     .await;
     let account = fresh_account("Глеб");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -637,8 +699,11 @@ async fn staff_move_a_booking_to_another_table_at_the_same_time() {
         .move_booking(
             bar,
             created.record.booking.id,
-            Some(corner.id),
-            1200,
+            MoveTo {
+                start_minutes: 1200,
+                table: Some(corner.id),
+                party_size: None,
+            },
             None,
             morning(),
         )
@@ -647,23 +712,25 @@ async fn staff_move_a_booking_to_another_table_at_the_same_time() {
 
     assert_eq!(moved.record.table_number, Some(2));
     assert_eq!(
-        moved.record.booking.window,
-        created.record.booking.window,
+        moved.record.booking.window, created.record.booking.window,
         "only the table moved"
     );
-    assert!(!moved.guest_notified, "a guest is never told a table number");
+    assert!(
+        !moved.guest_notified,
+        "a guest is never told a table number"
+    );
 }
 
 #[tokio::test]
 async fn staff_move_a_booking_to_another_time_and_the_guest_is_told() {
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 4, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 4, "Бар")], "anna_mgr")).await;
     let account = fresh_account("Тимур");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -673,8 +740,11 @@ async fn staff_move_a_booking_to_another_time_and_the_guest_is_told() {
         .move_booking(
             bar,
             created.record.booking.id,
-            created.record.booking.table_id,
-            1320,
+            MoveTo {
+                start_minutes: 1320,
+                table: created.record.booking.table_id,
+                party_size: None,
+            },
             Some(common::move_words()),
             morning(),
         )
@@ -694,7 +764,7 @@ async fn staff_move_a_booking_to_another_time_and_the_guest_is_told() {
 
     // The time they were moved to is the time the room now has taken, and the old one is free.
     let slots = store
-        .availability(bar, thursday(), 2, morning(), None)
+        .availability(bar, thursday(), 2, morning(), &[])
         .await
         .expect("reads")
         .slots;
@@ -724,7 +794,10 @@ async fn a_booking_cannot_be_moved_onto_a_table_that_is_not_free_for_it() {
     let mover = fresh_account("Ксения");
     let sitting = fresh_account("Артур");
     for account in [&mover, &sitting] {
-        store.identify(bar, account, morning()).await.expect("ok");
+        store
+            .identify(bar, account, signed(morning()), morning())
+            .await
+            .expect("ok");
     }
     let mine = store
         .create_booking(&guest_booking(bar, &mover, 1200, 4), morning())
@@ -742,7 +815,17 @@ async fn a_booking_cannot_be_moved_onto_a_table_that_is_not_free_for_it() {
         (TableId(Uuid::nil()), "not a table this bar has"),
     ] {
         let refused = store
-            .move_booking(bar, mine.record.booking.id, Some(table_id), 1200, None, morning())
+            .move_booking(
+                bar,
+                mine.record.booking.id,
+                MoveTo {
+                    start_minutes: 1200,
+                    table: Some(table_id),
+                    party_size: None,
+                },
+                None,
+                morning(),
+            )
             .await;
         assert!(
             matches!(refused, Err(Error::ChosenTableNotFree)),
@@ -751,7 +834,7 @@ async fn a_booking_cannot_be_moved_onto_a_table_that_is_not_free_for_it() {
     }
     assert_eq!(
         store
-            .shift(bar, thursday())
+            .evening(bar, thursday(), common::morning())
             .await
             .expect("reads")
             .bookings
@@ -775,7 +858,10 @@ async fn an_evening_that_has_started_or_finished_is_not_moved_in_time() {
     )
     .await;
     let account = fresh_account("Полина");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -789,14 +875,34 @@ async fn an_evening_that_has_started_or_finished_is_not_moved_in_time() {
         .await
         .expect("recorded");
     let refused = store
-        .move_booking(bar, id, Some(table_id), 1320, None, sat_down)
+        .move_booking(
+            bar,
+            id,
+            MoveTo {
+                start_minutes: 1320,
+                table: Some(table_id),
+                party_size: None,
+            },
+            None,
+            sat_down,
+        )
         .await;
     assert!(
         matches!(refused, Err(Error::BookingHasStarted)),
         "got {refused:?}"
     );
     store
-        .move_booking(bar, id, Some(table_id), 1200, None, sat_down)
+        .move_booking(
+            bar,
+            id,
+            MoveTo {
+                start_minutes: 1200,
+                table: Some(table_id),
+                party_size: None,
+            },
+            None,
+            sat_down,
+        )
         .await
         .expect("the table is still theirs to change");
 
@@ -807,7 +913,17 @@ async fn an_evening_that_has_started_or_finished_is_not_moved_in_time() {
         .await
         .expect("recorded");
     let refused = store
-        .move_booking(bar, id, Some(table_id), 1200, None, went_home)
+        .move_booking(
+            bar,
+            id,
+            MoveTo {
+                start_minutes: 1200,
+                table: Some(table_id),
+                party_size: None,
+            },
+            None,
+            went_home,
+        )
         .await;
     assert!(
         matches!(refused, Err(Error::BookingHasFinished)),
@@ -854,7 +970,14 @@ async fn a_table_staff_cannot_have_is_refused_by_its_own_name() {
     .await;
     let evening = at(thursday(), 1230);
     store
-        .block_tables(bar, thursday(), &[closed.id], "Дождь", None, evening)
+        .block_tables(
+            bar,
+            thursday(),
+            &[closed.id],
+            &common::reason("Дождь"),
+            None,
+            evening,
+        )
         .await
         .expect("closes");
     store
@@ -881,11 +1004,8 @@ async fn a_table_staff_cannot_have_is_refused_by_its_own_name() {
 #[tokio::test]
 async fn a_walk_in_is_refused_on_a_shift_that_is_not_running() {
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let outcome = store
         .seat_walk_in(
             bar,
@@ -905,11 +1025,8 @@ async fn a_walk_in_is_refused_on_a_shift_that_is_not_running() {
 #[tokio::test]
 async fn only_one_of_many_walk_ins_racing_for_the_last_table_gets_it() {
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let evening = at(thursday(), 1230);
 
     let attempts = (0..8).map(|_| {
@@ -931,7 +1048,11 @@ async fn only_one_of_many_walk_ins_racing_for_the_last_table_gets_it() {
             );
         }
     }
-    let live = store.shift(bar, thursday()).await.expect("reads").bookings;
+    let live = store
+        .evening(bar, thursday(), common::morning())
+        .await
+        .expect("reads")
+        .bookings;
     assert_eq!(live.len(), 1);
 }
 
@@ -940,7 +1061,10 @@ async fn a_note_is_written_rubbed_out_and_never_longer_than_a_row() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Тимур");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -949,15 +1073,20 @@ async fn a_note_is_written_rubbed_out_and_never_longer_than_a_row() {
     assert_eq!(created.record.note, None);
 
     let noted = store
-        .set_note(bar, id, Some("  День рождения  "))
+        .set_note(bar, id, Some("  День рождения  "), morning())
         .await
         .expect("written");
-    assert_eq!(noted.note.as_deref(), Some("День рождения"));
+    assert_eq!(noted.record.note.as_deref(), Some("День рождения"));
 
-    let blanked = store.set_note(bar, id, Some("   ")).await.expect("rubbed out");
-    assert_eq!(blanked.note, None, "whitespace is not a note");
+    let blanked = store
+        .set_note(bar, id, Some("   "), morning())
+        .await
+        .expect("rubbed out");
+    assert_eq!(blanked.record.note, None, "whitespace is not a note");
 
-    let refused = store.set_note(bar, id, Some(&"я".repeat(121))).await;
+    let refused = store
+        .set_note(bar, id, Some(&"я".repeat(121)), morning())
+        .await;
     assert!(
         matches!(refused, Err(Error::NoteTooLong { .. })),
         "got {refused:?}"
@@ -967,13 +1096,13 @@ async fn a_note_is_written_rubbed_out_and_never_longer_than_a_row() {
 #[tokio::test]
 async fn cancelling_frees_the_table_and_records_the_reason_given() {
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let account = fresh_account("Полина");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -997,21 +1126,22 @@ async fn cancelling_frees_the_table_and_records_the_reason_given() {
     assert!(cancelled.reconciliation.is_empty(), "nobody was waiting");
 
     let slots = store
-        .availability(bar, thursday(), 2, morning(), None)
+        .availability(bar, thursday(), 2, morning(), &[])
         .await
-        .expect("reads").slots;
+        .expect("reads")
+        .slots;
     assert!(
         slots
             .iter()
             .find(|slot| slot.start_minutes == 1200)
             .is_some_and(|slot| slot.availability.is_free())
     );
-    assert_eq!(
+    assert!(
         store
-            .booking_of_guest(bar, account.id, morning())
+            .bookings_of_guest(bar, account.id, morning())
             .await
-            .expect("reads"),
-        None
+            .expect("reads")
+            .is_empty()
     );
 }
 
@@ -1030,7 +1160,10 @@ async fn a_booking_is_the_guests_for_exactly_as_long_as_it_holds_their_table() {
         (Attendance::NoShow, 1205, 1214, 1215),
     ] {
         let account = fresh_account("Полина");
-        store.identify(bar, &account, morning()).await.expect("ok");
+        store
+            .identify(bar, &account, signed(morning()), morning())
+            .await
+            .expect("ok");
         let created = store
             .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
             .await
@@ -1045,30 +1178,34 @@ async fn a_booking_is_the_guests_for_exactly_as_long_as_it_holds_their_table() {
             .await
             .expect("recorded");
 
-        assert!(
-            store
-                .booking_of_guest(bar, account.id, at(thursday(), still_theirs))
-                .await
-                .expect("reads")
-                .is_some(),
-            "{attendance:?}: the table is still being held at {still_theirs}"
-        );
         assert_eq!(
             store
-                .booking_of_guest(bar, account.id, at(thursday(), over))
+                .bookings_of_guest(bar, account.id, at(thursday(), still_theirs))
                 .await
-                .expect("reads"),
-            None,
-            "{attendance:?}: the table went back into the pool at {over}"
+                .expect("reads")
+                .len(),
+            1,
+            "{attendance:?}: the table is still being held at {still_theirs}"
         );
         assert!(
-            matches!(
-                store
-                    .cancel_booking_of_guest(bar, account.id, at(thursday(), over))
-                    .await,
-                Err(Error::NotFound { .. })
-            ),
-            "{attendance:?}: an evening that happened is not a booking to give back"
+            store
+                .bookings_of_guest(bar, account.id, at(thursday(), over))
+                .await
+                .expect("reads")
+                .is_empty(),
+            "{attendance:?}: the table went back into the pool at {over}"
+        );
+        let refused = store
+            .cancel_booking_of_guest(
+                bar,
+                account.id,
+                created.record.booking.id,
+                at(thursday(), over),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(Error::BookingHasFinished)),
+            "{attendance:?}: an evening that happened is not a booking to give back, got {refused:?}"
         );
     }
 }
@@ -1082,7 +1219,10 @@ async fn leaving_tonight_hands_the_guest_back_the_evening_they_booked_next() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Ксения");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     let tonight = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
@@ -1090,7 +1230,12 @@ async fn leaving_tonight_hands_the_guest_back_the_evening_they_booked_next() {
         .expect("free");
     let sat_down = at(thursday(), 1200);
     store
-        .set_attendance(bar, tonight.record.booking.id, Attendance::Arrived, sat_down)
+        .set_attendance(
+            bar,
+            tonight.record.booking.id,
+            Attendance::Arrived,
+            sat_down,
+        )
         .await
         .expect("recorded");
 
@@ -1103,12 +1248,14 @@ async fn leaving_tonight_hands_the_guest_back_the_evening_they_booked_next() {
 
     assert_eq!(
         store
-            .booking_of_guest(bar, account.id, at(thursday(), 1250))
+            .bookings_of_guest(bar, account.id, at(thursday(), 1250))
             .await
             .expect("reads")
-            .map(|record| record.booking.id),
-        Some(tonight.record.booking.id),
-        "while they are sitting, what they have is the table they are at"
+            .iter()
+            .map(|record| record.booking.id)
+            .collect::<Vec<_>>(),
+        vec![tonight.record.booking.id, saturday.record.booking.id],
+        "while they are sitting they hold both, the table they are at first"
     );
 
     let went_home = at(thursday(), 1290);
@@ -1118,11 +1265,13 @@ async fn leaving_tonight_hands_the_guest_back_the_evening_they_booked_next() {
         .expect("recorded");
     assert_eq!(
         store
-            .booking_of_guest(bar, account.id, went_home)
+            .bookings_of_guest(bar, account.id, went_home)
             .await
             .expect("reads")
-            .map(|record| record.booking.id),
-        Some(saturday.record.booking.id),
+            .iter()
+            .map(|record| record.booking.id)
+            .collect::<Vec<_>>(),
+        vec![saturday.record.booking.id],
         "tonight is over, and Saturday is still theirs"
     );
 }
@@ -1132,7 +1281,10 @@ async fn cancelling_twice_is_refused_rather_than_silently_repeated() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;
     let account = fresh_account("Юля");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     let created = store
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
@@ -1159,7 +1311,7 @@ async fn a_guest_of_one_bar_is_invisible_to_another() {
     let (second_bar, _) = default_bar(&store).await;
     let account = fresh_account("Ксения");
     store
-        .identify(first_bar, &account, morning())
+        .identify(first_bar, &account, signed(morning()), morning())
         .await
         .expect("ok");
 
@@ -1167,16 +1319,16 @@ async fn a_guest_of_one_bar_is_invisible_to_another() {
         .create_booking(&guest_booking(first_bar, &account, 1200, 2), morning())
         .await
         .expect("free");
-    assert_eq!(
+    assert!(
         store
-            .booking_of_guest(second_bar, account.id, morning())
+            .bookings_of_guest(second_bar, account.id, morning())
             .await
-            .expect("reads"),
-        None
+            .expect("reads")
+            .is_empty()
     );
     assert!(
         store
-            .shift(second_bar, thursday())
+            .evening(second_bar, thursday(), common::morning())
             .await
             .expect("reads")
             .bookings
@@ -1189,7 +1341,10 @@ async fn the_shift_view_reports_the_bookings_and_the_tables_that_are_shut() {
     let store = store().await;
     let (bar, config) = default_bar(&store).await;
     let account = fresh_account("Соня");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
     store
         .create_booking(&guest_booking(bar, &account, 1200, 4), morning())
         .await
@@ -1202,11 +1357,21 @@ async fn the_shift_view_reports_the_bookings_and_the_tables_that_are_shut() {
         .map(|table| table.id)
         .collect();
     store
-        .block_tables(bar, thursday(), &terrace, "Дождь", None, morning())
+        .block_tables(
+            bar,
+            thursday(),
+            &terrace,
+            &common::reason("Дождь"),
+            None,
+            morning(),
+        )
         .await
         .expect("closed");
 
-    let shift = store.shift(bar, thursday()).await.expect("reads");
+    let shift = store
+        .evening(bar, thursday(), common::morning())
+        .await
+        .expect("reads");
     assert_eq!(shift.bookings.len(), 1);
     assert_eq!(shift.blocks.len(), 2);
     assert!(shift.blocks.iter().all(|block| block.reason == "Дождь"));
@@ -1225,7 +1390,10 @@ async fn a_booking_at_one_in_the_morning_belongs_to_the_evening_it_started_in() 
     let store = store().await;
     let (bar, config) = default_bar(&store).await;
     let account = fresh_account("Егор");
-    store.identify(bar, &account, morning()).await.expect("ok");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     // Midnight is minute 1440 of the Thursday shift: the last arrival before a 02:00 close.
     let created = store
@@ -1240,7 +1408,7 @@ async fn a_booking_at_one_in_the_morning_belongs_to_the_evening_it_started_in() 
     );
     assert!(
         store
-            .shift(bar, thursday())
+            .evening(bar, thursday(), common::morning())
             .await
             .expect("reads")
             .bookings
@@ -1264,15 +1432,18 @@ async fn a_late_booking_does_not_haunt_the_following_shift() {
     // guarantee does not quietly depend on that arithmetic staying true. What must be visible here
     // is the absence of a phantom conflict: yesterday's late booking blocks nothing today.
     let store = store().await;
-    let (bar, _) = common::bar_with(
-        &store,
-        config_with(vec![table(1, 2, "Бар")], "anna_mgr"),
-    )
-    .await;
+    let (bar, _) =
+        common::bar_with(&store, config_with(vec![table(1, 2, "Бар")], "anna_mgr")).await;
     let first = fresh_account("Роман");
     let second = fresh_account("Данила");
-    store.identify(bar, &first, morning()).await.expect("ok");
-    store.identify(bar, &second, morning()).await.expect("ok");
+    store
+        .identify(bar, &first, signed(morning()), morning())
+        .await
+        .expect("ok");
+    store
+        .identify(bar, &second, signed(morning()), morning())
+        .await
+        .expect("ok");
 
     // Arrives at midnight on the Thursday shift, leaves at 02:00 on the Friday morning.
     let late = store
@@ -1285,9 +1456,10 @@ async fn a_late_booking_does_not_haunt_the_following_shift() {
     // Friday opens at 10:00, eight hours after that table is free again.
     let friday = thursday().checked_add_days(1).expect("in range");
     let slots = store
-        .availability(bar, friday, 2, morning(), None)
+        .availability(bar, friday, 2, morning(), &[])
         .await
-        .expect("reads").slots;
+        .expect("reads")
+        .slots;
     assert!(
         slots.iter().all(|slot| slot.availability.is_free()),
         "no slot on the following shift is held by the late booking"
@@ -1299,4 +1471,663 @@ async fn a_late_booking_does_not_haunt_the_following_shift() {
         .create_booking(&friday_evening, morning())
         .await
         .expect("the one table is free on Friday");
+}
+
+#[tokio::test]
+async fn staff_grow_a_party_and_the_room_finds_a_table_it_fits() {
+    let store = store().await;
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 2, "Бар"), table(2, 4, "Зал")], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Сева");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    assert_eq!(created.record.table_number, Some(1));
+
+    let grown = store
+        .move_booking(
+            bar,
+            created.record.booking.id,
+            MoveTo {
+                start_minutes: 1200,
+                table: None,
+                party_size: Some(4),
+            },
+            Some(common::move_words()),
+            morning(),
+        )
+        .await
+        .expect("the four-top is free");
+
+    assert_eq!(grown.record.booking.party_size, 4);
+    assert_eq!(grown.record.table_number, Some(2));
+    assert_eq!(grown.record.booking.window, created.record.booking.window);
+    assert!(
+        !grown.guest_notified,
+        "the guest asked for it; only a new time is news"
+    );
+}
+
+#[tokio::test]
+async fn a_party_grown_past_every_free_table_or_the_cap_is_refused_and_left_as_it_was() {
+    let store = store().await;
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 2, "Бар"), table(2, 4, "Зал")], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Лёша");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let id = created.record.booking.id;
+    let to = |party_size| MoveTo {
+        start_minutes: 1200,
+        table: None,
+        party_size: Some(party_size),
+    };
+
+    assert!(matches!(
+        store.move_booking(bar, id, to(5), None, morning()).await,
+        Err(Error::PartyTooLarge { .. })
+    ));
+
+    let other = fresh_account("Ира");
+    store
+        .identify(bar, &other, signed(morning()), morning())
+        .await
+        .expect("ok");
+    store
+        .create_booking(&guest_booking(bar, &other, 1200, 4), morning())
+        .await
+        .expect("the four-top is free");
+    assert!(matches!(
+        store.move_booking(bar, id, to(3), None, morning()).await,
+        Err(Error::NoTableFree { .. })
+    ));
+
+    let evening = store
+        .evening(bar, thursday(), morning())
+        .await
+        .expect("reads");
+    let unchanged = evening
+        .bookings
+        .iter()
+        .find(|record| record.booking.id == id)
+        .expect("still on the evening");
+    assert_eq!(unchanged.booking.party_size, 2);
+    assert_eq!(unchanged.table_number, Some(1));
+}
+
+#[tokio::test]
+async fn a_no_show_still_held_stays_the_record_of_its_evening_when_the_guest_books_another() {
+    // Called at seven to cancel eight; bar holds table until quarter past. Friday booking must not
+    // rewrite Thursday record.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let account = fresh_account("Стас");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
+    let tonight = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let phoned = at(thursday(), 1140);
+    store
+        .set_attendance(bar, tonight.record.booking.id, Attendance::NoShow, phoned)
+        .await
+        .expect("recorded");
+
+    let mut friday = guest_booking(bar, &account, 1200, 2);
+    friday.service_day = thursday().checked_add_days(1).expect("in range");
+    let created = store
+        .create_booking(&friday, phoned)
+        .await
+        .expect("Friday is free");
+
+    assert!(created.replaced.is_empty(), "{:?}", created.replaced);
+    let thursday_now = store.evening(bar, thursday(), phoned).await.expect("reads");
+    let record = thursday_now
+        .bookings
+        .iter()
+        .find(|record| record.booking.id == tonight.record.booking.id)
+        .expect("still on its evening");
+    assert_eq!(record.booking.status, BookingStatus::NoShow);
+}
+
+/// One two-top, open 18:00 to 22:00, four-hour turn: one party holds whole evening.
+fn one_table_one_sitting() -> pustol_domain::BarConfig {
+    let mut config = config_with(vec![table(1, 2, "Бар")], "anna_mgr");
+    config.turn_minutes = 240;
+    config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
+        open_minutes: 1080,
+        close_minutes: 1320,
+        closed: false,
+    });
+    config
+}
+
+#[tokio::test]
+async fn a_seated_guest_holds_tonight_and_their_plan_for_another_evening_is_set_aside_for_them() {
+    let store = store().await;
+    let (bar, config) = common::bar_with(&store, one_table_one_sitting()).await;
+    let account = fresh_account("Лёва");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
+    let tonight = store
+        .create_booking(&guest_booking(bar, &account, 1080, 2), morning())
+        .await
+        .expect("free");
+    let sat_down = at(thursday(), 1080);
+    store
+        .set_attendance(
+            bar,
+            tonight.record.booking.id,
+            Attendance::Arrived,
+            sat_down,
+        )
+        .await
+        .expect("recorded");
+    let friday = thursday().checked_add_days(1).expect("in range");
+    let mut plan = guest_booking(bar, &account, 1080, 2);
+    plan.service_day = friday;
+    let planned = store
+        .create_booking(&plan, sat_down)
+        .await
+        .expect("Friday is free");
+    assert!(
+        planned.replaced.is_empty(),
+        "a party at its table is never replaced"
+    );
+
+    let now = at(thursday(), 1110);
+    let mine = store
+        .bookings_of_guest(bar, account.id, now)
+        .await
+        .expect("reads");
+    assert_eq!(
+        mine.iter()
+            .map(|record| record.booking.id)
+            .collect::<Vec<_>>(),
+        vec![tonight.record.booking.id, planned.record.booking.id]
+    );
+
+    let days = [thursday(), friday];
+    let offers = store
+        .day_offers(
+            bar,
+            &config,
+            &days,
+            2,
+            now,
+            &pustol_db::records::bookings_of(&mine),
+        )
+        .await
+        .expect("reads");
+    assert!(
+        offers[0].booked,
+        "tonight is theirs and booking again cannot replace it"
+    );
+    assert!(!offers[1].booked);
+    assert_eq!(
+        offers[1].free_from_minutes,
+        Some(1080),
+        "their own Friday is the booking a Friday booking replaces, so it does not fill Friday"
+    );
+    let stranger = store
+        .day_offers(bar, &config, &days, 2, now, &[])
+        .await
+        .expect("reads");
+    assert!(!stranger[0].booked);
+    assert_eq!(
+        stranger[1].free_from_minutes, None,
+        "for anybody else Friday is sold out"
+    );
+
+    // Declares replacing Friday plan, as app does: tonight still refused.
+    let mut again = common::replacing(
+        guest_booking(bar, &account, 1080, 2),
+        &[planned.record.booking.id],
+    );
+    again.service_day = thursday();
+    let refused = store.create_booking(&again, now).await;
+    assert!(
+        matches!(refused, Err(Error::AlreadyBookedThisShift)),
+        "got {refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_guest_gives_back_one_booking_of_theirs_by_its_id_and_never_somebody_elses() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let guest = fresh_account("Ксения");
+    let other = fresh_account("Артур");
+    for account in [&guest, &other] {
+        store
+            .identify(bar, account, signed(morning()), morning())
+            .await
+            .expect("ok");
+    }
+    let tonight = store
+        .create_booking(&guest_booking(bar, &guest, 1200, 2), morning())
+        .await
+        .expect("free");
+    let theirs = store
+        .create_booking(&guest_booking(bar, &other, 1200, 2), morning())
+        .await
+        .expect("free");
+    let sat_down = at(thursday(), 1200);
+    store
+        .set_attendance(
+            bar,
+            tonight.record.booking.id,
+            Attendance::Arrived,
+            sat_down,
+        )
+        .await
+        .expect("recorded");
+    let mut next = guest_booking(bar, &guest, 1200, 2);
+    next.service_day = thursday().checked_add_days(2).expect("in range");
+    let saturday = store.create_booking(&next, sat_down).await.expect("free");
+
+    let now = at(thursday(), 1220);
+    let refused = store
+        .cancel_booking_of_guest(bar, guest.id, theirs.record.booking.id, now)
+        .await;
+    assert!(
+        matches!(refused, Err(Error::NotFound { .. })),
+        "got {refused:?}"
+    );
+    assert_eq!(
+        store
+            .bookings_of_guest(bar, other.id, now)
+            .await
+            .expect("reads")
+            .len(),
+        1,
+        "somebody else's booking is not a guest's to give back"
+    );
+
+    let cancelled = store
+        .cancel_booking_of_guest(bar, guest.id, saturday.record.booking.id, now)
+        .await
+        .expect("cancelled");
+    assert_eq!(cancelled.record.booking.status, BookingStatus::Cancelled);
+    assert_eq!(
+        store
+            .bookings_of_guest(bar, guest.id, now)
+            .await
+            .expect("reads")
+            .iter()
+            .map(|record| record.booking.id)
+            .collect::<Vec<_>>(),
+        vec![tonight.record.booking.id],
+        "the table they are sitting at is untouched"
+    );
+    let again = store
+        .cancel_booking_of_guest(bar, guest.id, saturday.record.booking.id, now)
+        .await;
+    assert!(
+        matches!(again, Err(Error::NotFound { .. })),
+        "got {again:?}"
+    );
+}
+
+#[tokio::test]
+async fn moving_a_booking_to_a_new_time_makes_it_a_plan_again() {
+    // Booked eight, marked no-show at seven, moved to ten: hold until quarter past eight says
+    // nothing about ten.
+    let store = store().await;
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 4, "Бар"), table(2, 4, "Зал")], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Рита");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let phoned = at(thursday(), 1140);
+    store
+        .set_attendance(bar, created.record.booking.id, Attendance::NoShow, phoned)
+        .await
+        .expect("recorded");
+
+    let moved = store
+        .move_booking(
+            bar,
+            created.record.booking.id,
+            MoveTo {
+                start_minutes: 1320,
+                table: created.record.booking.table_id,
+                party_size: None,
+            },
+            None,
+            phoned,
+        )
+        .await
+        .expect("a later time on the same table");
+    assert_eq!(moved.record.booking.status, BookingStatus::Confirmed);
+    assert_eq!(moved.record.booking.released_at, None);
+    assert_eq!(moved.record.booking.window.start(), at(thursday(), 1320));
+}
+
+#[tokio::test]
+async fn moving_only_the_table_or_the_party_keeps_what_staff_recorded() {
+    let store = store().await;
+    let corner = table(2, 4, "Зал");
+    let (bar, _) = common::bar_with(
+        &store,
+        config_with(vec![table(1, 4, "Бар"), corner.clone()], "anna_mgr"),
+    )
+    .await;
+    let account = fresh_account("Рита");
+    store
+        .identify(bar, &account, signed(morning()), morning())
+        .await
+        .expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let phoned = at(thursday(), 1140);
+    let absent = store
+        .set_attendance(bar, created.record.booking.id, Attendance::NoShow, phoned)
+        .await
+        .expect("recorded");
+
+    for to in [
+        MoveTo {
+            start_minutes: 1200,
+            table: Some(corner.id),
+            party_size: None,
+        },
+        MoveTo {
+            start_minutes: 1200,
+            table: Some(corner.id),
+            party_size: Some(3),
+        },
+    ] {
+        let moved = store
+            .move_booking(bar, created.record.booking.id, to, None, phoned)
+            .await
+            .expect("moved");
+        assert_eq!(moved.record.booking.status, BookingStatus::NoShow, "{to:?}");
+        assert_eq!(
+            moved.record.booking.released_at, absent.record.booking.released_at,
+            "{to:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_evening_is_one_moment_of_the_room_whatever_commits_while_it_is_read() {
+    let store = store().await;
+    let (bar, config) = default_bar(&store).await;
+    let before = store
+        .evening(bar, thursday(), morning())
+        .await
+        .expect("read");
+
+    // Other transaction locks version, so read waits there after reading bookings; meanwhile it
+    // books and commits.
+    let mut other = store.pool().begin().await.expect("begun");
+    sqlx::query("lock table room_version in access exclusive mode")
+        .execute(&mut *other)
+        .await
+        .expect("locked");
+    let reading = tokio::spawn({
+        let store = store.clone();
+        async move { store.evening(bar, thursday(), morning()).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_locks
+                 where relation = 'room_version'::regclass and not granted",
+            )
+            .fetch_one(store.pool())
+            .await
+            .expect("counted");
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reading waits for the version");
+    sqlx::query(
+        "insert into booking (bar_id, table_id, service_date, starts_at, ends_at, party_size,
+                              guest_name, source)
+         values ($1, $2, $3, $4, $5, 2, 'Пётр', 'staff')",
+    )
+    .bind(bar)
+    .bind(config.tables[0].id.0)
+    .bind(thursday().date())
+    .bind(at(thursday(), 1200))
+    .bind(at(thursday(), 1320))
+    .execute(&mut *other)
+    .await
+    .expect("booked");
+    other.commit().await.expect("committed");
+
+    let evening = reading.await.expect("did not panic").expect("read");
+    let after = store
+        .evening(bar, thursday(), morning())
+        .await
+        .expect("read");
+    assert!(evening.bookings.is_empty());
+    assert_eq!(
+        evening.version, before.version,
+        "the version is the one the bookings it came with were read at"
+    );
+    assert_eq!(after.bookings.len(), 1);
+    assert!(after.version > evening.version);
+}
+
+mod test_databases {
+    use std::time::Duration;
+
+    use crate::common::database::{
+        ABANDONED_AFTER, PREFIX, SWEPT_PREFIXES, connect_to, create_database, database_name,
+        made_at, maintenance, sweep_abandoned, sweep_every, unix_seconds,
+    };
+
+    /// Prefix no suite sweep or other test sweep matches. Starts with `pustol_t`, so
+    /// `scripts/pg.sh start` clears leftovers.
+    fn private(test: &str) -> String {
+        format!("pustol_tsweep_{test}_")
+    }
+
+    fn unused_name(prefix: &str, made_at: u64) -> String {
+        database_name(
+            prefix,
+            made_at,
+            std::process::id(),
+            uuid::Uuid::new_v4().as_u64_pair().0,
+        )
+    }
+
+    /// Closed pool backend leaves `pg_stat_activity` a moment after close returns.
+    async fn wait_until_nobody_is_connected(admin: &sqlx::PgPool, name: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while sqlx::query_scalar::<_, bool>(
+                "select exists (select 1 from pg_stat_activity where datname = $1)",
+            )
+            .bind(name)
+            .fetch_one(admin)
+            .await
+            .expect("listed")
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the closed connection leaves the cluster");
+    }
+
+    async fn exists(admin: &sqlx::PgPool, name: &str) -> bool {
+        sqlx::query_scalar("select exists (select 1 from pg_database where datname = $1)")
+            .bind(name)
+            .fetch_one(admin)
+            .await
+            .expect("listed")
+    }
+
+    async fn drop_database(admin: &sqlx::PgPool, name: &str) {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "drop database if exists \"{name}\" with (force)"
+        )))
+        .execute(admin)
+        .await
+        .expect("dropped");
+    }
+
+    #[tokio::test]
+    async fn a_young_test_database_nobody_is_connected_to_is_kept() {
+        let admin = maintenance().await;
+        let prefix = private("young");
+        let now = unix_seconds();
+        let young = create_database(&admin, || unused_name(&prefix, now)).await;
+
+        sweep_abandoned(&admin, &prefix, now).await;
+
+        assert!(
+            exists(&admin, &young).await,
+            "a run may not have connected to it yet"
+        );
+        drop_database(&admin, &young).await;
+    }
+
+    #[tokio::test]
+    async fn an_old_test_database_is_dropped_only_once_nobody_is_connected_to_it() {
+        // Connection stands in for run in unseen container.
+        let admin = maintenance().await;
+        let prefix = private("old");
+        let now = unix_seconds();
+        let old = create_database(&admin, || {
+            unused_name(&prefix, now - ABANDONED_AFTER.as_secs() - 60)
+        })
+        .await;
+        let user = connect_to(&old).await;
+        let held = user.acquire().await.expect("connected");
+
+        sweep_abandoned(&admin, &prefix, now).await;
+        assert!(exists(&admin, &old).await, "somebody is connected to it");
+
+        drop(held);
+        user.close().await;
+        wait_until_nobody_is_connected(&admin, &old).await;
+        sweep_abandoned(&admin, &prefix, now).await;
+        assert!(!exists(&admin, &old).await, "old, and nobody is connected");
+    }
+
+    #[tokio::test]
+    async fn a_name_not_in_the_form_this_suite_writes_is_never_read_for_a_second() {
+        let admin = maintenance().await;
+        let prefix = private("form");
+        let old = unix_seconds() - ABANDONED_AFTER.as_secs() - 60;
+        let pid = std::process::id();
+        let strangers = [
+            format!("{prefix}{old}_{pid}"),
+            format!("{prefix}{old}_{pid}_2_3"),
+            format!("{prefix}{old}x_{pid}_2"),
+            format!("{prefix}_{old}_{pid}_2"),
+        ];
+        for stranger in &strangers {
+            let name = stranger.clone();
+            create_database(&admin, move || name.clone()).await;
+        }
+        let ours = database_name(&prefix, old, pid, 2);
+        let name = ours.clone();
+        create_database(&admin, move || name.clone()).await;
+
+        sweep_abandoned(&admin, &prefix, unix_seconds()).await;
+
+        for stranger in &strangers {
+            assert!(exists(&admin, stranger).await, "{stranger}");
+            drop_database(&admin, stranger).await;
+        }
+        assert!(!exists(&admin, &ours).await, "{ours}");
+    }
+
+    #[test]
+    fn the_suites_sweep_every_form_a_test_database_was_ever_named_in() {
+        assert_eq!(SWEPT_PREFIXES, [PREFIX, "pustol_t"]);
+        let old = 1_757_000_000;
+        assert_eq!(made_at("pustol_t", "pustol_t1757000000_4242_7"), Some(old));
+        for stranger in [
+            database_name(PREFIX, old, 4242, 7),
+            format!("{}{old}_4242_7", private("form")),
+            format!("pustol_t{old}_4242"),
+            format!("pustol_t{old}_4242_7_8"),
+        ] {
+            assert_eq!(made_at("pustol_t", &stranger), None, "{stranger}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_old_idle_database_under_any_swept_prefix_is_dropped_and_a_young_one_is_kept() {
+        let admin = maintenance().await;
+        let (current, legacy) = (private("every_cur"), private("every_leg"));
+        let now = unix_seconds();
+        let long_ago = now - ABANDONED_AFTER.as_secs() - 60;
+        let old_current = create_database(&admin, || unused_name(&current, long_ago)).await;
+        let old_legacy = create_database(&admin, || unused_name(&legacy, long_ago)).await;
+        let young_legacy = create_database(&admin, || unused_name(&legacy, now)).await;
+
+        sweep_every(&admin, &[&current, &legacy], now).await;
+
+        assert!(!exists(&admin, &old_current).await, "{old_current}");
+        assert!(!exists(&admin, &old_legacy).await, "{old_legacy}");
+        assert!(exists(&admin, &young_legacy).await, "{young_legacy}");
+        drop_database(&admin, &young_legacy).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "longer than PostgreSQL keeps a name")]
+    async fn a_name_longer_than_the_cluster_keeps_is_never_made() {
+        let admin = maintenance().await;
+        create_database(&admin, || format!("{}{}", private("long"), "9".repeat(64))).await;
+    }
+
+    #[tokio::test]
+    async fn a_name_another_process_has_taken_is_passed_over() {
+        let admin = maintenance().await;
+        let prefix = private("taken");
+        let now = unix_seconds();
+        let taken = create_database(&admin, || unused_name(&prefix, now)).await;
+        let mut offered = vec![unused_name(&prefix, now), taken.clone()];
+
+        let made = create_database(&admin, || offered.pop().expect("a name")).await;
+
+        assert_ne!(made, taken);
+        assert!(exists(&admin, &made).await);
+        drop_database(&admin, &taken).await;
+        drop_database(&admin, &made).await;
+    }
 }

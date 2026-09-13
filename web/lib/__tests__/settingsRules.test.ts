@@ -1,28 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import type { Limits, SettingsDraft } from "../api";
+import type { SettingsDraft } from "../api";
 import {
   copyDraft,
   differs,
+  isContact,
   isLegal,
   isTelegramUsername,
   lastArrivalMinutes,
   reasonsAgainst,
   shortestShiftMinutes,
+  trimmed,
   wouldBeLegal,
 } from "../settingsRules";
-
-const LIMITS: Limits = {
-  open_minutes: { min: 480, max: 1_080 },
-  close_minutes: { min: 1_200, max: 1_680 },
-  turn_minutes: { min: 60, max: 240 },
-  max_party: { min: 2, max: 10 },
-  horizon_days: { min: 1, max: 30 },
-  remind_hours: { min: 1, max: 12 },
-  grace_minutes: { min: 5, max: 60 },
-  seats: { min: 1, max: 12 },
-  slot_step_minutes: [15, 30, 60],
-};
+import { LIMITS } from "@/components/__tests__/fixtures";
 
 function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
   return {
@@ -36,9 +27,9 @@ function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
     })),
     zones: ["Бар", "Зал", "Терраса"],
     tables: [
-      { kind: "existing", id: "t1", seats: 2, zone: "Бар" },
-      { kind: "existing", id: "t2", seats: 4, zone: "Зал" },
-      { kind: "existing", id: "t3", seats: 6, zone: "Терраса" },
+      { id: "t1", seats: 2, zone: "Бар" },
+      { id: "t2", seats: 4, zone: "Зал" },
+      { id: "t3", seats: 6, zone: "Терраса" },
     ],
     turn_minutes: 120,
     slot_step_minutes: 30,
@@ -49,6 +40,8 @@ function draft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
     message_templates: ["Ваш стол готов, ждём вас!"],
     cancel_reasons: ["Частное мероприятие"],
     staff: [{ username: "anna_mgr" }],
+    contact: "",
+    version: 1,
     ...overrides,
   };
 }
@@ -125,16 +118,41 @@ describe("what makes a proposal legal", () => {
     expect(kinds(draft({ max_party: 8 }))).toContain("max_party_exceeds_largest_table");
   });
 
+  it("bounds how many items every list may hold, and accepts a list exactly at its bound", () => {
+    const many = <T,>(count: number, make: (index: number) => T): T[] =>
+      Array.from({ length: count }, (_, index) => make(index));
+    const { lists } = LIMITS;
+    const over: [keyof typeof lists, Partial<SettingsDraft>][] = [
+      ["zones", { zones: many(lists.zones + 1, (index) => (index === 0 ? "Бар" : `Зона ${index}`)) }],
+      ["tables", { tables: many(lists.tables + 1, (index) => ({ id: `t${index}`, seats: 6, zone: "Бар" })) }],
+      ["message_templates", { message_templates: many(lists.message_templates + 1, (index) => `Сообщение ${index}`) }],
+      ["cancel_reasons", { cancel_reasons: many(lists.cancel_reasons + 1, (index) => `Причина ${index}`) }],
+      ["staff", { staff: many(lists.staff + 1, (index) => ({ username: `member_${index}` })) }],
+    ];
+    for (const [list, overrides] of over) {
+      expect(reasonsAgainst(draft(overrides), LIMITS), list).toContainEqual({
+        kind: "list_too_long",
+        list,
+        max: lists[list],
+      });
+    }
+    const atBound = draft({
+      message_templates: many(lists.message_templates, (index) => `Сообщение ${index}`),
+      staff: many(lists.staff, (index) => ({ username: `member_${index}` })),
+    });
+    expect(reasonsAgainst(atBound, LIMITS)).toEqual([]);
+  });
+
   it("refuses an empty room and an unreasonable table", () => {
     expect(kinds(draft({ tables: [] }))).toContain("no_tables");
     const huge = draft();
-    huge.tables[0] = { kind: "existing", id: "t1", seats: 20, zone: "Бар" };
+    huge.tables[0] = { id: "t1", seats: 20, zone: "Бар" };
     expect(kinds(huge)).toContain("seats_out_of_range");
   });
 
   it("refuses a table standing in a zone the bar does not have", () => {
     const stray = draft();
-    stray.tables[0] = { kind: "existing", id: "t1", seats: 2, zone: "Подвал" };
+    stray.tables[0] = { id: "t1", seats: 2, zone: "Подвал" };
     expect(kinds(stray)).toContain("unknown_zone");
   });
 
@@ -293,5 +311,98 @@ describe("the copy an edit is tried on", () => {
   it("copies everything, so a round trip changes nothing", () => {
     const original = draft();
     expect(copyDraft(original)).toEqual(original);
+  });
+});
+
+describe("how long a text may be", () => {
+  it("refuses a guest message too long for Telegram to carry, and not one character sooner", () => {
+    const limit = LIMITS.text.message;
+    expect(kinds(draft({ message_templates: ["а".repeat(limit + 1)] }))).toContain(
+      "message_template_too_long",
+    );
+    expect(kinds(draft({ message_templates: ["а".repeat(limit)] }))).toEqual([]);
+  });
+
+  it("refuses a name, an address and a reason too long to show", () => {
+    expect(kinds(draft({ name: "б".repeat(LIMITS.text.name + 1) }))).toContain("name_too_long");
+    expect(kinds(draft({ address: "в".repeat(LIMITS.text.address + 1) }))).toContain(
+      "address_too_long",
+    );
+    expect(kinds(draft({ cancel_reasons: ["г".repeat(LIMITS.text.reason + 1)] }))).toContain(
+      "cancel_reason_too_long",
+    );
+  });
+
+  it("counts characters the way the server does, not UTF-16 halves", () => {
+    // Emoji: one character on server, two code units in JavaScript.
+    expect(kinds(draft({ name: "🍺".repeat(LIMITS.text.name) }))).toEqual([]);
+  });
+
+  it("counts a text as the server stores it, without the space around it", () => {
+    expect(kinds(draft({ message_templates: [`${"а".repeat(LIMITS.text.message)} `] }))).toEqual(
+      [],
+    );
+    expect(kinds(draft({ name: `${"б".repeat(LIMITS.text.name)} ` }))).toEqual([]);
+    expect(kinds(draft({ address: `　${"в".repeat(LIMITS.text.address)}` }))).toEqual(
+      [],
+    );
+    expect(kinds(draft({ cancel_reasons: [`\t${"г".repeat(LIMITS.text.reason)}\n`] }))).toEqual(
+      [],
+    );
+  });
+});
+
+describe("trimming the way the server trims", () => {
+  it("strips exactly Unicode White_Space from both ends", () => {
+    expect(trimmed(" a b 　")).toBe("a b");
+    expect(trimmed("﻿a﻿")).toBe("﻿a﻿");
+  });
+
+  it("keeps what is inside, astral characters and inner space included", () => {
+    expect(trimmed(" 🍺 a　b🍺 ")).toBe("🍺 a　b🍺");
+    expect(trimmed("\t\n ")).toBe("");
+    expect(trimmed("")).toBe("");
+  });
+
+  it("takes a long run of inner space in one pass", () => {
+    const text = `x${" ".repeat(100_000)}x`;
+    const started = performance.now();
+    expect(trimmed(text)).toBe(text);
+    expect(trimmed(`${text} `)).toBe(text);
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  it("calls a text of nothing but White_Space blank, and a byte-order mark not", () => {
+    expect(kinds(draft({ name: " " }))).toContain("blank_name");
+    expect(kinds(draft({ message_templates: [" "] }))).toContain("blank_message_template");
+    expect(kinds(draft({ cancel_reasons: ["﻿"] }))).not.toContain("blank_cancel_reason");
+  });
+});
+
+describe("the contact guests are given", () => {
+  it("is a phone number, a Telegram username, or nothing at all", () => {
+    for (const fine of ["", "+381 (11) 123-45-67", "@podval_bar", "podval_bar"]) {
+      expect(kinds(draft({ contact: fine }))).toEqual([]);
+    }
+    for (const wrong of ["звоните", "12", "+1+2345678", "@ab", "https://evil.example"]) {
+      expect(kinds(draft({ contact: wrong }))).toContain("malformed_contact");
+    }
+  });
+
+  it("trims only what the server trims before reading it", () => {
+    expect(kinds(draft({ contact: "@barname" }))).toEqual([]);
+    expect(kinds(draft({ contact: "﻿@barname" }))).toContain("malformed_contact");
+  });
+
+  it("takes a username as long as Telegram allows, with its @", () => {
+    const longest = `b${"a".repeat(31)}`;
+    expect(isContact(`@${longest}`)).toBe(true);
+    expect(isContact(` @${longest} `)).toBe(true);
+    expect(isContact(`@${longest}a`)).toBe(false);
+  });
+
+  it("keeps a phone number to one line of a screen", () => {
+    expect(isContact(`+1${"-".repeat(24)}234567`)).toBe(true);
+    expect(isContact(`+1${"-".repeat(25)}234567`)).toBe(false);
   });
 });

@@ -27,23 +27,28 @@ const IN_FLIGHT: usize = 5;
 /// How long to wait between passes when there was nothing to do.
 const IDLE_PAUSE: Duration = Duration::from_secs(20);
 
-/// How long to wait after a transient failure Telegram did not put a number on.
-const DEFAULT_BACKOFF: TimeDelta = TimeDelta::minutes(2);
+/// Doubles per failure after first.
+const FIRST_BACKOFF: TimeDelta = TimeDelta::minutes(2);
 
-/// After this many attempts a message is abandoned.
-///
-/// Without a ceiling a message Telegram keeps refusing for a reason nobody anticipated is retried
-/// for ever, and a queue that never drains hides every later message behind it.
-const MAX_ATTEMPTS: i32 = 6;
+const MAX_BACKOFF: TimeDelta = TimeDelta::hours(1);
 
-/// The callback the reminder's button sends back.
-///
-/// A guest who can cancel in one tap does, and the bar gets the table back — which is the entire
-/// argument for reminding anybody about anything.
-pub const CANCEL_CALLBACK: &str = "cancel_booking";
+/// About three hours of waits total: short outage drops nothing, endless refusal never clogs queue.
+pub const MAX_ATTEMPTS: i32 = 8;
+
+fn backoff(attempts: i32) -> TimeDelta {
+    let doublings = u32::try_from(attempts.saturating_sub(1))
+        .unwrap_or(0)
+        .min(6);
+    (FIRST_BACKOFF * 2_i32.pow(doublings)).min(MAX_BACKOFF)
+}
 
 /// Runs until the process is asked to stop.
-pub async fn run(store: Store, bot: Bot, clock: Clock, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+pub async fn run(
+    store: Store,
+    bot: Bot,
+    clock: Clock,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         let sent = match drain_once(&store, &bot, &clock).await {
             Ok(count) => count,
@@ -107,7 +112,7 @@ async fn deliver(
         .await
     {
         Ok(()) => {
-            store.mark_sent(message.id, clock.now()).await?;
+            store.mark_sent(message, clock.now()).await?;
             // A delivery is the only positive evidence there is that the bot can reach this guest.
             store.set_reachable(message.recipient, true).await?;
         }
@@ -116,45 +121,55 @@ async fn deliver(
             // does not keep trying an account that has blocked the bot.
             store.set_reachable(message.recipient, false).await?;
             store
-                .give_up(message.id, clock.now(), &failure.to_string())
+                .give_up(message, clock.now(), &failure.to_string())
+                .await?;
+        }
+        Err(SendError::RateLimited {
+            retry_after_seconds,
+        }) => {
+            store
+                .postpone(
+                    message,
+                    clock.now() + TimeDelta::seconds(retry_after_seconds),
+                    "telegram asked to wait",
+                )
                 .await?;
         }
         Err(failure) if failure.is_worth_retrying() => {
             if message.attempts >= MAX_ATTEMPTS {
+                tracing::warn!(id = %message.id, kind = ?message.kind, attempts = message.attempts, error = %failure, "giving up on a message");
                 store
                     .give_up(
-                        message.id,
+                        message,
                         clock.now(),
                         &format!("gave up after {} attempts: {failure}", message.attempts),
                     )
                     .await?;
             } else {
-                let wait = match &failure {
-                    SendError::RateLimited {
-                        retry_after_seconds,
-                    } => TimeDelta::seconds(*retry_after_seconds),
-                    _ => DEFAULT_BACKOFF,
-                };
+                let wait = backoff(message.attempts);
+                tracing::warn!(id = %message.id, kind = ?message.kind, attempts = message.attempts, retry_in_seconds = wait.num_seconds(), error = %failure, "a delivery failed");
                 store
-                    .defer(message.id, clock.now() + wait, &failure.to_string())
+                    .defer(message, clock.now() + wait, &failure.to_string())
                     .await?;
             }
         }
         Err(failure) => {
             // Refused on its merits. Repeating the same request repeats the same refusal.
+            tracing::warn!(id = %message.id, kind = ?message.kind, error = %failure, "telegram refused a message");
             store
-                .give_up(message.id, clock.now(), &failure.to_string())
+                .give_up(message, clock.now(), &failure.to_string())
                 .await?;
         }
     }
     Ok(())
 }
 
+/// One-tap cancel frees table for bar; [`crate::inbox`] answers tap.
 fn reminder_buttons(message: &PendingNotification) -> Vec<CallbackButton> {
     if message.kind == NotificationKind::Reminder {
         vec![CallbackButton {
             text: "Не смогу прийти".to_owned(),
-            callback_data: format!("{CANCEL_CALLBACK}:{}", message.booking.0),
+            callback_data: crate::callbacks::cancel_booking(message.booking),
         }]
     } else {
         Vec::new()

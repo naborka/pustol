@@ -152,6 +152,9 @@ export function AppShell({
         paddingTop: insets.top,
         paddingLeft: insets.left,
         paddingRight: insets.right,
+        // Bottom bars pad themselves. Guest screen with neither (home with booking, no staff tabs)
+        // needs this to keep last card off home indicator.
+        paddingBottom: !staff && !footer ? insets.bottom : 0,
       }}
     >
       {header ? <div style={{ flex: "none" }}>{header}</div> : null}

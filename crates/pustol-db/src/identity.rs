@@ -1,11 +1,29 @@
 //! Who is asking, and whether they are allowed into the admin side.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::{PgConnection, Row};
 
 use crate::error::Result;
 use crate::ids::{BarId, TelegramUserId};
-use crate::Store;
+use crate::{Store, lock_bar};
+
+/// When Telegram signed payload, as far as server can know.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Signature {
+    /// Whole second, by Telegram clock.
+    pub stamped_at: DateTime<Utc>,
+    /// Assumed max gap between Telegram and server clocks, never measured: payload carries no clock
+    /// reading. Every signed-after guarantee holds only within it.
+    pub clock_skew: TimeDelta,
+}
+
+impl Signature {
+    /// Earliest server-clock moment payload can have been signed.
+    #[must_use]
+    pub fn earliest(self) -> DateTime<Utc> {
+        self.stamped_at - self.clock_skew
+    }
+}
 
 /// A Telegram account as the app has just seen it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -51,26 +69,67 @@ pub struct Viewer {
 }
 
 impl Store {
-    /// Records the account and works out what it is allowed to do.
+    /// Records account from signed payload and decides its access.
     ///
-    /// Called on every authenticated request, because the Telegram payload is the freshest source
-    /// for a display name, and because a member of staff invited a minute ago should get in on
-    /// their first visit rather than after a cache expires.
+    /// Payload profile is snapshot from signing, maybe well before `now`. Rewrites stored profile
+    /// only when no later snapshot stored; only payload that rewrote it may claim seat by username,
+    /// see [`bind_staff_seat`]. Session-only accounts use [`Self::recognise`]. Answer holds stored
+    /// account.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     pub async fn identify(
+        &self,
+        bar: BarId,
+        account: &TelegramAccount,
+        signature: Signature,
+        now: DateTime<Utc>,
+    ) -> Result<Viewer> {
+        let mut transaction = self.pool().begin().await?;
+        // Bar lock before any row lock, same order as every other transaction, else deadlock.
+        let offered = seat_offered(&mut transaction, bar, account).await?;
+        if offered {
+            lock_bar(&mut transaction, bar).await?;
+        }
+        let profile = record_profile(&mut transaction, account, signature.stamped_at, now).await?;
+        if offered && profile.rewritten {
+            bind_staff_seat(&mut transaction, bar, account, signature, now).await?;
+        }
+        let stored = profile.account;
+        let is_staff = is_staff(&mut transaction, bar, account.id).await?;
+        let reminders = load_reminder_standing(&mut transaction, account.id).await?;
+        transaction.commit().await?;
+
+        Ok(Viewer {
+            account: stored,
+            is_staff,
+            reminders,
+        })
+    }
+
+    /// Decides access for account known from session.
+    ///
+    /// Session profile may be a day old and username may have passed to someone else. So no profile
+    /// rewrite, no seat claim; only records unseen account. Answer holds stored account.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    pub async fn recognise(
         &self,
         bar: BarId,
         account: &TelegramAccount,
         now: DateTime<Utc>,
     ) -> Result<Viewer> {
         let mut transaction = self.pool().begin().await?;
-        upsert_account(&mut transaction, account, now).await?;
-        bind_staff_seat(&mut transaction, bar, account).await?;
+        let account = note_account(&mut transaction, account, now).await?.account;
         let is_staff = is_staff(&mut transaction, bar, account.id).await?;
         let reminders = load_reminder_standing(&mut transaction, account.id).await?;
         transaction.commit().await?;
 
         Ok(Viewer {
-            account: account.clone(),
+            account,
             is_staff,
             reminders,
         })
@@ -78,9 +137,13 @@ impl Store {
 
     /// Records what the guest decided about reminders and reports where that leaves them.
     ///
-    /// The account is recorded in the same transaction as the choice. Requiring the caller to have
-    /// created the row first would make this method correct only when called in a particular order —
-    /// a rule no signature expresses and every new caller has to be told.
+    /// Unseen account recorded in same transaction as choice: requiring caller to create row first
+    /// would be call-order rule no signature expresses. Known profile untouched: only fresh payload
+    /// rewrites it.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     pub async fn choose_reminders(
         &self,
         account: &TelegramAccount,
@@ -88,7 +151,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<ReminderStanding> {
         let mut transaction = self.pool().begin().await?;
-        upsert_account(&mut transaction, account, now).await?;
+        note_account(&mut transaction, account, now).await?;
         // `returning` rather than a second read: the answer the caller needs is the row just
         // written, and reading it again could observe somebody else's write instead.
         let row = sqlx::query(match choice {
@@ -135,21 +198,25 @@ pub enum ReminderChoice {
     NotNow,
 }
 
-pub(crate) async fn upsert_account(
+struct NotedAccount {
+    account: TelegramAccount,
+    profile_signed_at: Option<DateTime<Utc>>,
+    profile_contested: bool,
+}
+
+/// Inserts unseen account; known one keeps stored profile. Locks row, returns stored account.
+async fn note_account(
     connection: &mut PgConnection,
     account: &TelegramAccount,
     now: DateTime<Utc>,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<NotedAccount> {
+    let row = sqlx::query(
         "insert into telegram_user (id, username, first_name, last_name, language_code,
                                     first_seen_at, last_seen_at)
          values ($1, $2, $3, $4, $5, $6, $6)
-         on conflict (id) do update set
-            username = excluded.username,
-            first_name = excluded.first_name,
-            last_name = excluded.last_name,
-            language_code = excluded.language_code,
-            last_seen_at = excluded.last_seen_at",
+         on conflict (id) do update set last_seen_at = excluded.last_seen_at
+         returning id, username, first_name, last_name, language_code, profile_signed_at,
+                   profile_contested",
     )
     .bind(account.id.0)
     .bind(&account.username)
@@ -157,9 +224,113 @@ pub(crate) async fn upsert_account(
     .bind(&account.last_name)
     .bind(&account.language_code)
     .bind(now)
-    .execute(connection)
+    .fetch_one(connection)
     .await?;
-    Ok(())
+    Ok(NotedAccount {
+        account: account_from(&row)?,
+        profile_signed_at: row.try_get("profile_signed_at")?,
+        profile_contested: row.try_get("profile_contested")?,
+    })
+}
+
+struct RecordedProfile {
+    account: TelegramAccount,
+    rewritten: bool,
+}
+
+/// Stores payload profile unless later-signed one already stored; returns stored account.
+///
+/// Telegram stamps whole seconds: two payloads of one second may carry two profiles, order unknown.
+/// Neither rewrites other; second marked contested. Contested-second payload never counts as
+/// rewrite, even when its profile matches stored: resent once seat opens, it would claim seat under
+/// username account may have dropped within that second. Only later second settles it.
+///
+/// Runs under row lock [`note_account`] takes, so two payloads of one account settle in turn.
+async fn record_profile(
+    connection: &mut PgConnection,
+    account: &TelegramAccount,
+    signed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<RecordedProfile> {
+    let NotedAccount {
+        account: stored,
+        profile_signed_at: stored_at,
+        profile_contested: contested,
+    } = note_account(&mut *connection, account, now).await?;
+    let same_profile = stored == *account;
+
+    let rewritten = match stored_at {
+        None => true,
+        Some(at) if at == signed_at => same_profile && !contested,
+        Some(at) => at < signed_at,
+    };
+    if rewritten {
+        sqlx::query(
+            "update telegram_user
+             set username = $2, first_name = $3, last_name = $4, language_code = $5,
+                 profile_signed_at = $6, profile_contested = false
+             where id = $1",
+        )
+        .bind(account.id.0)
+        .bind(&account.username)
+        .bind(&account.first_name)
+        .bind(&account.last_name)
+        .bind(&account.language_code)
+        .bind(signed_at)
+        .execute(connection)
+        .await?;
+        return Ok(RecordedProfile {
+            account: account.clone(),
+            rewritten: true,
+        });
+    }
+    if stored_at == Some(signed_at) && !same_profile {
+        sqlx::query("update telegram_user set profile_contested = true where id = $1")
+            .bind(account.id.0)
+            .execute(connection)
+            .await?;
+    }
+    Ok(RecordedProfile {
+        account: stored,
+        rewritten: false,
+    })
+}
+
+fn account_from(row: &sqlx::postgres::PgRow) -> Result<TelegramAccount> {
+    Ok(TelegramAccount {
+        id: TelegramUserId(row.try_get("id")?),
+        username: row.try_get("username")?,
+        first_name: row.try_get("first_name")?,
+        last_name: row.try_get("last_name")?,
+        language_code: row.try_get("language_code")?,
+    })
+}
+
+/// SQL filter: unclaimed seat of bar `$1` under username `$2`, any case.
+macro_rules! unclaimed_seat {
+    () => {
+        "bar_id = $1 and telegram_user_id is null and username_lower = lower($2)"
+    };
+}
+
+async fn seat_offered(
+    connection: &mut PgConnection,
+    bar: BarId,
+    account: &TelegramAccount,
+) -> Result<bool> {
+    let Some(username) = account.username.as_ref() else {
+        return Ok(false);
+    };
+    let row = sqlx::query(concat!(
+        "select exists (select 1 from bar_staff where ",
+        unclaimed_seat!(),
+        ") as offered"
+    ))
+    .bind(bar)
+    .bind(username)
+    .fetch_one(connection)
+    .await?;
+    Ok(row.try_get("offered")?)
 }
 
 /// Claims an unclaimed seat on the roster whose username matches.
@@ -168,21 +339,36 @@ pub(crate) async fn upsert_account(
 /// however the username later changes hands — which is the whole reason authorisation is by id.
 /// A username released by one member of staff and picked up by a stranger therefore grants the
 /// stranger nothing.
+///
+/// Only by payload signed after seat offered: payload username is name at signing, and whoever held
+/// it before offer was not invited. Offer compared with [`Signature::earliest`]; payload stamped
+/// within clock skew of offer claims seat on later visit instead.
+///
+/// Only by account holding no seat yet, so one person never two staff. Runs under bar lock, so one
+/// account claiming two seats at once settles in turn and second finds first.
 async fn bind_staff_seat(
     connection: &mut PgConnection,
     bar: BarId,
     account: &TelegramAccount,
+    signature: Signature,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let Some(username) = account.username.as_ref() else {
         return Ok(());
     };
-    sqlx::query(
-        "update bar_staff set telegram_user_id = $2, bound_at = now()
-         where bar_id = $1 and telegram_user_id is null and username_lower = lower($3)",
-    )
+    sqlx::query(concat!(
+        "update bar_staff set telegram_user_id = $3, bound_at = $4 where ",
+        unclaimed_seat!(),
+        " and invited_at <= $5
+          and not exists (
+              select 1 from bar_staff held where held.bar_id = $1 and held.telegram_user_id = $3
+          )"
+    ))
     .bind(bar)
-    .bind(account.id.0)
     .bind(username)
+    .bind(account.id.0)
+    .bind(now)
+    .bind(signature.earliest())
     .execute(connection)
     .await?;
     Ok(())

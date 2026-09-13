@@ -13,11 +13,7 @@ use pustol_domain::service_day::{Interval, ServiceDay};
 use crate::error::{Error, Result};
 use crate::ids::TelegramUserId;
 
-/// How a booking reached the bar.
-///
-/// Not merely descriptive: a booking taken by staff has no Telegram account behind it, which is
-/// what makes "the bot has no chat with this guest" a fact about the data rather than a flag
-/// somebody has to keep in step.
+/// How a booking reached the bar. Staff and walk-in bookings have no Telegram account behind them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, sqlx::Type, serde::Serialize, serde::Deserialize)]
 #[sqlx(type_name = "booking_source", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +80,7 @@ pub(crate) struct BookingRow {
     pub guest_name: String,
     pub guest_username: Option<String>,
     pub telegram_user_id: Option<i64>,
+    pub reachable_by_bot: bool,
     pub status: StoredStatus,
     pub source: BookingSource,
     pub note: Option<String>,
@@ -101,19 +98,14 @@ pub struct BookingRecord {
     pub guest_name: String,
     pub guest_username: Option<String>,
     pub telegram_user_id: Option<TelegramUserId>,
+    /// Account exists and last delivery learned messages reach it.
+    ///
+    /// Read with booking from account row, so screen and decision on same read never disagree.
+    pub reachable_by_bot: bool,
     pub source: BookingSource,
     /// What staff wrote on this booking: "День рождения", "У окна". Never sent to the guest.
     pub note: Option<String>,
     pub cancel_reason: Option<String>,
-}
-
-impl BookingRecord {
-    /// Whether the bot could conceivably message this guest: staff-entered bookings have no
-    /// account behind them at all.
-    #[must_use]
-    pub fn has_telegram_account(&self) -> bool {
-        self.telegram_user_id.is_some()
-    }
 }
 
 impl TryFrom<BookingRow> for BookingRecord {
@@ -135,6 +127,7 @@ impl TryFrom<BookingRow> for BookingRecord {
             guest_name: row.guest_name,
             guest_username: row.guest_username,
             telegram_user_id: row.telegram_user_id.map(TelegramUserId),
+            reachable_by_bot: row.reachable_by_bot,
             source: row.source,
             note: row.note,
             cancel_reason: row.cancel_reason,
@@ -177,7 +170,10 @@ impl From<BlockRow> for BlockRecord {
 /// a second hand-rolled projection up there would be a second chance to leave something out.
 #[must_use]
 pub fn bookings_of(records: &[BookingRecord]) -> Vec<Booking> {
-    records.iter().map(|record| record.booking.clone()).collect()
+    records
+        .iter()
+        .map(|record| record.booking.clone())
+        .collect()
 }
 
 #[must_use]

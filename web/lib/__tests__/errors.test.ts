@@ -1,12 +1,24 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canRetry,
   invalidReasons,
   messageFor,
   needsRelaunch,
   strandedBookings,
   type ApiFailure,
 } from "../errors";
+
+describe("whether trying again can help", () => {
+  it("says no for a failure the same request will always meet, and yes otherwise", () => {
+    for (const code of ["forbidden", "session_expired", "not_telegram", "no_credentials"]) {
+      expect(canRetry({ code, message: code }), code).toBe(false);
+    }
+    for (const code of ["internal", "network", "a_code_from_the_future"]) {
+      expect(canRetry({ code, message: code }), code).toBe(true);
+    }
+  });
+});
 
 const failure = (code: string, detail?: Record<string, unknown>): ApiFailure =>
   detail === undefined ? { code, message: code } : { code, message: code, detail };
@@ -29,6 +41,31 @@ describe("what a failure says", () => {
     expect(messageFor(null, "guest")).toBeTruthy();
   });
 
+  it("tells staff restoring a booking that the guest already holds another tonight", () => {
+    expect(messageFor(failure("already_booked_tonight"), "staff")).toBe(
+      "У гостя уже есть другая бронь на этот вечер.",
+    );
+    expect(messageFor(failure("already_booked_tonight"), "guest")).toBe(
+      "На этот вечер у вас уже есть бронь.",
+    );
+  });
+
+  it("says a finished booking can be neither moved nor cancelled, to whoever tried", () => {
+    const staff = messageFor(failure("booking_finished"), "staff");
+    expect(staff).toMatch(/перенести/);
+    expect(staff).toMatch(/отменить/);
+    expect(messageFor(failure("booking_finished"), "guest")).not.toBe(
+      messageFor(failure("something_unmapped"), "guest"),
+    );
+  });
+
+  it("tells a manager somebody else saved the settings first, without asking them to type it again", () => {
+    // Screen merges other save into edit; «повторите» makes managers retype kept edits.
+    const said = messageFor(failure("settings_changed"), "staff");
+    expect(said).toMatch(/кто-то/i);
+    expect(said).not.toMatch(/повторите/i);
+  });
+
   it("has words for every failure the staff side can produce", () => {
     for (const code of [
       "blank_guest_name",
@@ -41,10 +78,76 @@ describe("what a failure says", () => {
       "would_strand_bookings",
       "shift_not_bookable",
       "party_too_large",
+      "guest_has_another_plan",
+      "table_taken",
+      "text_invalid",
+      "not_the_running_shift",
     ]) {
       expect(messageFor(failure(code), "staff"), code).not.toBe(
         messageFor(failure("something_unmapped"), "staff"),
       );
+    }
+  });
+});
+
+describe("what the newest refusals say", () => {
+  it("tells a guest their bookings changed under the button, and to look before pressing again", () => {
+    expect(messageFor(failure("booking_changed"), "guest")).toBe(
+      "Ваши брони изменились — проверьте и нажмите ещё раз.",
+    );
+  });
+
+  it("tells staff the guest already holds another evening, and what to do about it", () => {
+    expect(messageFor(failure("guest_has_another_plan"), "staff")).toBe(
+      "У гостя уже есть бронь на другой вечер — сначала перенесите или отмените её.",
+    );
+  });
+
+  it("names a character no text may hold, to whoever typed it", () => {
+    expect(messageFor(failure("text_invalid"), "staff")).toBe("В тексте есть недопустимый символ.");
+    expect(messageFor(failure("text_invalid"), "guest")).toBe("В тексте есть недопустимый символ.");
+  });
+
+  it("tells whoever holds an app too old for the server to reopen it", () => {
+    for (const audience of ["guest", "staff"] as const) {
+      for (const code of ["body_invalid", "request_invalid", "method_not_allowed"]) {
+        expect(messageFor(failure(code), audience), code).toBe(
+          "Приложение устарело — закройте и откройте его заново.",
+        );
+      }
+    }
+  });
+
+  it("says a date that does not exist does not exist", () => {
+    for (const audience of ["guest", "staff"] as const) {
+      expect(messageFor(failure("invalid_date"), audience)).toBe("Такой даты нет.");
+    }
+  });
+
+  it("tells staff the bot cannot write to a guest without guessing why", () => {
+    // App guest who blocked bot gets same refusal as hand-written guest.
+    expect(messageFor(failure("no_bot_chat"), "staff")).toBe(
+      "Бот не может написать этому гостю — позвоните или откройте чат.",
+    );
+  });
+
+  it("tells staff what was not found could be a table as well as a booking", () => {
+    const said = messageFor(failure("not_found"), "staff");
+    expect(said).toMatch(/брон/);
+    expect(said).toMatch(/стол/);
+  });
+
+  it("tells staff a table taken since is taken, and where to reseat", () => {
+    expect(messageFor(failure("table_taken"), "staff")).toBe(
+      "Стол уже заняли — пересадите бронь через «Перенести».",
+    );
+  });
+
+  it("points a manager at the reasons a refused save keeps, not at marks the screen never draws", () => {
+    for (const code of ["settings_invalid", "would_strand_bookings"]) {
+      const said = messageFor(failure(code), "staff");
+      expect(said, code).toMatch(/«Почему»/);
+      expect(said, code).not.toMatch(/отмеченн|^Эти брони/);
     }
   });
 });
@@ -105,5 +208,12 @@ describe("the detail a refused settings save carries", () => {
     ).toEqual(["первая", "вторая"]);
     expect(invalidReasons(failure("settings_invalid"))).toEqual([]);
     expect(invalidReasons(failure("no_table_free", { reasons: ["x"] }))).toEqual([]);
+  });
+});
+
+describe("a failure that is nobody's fault here", () => {
+  it("tells the person holding the phone to check their connection", () => {
+    expect(messageFor(failure("network"), "guest")).toContain("интернет");
+    expect(messageFor(failure("network"), "staff")).toContain("интернет");
   });
 });

@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MIN_CONTRAST, baseline, contrastRatio, type ColorScheme } from "../theme";
+import { MIN_CONTRAST, baseline, contrastRatio, paletteFrom, type ColorScheme } from "../theme";
 
 const MEANINGFUL = ["hint", "txt", "ok", "warn", "dest"] as const;
 const GROUNDS = ["bg", "sec"] as const;
@@ -54,5 +54,30 @@ describe("the contrast arithmetic", () => {
   it("reports nothing for what is not a hex colour", () => {
     expect(contrastRatio("rgba(0,0,0,.5)", "#ffffff")).toBeNull();
     expect(contrastRatio("#fff", "var(--bg)")).toBeNull();
+  });
+});
+
+describe("the palette Telegram hands over", () => {
+  it("replaces a hint colour that cannot be read on the grounds it is drawn on", () => {
+    // Telegram default dark theme: hint grey under 4.5:1 on its card colour; half small text uses it.
+    const palette = paletteFrom("dark", {
+      bg_color: "#17212b",
+      secondary_bg_color: "#232e3c",
+      text_color: "#f5f5f5",
+      hint_color: "#708499",
+    });
+    for (const ground of [palette.bg, palette.sec]) {
+      expect(contrastRatio(palette.hint, ground) ?? 0).toBeGreaterThanOrEqual(MIN_CONTRAST);
+    }
+  });
+
+  it("keeps a hint colour the user's theme chose when it can be read", () => {
+    const palette = paletteFrom("light", {
+      bg_color: "#ffffff",
+      secondary_bg_color: "#f2f2f7",
+      text_color: "#000000",
+      hint_color: "#5a5a5a",
+    });
+    expect(palette.hint).toBe("#5a5a5a");
   });
 });
