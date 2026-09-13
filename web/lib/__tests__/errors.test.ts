@@ -110,7 +110,7 @@ describe("what the newest refusals say", () => {
 
   it("tells whoever holds an app too old for the server to reopen it", () => {
     for (const audience of ["guest", "staff"] as const) {
-      for (const code of ["body_invalid", "request_invalid"]) {
+      for (const code of ["body_invalid", "request_invalid", "method_not_allowed"]) {
         expect(messageFor(failure(code), audience), code).toBe(
           "Приложение устарело — закройте и откройте его заново.",
         );

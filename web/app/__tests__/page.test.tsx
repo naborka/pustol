@@ -1968,6 +1968,26 @@ describe("a guest changing their mind", () => {
     expect(server.count("GET", "/api/session")).toBe(2);
   });
 
+  it("reads what the guest holds again when a booking is refused because the evening is already theirs", async () => {
+    fakeTelegram();
+    const server = fakeServer({
+      "GET /api/session": () => ({ body: session({ bookings: [booking] }) }),
+      "GET /api/days": () => ({ body: { party_size: 4, days: rail(2) } }),
+      "GET /api/availability": () => ({ body: availability() }),
+      "POST /api/booking": () => ({
+        status: 409,
+        body: { error: { code: "already_booked_tonight", message: "held" } },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+
+    await user.click(await screen.findByText("Перенести"));
+    await user.click(await screen.findByRole("button", { name: "21:30" }));
+    await user.click(await screen.findByText("Перенести · 4 гостя · сегодня в 21:30"));
+    await waitFor(() => expect(server.count("GET", "/api/session")).toBe(2));
+  });
+
   it("reads the times again when the bookings changed, and no longer offers a time that passed meanwhile", async () => {
     fakeTelegram();
     let sessions = 0;

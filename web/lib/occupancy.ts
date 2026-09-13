@@ -115,23 +115,6 @@ export function walkInOffers(shift: ShiftView, partySize: number): TableOffer[] 
   );
 }
 
-/**
- * How many guests are sitting in the room at this minute.
- *
- * A party that has arrived and one that has since left are the same party: whether they were at the
- * table at a given minute is a question about the range they held, which is the one occupancy rule
- * above. What separates them from a booking that is merely expected — or from a no-show whose table
- * is still being kept — is that somebody actually sat down.
- */
-export function seatedGuestsAt(bookings: ShiftBooking[], minute: number): number {
-  return bookings
-    .filter(
-      (booking) =>
-        (booking.status === "arrived" || booking.status === "left") && holdsAt(booking, minute),
-    )
-    .reduce((total, booking) => total + booking.party_size, 0);
-}
-
 /** The shift's own receipt: six numbers, all of them derived rather than reported. */
 export interface ShiftTotals {
   bookings: number;

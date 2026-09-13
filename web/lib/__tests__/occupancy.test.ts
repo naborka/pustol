@@ -16,7 +16,6 @@ import {
   hourlyLoad,
   occupancyEnd,
   peakHour,
-  seatedGuestsAt,
   shiftTotals,
   tableOffers,
   walkInOffers,
@@ -56,7 +55,7 @@ function shift(overrides: Partial<ShiftView> = {}): ShiftView {
     hours: { open_minutes: 1_080, close_minutes: 1_560, closed: false },
     tables: [table("t1", 1, 2), table("t2", 2, 6)],
     bookings: [],
-    stats: { bookings: 0, guests: 0, free_now: null },
+    stats: { bookings: 0, guests: 0, free_now: null, seated_now: null },
     now_minutes: 1_280,
     walk_in_until_minutes: 1_400,
     walk_in_free_table_ids: [],
@@ -100,10 +99,8 @@ describe("a party that leaves at 21:20", () => {
   });
 
   it("makes the readings of the room this screen works out agree", () => {
-    // The room's seated-guest count, the hourly bars and the width of the block on the timeline:
-    // one function, and they move together.
-    expect(seatedGuestsAt(room.bookings, 1_279)).toBe(2);
-    expect(seatedGuestsAt(room.bookings, 1_280)).toBe(0);
+    // The hourly bars and the width of the block on the timeline: one function, and they move
+    // together.
     expect(hourlyLoad(room).map((hour) => hour.tables)).toEqual([0, 0, 1, 1, 0, 0, 0, 0]);
     expect(occupancyEnd(gone) - gone.start_minutes).toBe(80);
   });

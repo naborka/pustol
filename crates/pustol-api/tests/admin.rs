@@ -2372,6 +2372,52 @@ async fn a_walk_in_ends_where_the_shift_says_walk_ins_end_and_is_refused_where_i
 }
 
 #[tokio::test]
+async fn the_shift_counts_the_guests_seated_this_minute_by_the_bars_own_clock() {
+    let app = harness_at(common::utc(2026, 7, 30, 18, 7), open_until(1560, 120)).await;
+    let staff = manager(&app).await;
+    app.post(
+        "/api/admin/walkins",
+        &staff,
+        serde_json::json!({ "service_date": "2026-07-30", "party_size": 2 }),
+    )
+    .await
+    .expect_ok();
+    let tonight = app.get(SHIFT, &staff).await.expect_ok().clone();
+    assert_eq!(tonight["stats"]["seated_now"], 2, "{tonight}");
+    let tomorrow = app
+        .get("/api/admin/shift?service_date=2026-07-31", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert!(tomorrow["stats"]["seated_now"].is_null(), "{tomorrow}");
+
+    // The night the clocks go back, at the first 02:40 with one-hour sittings: the party holds its
+    // table until the second 02:40, which the wall clock cannot tell from the minute it sat down.
+    let app = harness_at(common::utc(2026, 10, 24, 10, 0), open_until(1680, 60)).await;
+    let staff = manager(&app).await;
+    let at = app.at(common::utc(2026, 10, 25, 0, 40));
+    let seated = at
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-10-24", "party_size": 2 }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(
+        seated["booking"]["start_minutes"], seated["booking"]["end_minutes"],
+        "{seated}"
+    );
+    let shift = at
+        .get("/api/admin/shift?service_date=2026-10-24", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(shift["stats"]["seated_now"], 2, "{shift}");
+}
+
+#[tokio::test]
 async fn once_the_shift_has_ended_nobody_can_be_seated_now_and_the_shift_says_so() {
     // Closing at 23:00 with two-hour sittings: at half past eleven Thursday is still the calendar's
     // today, and its last sitting is over.

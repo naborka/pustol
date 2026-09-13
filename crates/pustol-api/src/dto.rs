@@ -477,6 +477,11 @@ pub struct ShiftStats {
     /// Tables free at this moment, absent for a shift that is not the one running: "free now" has
     /// no meaning on next Tuesday, and an invented number is worse than a blank.
     pub free_now: Option<usize>,
+    /// Guests at their tables this minute, absent for a shift that is not the one running.
+    ///
+    /// Counted here, in instants: on the night the clocks go back a party can sit from the first 02:40
+    /// to the second, a stretch a count in wall-clock minutes reads as empty.
+    pub seated_now: Option<i32>,
 }
 
 /// One row of the staff day sheet.
@@ -588,6 +593,19 @@ impl ShiftView {
                 })
                 .count()
         });
+        let seated_now = is_running.then(|| {
+            bookings
+                .iter()
+                .filter(|record| {
+                    matches!(record.booking.status, BookingStatus::Arrived | BookingStatus::Left)
+                        && record
+                            .booking
+                            .occupancy()
+                            .is_some_and(|held| held.start() <= now && now < held.end())
+                })
+                .map(|record| record.booking.party_size)
+                .sum()
+        });
         let now_minutes = is_running.then(|| minutes_within(day, now, config.timezone));
         let (live, closed) = (bookings_of(bookings), blocks_of(blocks));
         let walk_in = pustol_domain::walk_in(config, day, now, &live, &closed);
@@ -615,6 +633,7 @@ impl ShiftView {
                 bookings: bookings.len(),
                 guests: bookings.iter().map(|record| record.booking.party_size).sum(),
                 free_now,
+                seated_now,
             },
             now_minutes,
             largest_party_seatable_now,

@@ -658,6 +658,8 @@ export default function Page() {
         unprompted(loadTimes);
         return;
       }
+      // Refused for what the guest already holds: the labels were drawn from bookings that changed.
+      if (failure.code === "already_booked_tonight") unprompted(loadSession);
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
       // showing a time that no longer exists.
       setChosenMinutes(null);

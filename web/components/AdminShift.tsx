@@ -23,7 +23,6 @@ import {
   hourlyLoad,
   occupancyEnd,
   peakHour,
-  seatedGuestsAt,
   shiftTotals,
 } from "@/lib/occupancy";
 import {
@@ -146,7 +145,7 @@ export function Pulse({ shift }: { shift: ShiftView }) {
   // the whole room. Recomputing it here would be a second implementation of a number the two are
   // required to agree on, and the only way two implementations stay in step is by not existing.
   const free = shift.stats.free_now;
-  const seated = running ? seatedGuestsAt(shift.bookings, shift.now_minutes ?? 0) : null;
+  const seated = shift.stats.seated_now;
   const fits = shift.largest_party_seatable_now;
 
   return (

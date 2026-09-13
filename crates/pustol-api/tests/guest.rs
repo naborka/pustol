@@ -650,6 +650,26 @@ async fn an_unknown_api_path_fails_the_way_the_api_fails() {
 }
 
 #[tokio::test]
+async fn a_wrong_method_or_the_bare_api_root_fails_the_way_the_api_fails() {
+    // An app opened before a method was removed still sends it, and `api.ts` can only tell the guest
+    // to reopen the app when the refusal carries a code.
+    use axum::http::StatusCode;
+    let app = harness().await;
+    for (method, path, status, code) in [
+        ("DELETE", "/api/booking", StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
+        ("GET", "/api/admin/blocks", StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
+        ("GET", "/api", StatusCode::NOT_FOUND, "not_found"),
+        ("GET", "/api/", StatusCode::NOT_FOUND, "not_found"),
+        ("GET", "/api/admin", StatusCode::NOT_FOUND, "not_found"),
+        ("GET", "/api/admin/", StatusCode::NOT_FOUND, "not_found"),
+    ] {
+        let answer = app.send_raw(method, path, None, None).await;
+        assert_eq!(answer.status, status, "{method} {path}: {}", answer.body);
+        assert_eq!(answer.error_code(), Some(code), "{method} {path}: {}", answer.body);
+    }
+}
+
+#[tokio::test]
 async fn the_day_rail_is_the_horizon_itself_and_every_chip_says_what_it_holds() {
     // Four days from a Thursday, with the Saturday shut. The rail is four chips long, not three:
     // a day a guest cannot have is a day the rail has to answer, not one it may quietly drop.

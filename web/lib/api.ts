@@ -176,7 +176,13 @@ export interface ShiftView {
   hours: Hours;
   tables: ShiftTable[];
   bookings: ShiftBooking[];
-  stats: { bookings: number; guests: number; free_now: number | null };
+  /** `seated_now` is counted by the server in instants; null on an evening that is not running. */
+  stats: {
+    bookings: number;
+    guests: number;
+    free_now: number | null;
+    seated_now: number | null;
+  };
   now_minutes: number | null;
   /**
    * When a party seated now gives its table back, in wall-clock minutes of the shift like

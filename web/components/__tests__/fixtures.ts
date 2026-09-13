@@ -146,7 +146,7 @@ export function shift(overrides: Partial<ShiftView> = {}): ShiftView {
       shiftTable({ id: "t3", number: 10, seats: 8, zone: "Зал" }),
     ],
     bookings: [shiftBooking()],
-    stats: { bookings: 1, guests: 2, free_now: 2 },
+    stats: { bookings: 1, guests: 2, free_now: 2, seated_now: 2 },
     now_minutes: 1_280,
     walk_in_until_minutes: 1_400,
     // Table 7 is Саша's until 23:00.

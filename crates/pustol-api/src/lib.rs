@@ -21,7 +21,7 @@ pub mod worker;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, header};
-use axum::routing::get;
+use axum::routing::{any, get};
 use pustol_domain::LIMITS;
 use tower_http::compression::CompressionLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -76,10 +76,21 @@ const FRAME_ANCESTORS: HeaderValue =
 pub fn router(state: AppState, assets: Option<Assets>) -> Router {
     let api = Router::new()
         .route("/health", get(health))
-        .nest("/api", routes::guest::routes().fallback(no_such_endpoint))
+        .route("/api", any(no_such_endpoint))
+        .route("/api/", any(no_such_endpoint))
+        .route("/api/admin", any(no_such_endpoint))
+        .route("/api/admin/", any(no_such_endpoint))
+        .nest(
+            "/api",
+            routes::guest::routes()
+                .fallback(no_such_endpoint)
+                .method_not_allowed_fallback(wrong_method),
+        )
         .nest(
             "/api/admin",
-            routes::admin::routes().fallback(no_such_endpoint),
+            routes::admin::routes()
+                .fallback(no_such_endpoint)
+                .method_not_allowed_fallback(wrong_method),
         )
         .layer(DefaultBodyLimit::max(max_body_bytes()))
         .with_state(state);
@@ -120,4 +131,14 @@ async fn health() -> &'static str {
 /// — would report a parse error instead of the 404 that happened.
 async fn no_such_endpoint() -> ApiError {
     ApiError::not_found("endpoint")
+}
+
+/// A path under `/api` that exists, asked with a method it does not take — usually an app opened
+/// before that method was removed, which can only be told to reopen when the refusal carries a code.
+async fn wrong_method() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        "this path does not take that method",
+    )
 }

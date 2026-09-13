@@ -51,6 +51,20 @@ describe("the pulse", () => {
     expect(screen.getByText("Сейчас можно посадить компанию до 8 гостей")).toBeDefined();
   });
 
+  it("counts the guests at the tables as the server does, not by the wall clock", () => {
+    // On the night the clocks go back a party can sit from the first 02:40 to the second, a range the
+    // wall clock reads as empty. Only the server, counting in instants, sees them.
+    render(
+      <Pulse
+        shift={shift({
+          bookings: [],
+          stats: { bookings: 0, guests: 0, free_now: 2, seated_now: 5 },
+        })}
+      />,
+    );
+    expect(screen.getByText("21:20 · 5 гостей за столами")).toBeDefined();
+  });
+
   it("counts what fits the way Russian counts after «до»", () => {
     render(<Pulse shift={shift({ largest_party_seatable_now: 2 })} />);
     expect(screen.getByText("Сейчас можно посадить компанию до 2 гостей")).toBeDefined();
@@ -71,7 +85,7 @@ describe("the pulse", () => {
         shift={shift({
           now_minutes: null,
           largest_party_seatable_now: null,
-          stats: { bookings: 1, guests: 2, free_now: null },
+          stats: { bookings: 1, guests: 2, free_now: null, seated_now: null },
         })}
       />,
     );
