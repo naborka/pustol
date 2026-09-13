@@ -761,6 +761,22 @@ fn a_contact_is_a_phone_number_or_a_telegram_username_and_nothing_else() {
 }
 
 #[test]
+fn a_contact_username_is_bounded_by_telegram_and_a_phone_by_one_line() {
+    use pustol_domain::config::Contact;
+
+    let longest = format!("a{}", "b".repeat(31));
+    assert_eq!(
+        Contact::parse(&format!("@{longest}")),
+        Some(Contact::Telegram { username: longest }),
+        "the @ is not part of the username"
+    );
+
+    let phone = |length: usize| format!("+381{}111234567", " ".repeat(length - 13));
+    assert!(Contact::parse(&phone(32)).is_some());
+    assert_eq!(Contact::parse(&phone(33)), None);
+}
+
+#[test]
 fn a_bar_with_an_unreadable_contact_is_not_legal_and_one_without_a_contact_is() {
     let mut config = default_config();
     config.contact = Some("звоните в дверь".to_owned());

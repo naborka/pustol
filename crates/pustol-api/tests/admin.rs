@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Caller, config_with, harness, harness_at, morning, table};
+use common::{Caller, config_with, draft_from, harness, harness_at, morning, table};
 
 /// The manager, recognised by the username the fixture bar invited.
 async fn manager(app: &common::Harness) -> Caller {
@@ -489,42 +489,6 @@ async fn asking_the_room_to_try_again_says_plainly_when_there_is_still_nowhere()
 }
 
 // ---- settings ---------------------------------------------------------------------------------
-
-/// The settings screen's payload turned back into the proposal the screen would send.
-fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "name": settings["name"],
-        "address": settings["address"],
-        "timezone": settings["timezone"],
-        "week": settings["week"],
-        "zones": settings["zones"],
-        "tables": settings["tables"]
-            .as_array()
-            .expect("tables")
-            .iter()
-            .map(|table| serde_json::json!({
-                "kind": "existing",
-                "id": table["id"],
-                "seats": table["seats"],
-                "zone": table["zone"],
-            }))
-            .collect::<Vec<_>>(),
-        "turn_minutes": settings["turn_minutes"],
-        "slot_step_minutes": settings["slot_step_minutes"],
-        "max_party": settings["max_party"],
-        "horizon_days": settings["horizon_days"],
-        "remind_hours": settings["remind_hours"],
-        "grace_minutes": settings["grace_minutes"],
-        "message_templates": settings["message_templates"],
-        "cancel_reasons": settings["cancel_reasons"],
-        "staff": settings["staff"]
-            .as_array()
-            .expect("staff")
-            .iter()
-            .map(|member| serde_json::json!({ "username": member["username"] }))
-            .collect::<Vec<_>>(),
-    })
-}
 
 #[tokio::test]
 async fn the_settings_screen_arrives_with_the_bounds_every_control_must_respect() {

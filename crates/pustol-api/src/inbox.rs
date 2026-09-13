@@ -37,16 +37,19 @@ impl Inbox {
     /// Runs until the process is asked to stop.
     ///
     /// Only the wait for Telegram is cut short by a stop. An update already in hand is answered in
-    /// full, so a guest's tap is never left cancelled but unanswered.
+    /// full, so a guest's tap is never left cancelled but unanswered, and before stopping Telegram
+    /// is told what was answered, so the next process does not answer it again.
     pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut offset = None;
+        let mut received = None;
         loop {
             let polled = tokio::select! {
                 polled = self.bot.get_updates(offset, LONG_POLL) => polled,
-                _ = shutdown.changed() => return,
+                _ = shutdown.changed() => break,
             };
             let pause = match polled {
                 Ok(updates) => {
+                    received = offset;
                     offset = self.handle_all(updates, offset).await;
                     continue;
                 }
@@ -61,9 +64,22 @@ impl Inbox {
             };
             tokio::select! {
                 () = tokio::time::sleep(pause) => {}
-                _ = shutdown.changed() => return,
+                _ = shutdown.changed() => break,
             }
         }
+        if let Some(answered) = offset
+            && offset > received
+            && let Err(error) = self.confirm(answered).await
+        {
+            tracing::warn!(%error, "could not tell Telegram which updates were answered");
+        }
+    }
+
+    /// Tells Telegram every update before `offset` is done, without waiting for more.
+    ///
+    /// What comes back is dropped: it has not been answered, so it is left for the next poll.
+    pub async fn confirm(&self, offset: i64) -> Result<(), SendError> {
+        self.bot.get_updates(Some(offset), Duration::ZERO).await.map(drop)
     }
 
     /// Fetches once and answers everything fetched. Returns the offset to ask from next.

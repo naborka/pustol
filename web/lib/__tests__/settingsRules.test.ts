@@ -4,11 +4,13 @@ import type { Limits, SettingsDraft } from "../api";
 import {
   copyDraft,
   differs,
+  isContact,
   isLegal,
   isTelegramUsername,
   lastArrivalMinutes,
   reasonsAgainst,
   shortestShiftMinutes,
+  trimmed,
   wouldBeLegal,
 } from "../settingsRules";
 
@@ -321,6 +323,32 @@ describe("how long a text may be", () => {
     // One emoji is one character to the server and two code units to JavaScript.
     expect(kinds(draft({ name: "🍺".repeat(LIMITS.text.name) }))).toEqual([]);
   });
+
+  it("counts a text as the server stores it, without the space around it", () => {
+    expect(kinds(draft({ message_templates: [`${"а".repeat(LIMITS.text.message)} `] }))).toEqual(
+      [],
+    );
+    expect(kinds(draft({ name: `${"б".repeat(LIMITS.text.name)} ` }))).toEqual([]);
+    expect(kinds(draft({ address: `　${"в".repeat(LIMITS.text.address)}` }))).toEqual(
+      [],
+    );
+    expect(kinds(draft({ cancel_reasons: [`\t${"г".repeat(LIMITS.text.reason)}\n`] }))).toEqual(
+      [],
+    );
+  });
+});
+
+describe("trimming the way the server trims", () => {
+  it("strips exactly Unicode White_Space from both ends", () => {
+    expect(trimmed(" a b 　")).toBe("a b");
+    expect(trimmed("﻿a﻿")).toBe("﻿a﻿");
+  });
+
+  it("calls a text of nothing but White_Space blank, and a byte-order mark not", () => {
+    expect(kinds(draft({ name: " " }))).toContain("blank_name");
+    expect(kinds(draft({ message_templates: [" "] }))).toContain("blank_message_template");
+    expect(kinds(draft({ cancel_reasons: ["﻿"] }))).not.toContain("blank_cancel_reason");
+  });
 });
 
 describe("the contact guests are given", () => {
@@ -331,5 +359,22 @@ describe("the contact guests are given", () => {
     for (const wrong of ["звоните", "12", "+1+2345678", "@ab", "https://evil.example"]) {
       expect(kinds(draft({ contact: wrong }))).toContain("malformed_contact");
     }
+  });
+
+  it("trims only what the server trims before reading it", () => {
+    expect(kinds(draft({ contact: "@barname" }))).toEqual([]);
+    expect(kinds(draft({ contact: "﻿@barname" }))).toContain("malformed_contact");
+  });
+
+  it("takes a username as long as Telegram allows, with its @", () => {
+    const longest = `b${"a".repeat(31)}`;
+    expect(isContact(`@${longest}`)).toBe(true);
+    expect(isContact(` @${longest} `)).toBe(true);
+    expect(isContact(`@${longest}a`)).toBe(false);
+  });
+
+  it("keeps a phone number to one line of a screen", () => {
+    expect(isContact(`+1${"-".repeat(24)}234567`)).toBe(true);
+    expect(isContact(`+1${"-".repeat(25)}234567`)).toBe(false);
   });
 });

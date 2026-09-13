@@ -95,6 +95,27 @@ describe("the guest's home screen", () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
+  it("does not offer to move a booking that is already under way, but still lets it be cancelled", () => {
+    // The server refuses a second booking while one is running, so «Перенести» could only fail.
+    const cases = [
+      { booking, bar: { ...bar, now_minutes: booking.start_minutes } },
+      { booking, bar: { ...bar, now_minutes: 1_500 } },
+      { booking: { ...booking, service_date: "2026-09-10" }, bar },
+    ];
+    for (const started of cases) {
+      const { unmount } = home(started);
+      expect(screen.queryByText("Перенести")).toBeNull();
+      expect(screen.getByText("Отменить")).toBeDefined();
+      unmount();
+    }
+
+    home({ booking, bar: { ...bar, now_minutes: booking.start_minutes - 1 } });
+    expect(screen.getByText("Перенести")).toBeDefined();
+    cleanup();
+    home({ booking: { ...booking, service_date: "2026-09-12", start_minutes: 1_080 }, bar });
+    expect(screen.getByText("Перенести")).toBeDefined();
+  });
+
   it("asks about reminders exactly once, and never again after «Не нужно»", () => {
     const { unmount } = home({ booking });
     expect(screen.getByText("Напомнить за 3 часа?")).toBeDefined();

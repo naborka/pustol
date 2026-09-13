@@ -43,10 +43,7 @@ async fn session(
     caller: Authenticated,
 ) -> ApiResult<Json<Session>> {
     let now = state.now();
-    let viewer = state
-        .store
-        .identify(state.bar, &caller.account(), now)
-        .await?;
+    let viewer = caller.viewer(&state).await?;
     let config = state.store.config(state.bar).await?;
     let today = config.current_service_day(now);
     let booking = state
@@ -159,12 +156,9 @@ async fn book(
     Json(request): Json<BookingRequest>,
 ) -> ApiResult<Json<BookingTaken>> {
     let now = state.now();
-    // The account has to exist before a booking can point at it, and this is also the moment a
-    // freshly invited member of staff is recognised.
-    state
-        .store
-        .identify(state.bar, &caller.account(), now)
-        .await?;
+    // The account has to exist before a booking can point at it, and the name the booking is filed
+    // under is the one stored for it rather than whatever a session remembered.
+    let viewer = caller.viewer(&state).await?;
 
     let created = state
         .store
@@ -175,9 +169,9 @@ async fn book(
                 start_minutes: request.start_minutes,
                 party_size: request.party_size,
                 channel: Channel::Guest {
-                    user: caller.user_id(),
-                    name: caller.user.first_name.clone(),
-                    username: caller.user.username.clone(),
+                    user: viewer.account.id,
+                    name: viewer.account.first_name,
+                    username: viewer.account.username,
                 },
                 reminder: Some(word_reminder),
             },
@@ -234,9 +228,10 @@ async fn choose(
     caller: &Authenticated,
     choice: ReminderChoice,
 ) -> ApiResult<Json<RemindersView>> {
+    let viewer = caller.viewer(state).await?;
     let standing = state
         .store
-        .choose_reminders(&caller.account(), choice, state.now())
+        .choose_reminders(&viewer.account, choice, state.now())
         .await?;
     Ok(Json(RemindersView::of_standing(standing)))
 }

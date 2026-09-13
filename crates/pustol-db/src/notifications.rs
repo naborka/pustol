@@ -47,6 +47,13 @@ pub struct PendingNotification {
     pub body: String,
     /// How many times delivery has now been tried, this attempt included.
     pub attempts: i32,
+    /// The moment this claim keeps the message from other workers until, exactly as stored.
+    ///
+    /// Together with `attempts` it names this claim and no other: a reminder rewritten while it
+    /// was out for delivery has a new moment and no attempts, and a later claim has more attempts.
+    /// A delivery result is recorded only while both still match, so the outcome of sending the old
+    /// words can never settle, delay or give up the new ones.
+    pub lease: DateTime<Utc>,
 }
 
 impl Store {
@@ -55,7 +62,8 @@ impl Store {
     /// The text has to be one the bar configured. Accepting free text here would make a borrowed
     /// staff account a way to send anything to every guest who has ever booked, and checking it in
     /// the handler instead would leave the rule for every future caller to remember. Checked in
-    /// the transaction that queues it, so a template removed a moment ago cannot slip through.
+    /// the transaction that queues it, under the bar's lock a settings save also holds, so a
+    /// template removed a moment ago cannot slip through.
     pub async fn send_template(
         &self,
         bar: BarId,
@@ -65,6 +73,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Uuid> {
         let mut transaction = self.pool().begin().await?;
+        crate::lock_bar(&mut transaction, bar).await?;
         let config = crate::bar::load_config(&mut transaction, bar).await?;
         if !config.message_templates.iter().any(|offered| offered == text) {
             return Err(crate::Error::UnknownMessage);
@@ -90,8 +99,10 @@ impl Store {
     ///
     /// A reminder is withheld unless the guest asked for reminders, the bot is believed able to
     /// reach them and the booking still holds a table. Messages that can never be worth sending —
-    /// anything about an evening that is over, a reminder for a booking that was cancelled or has
-    /// begun — are settled first, so they stop sitting in front of the ones that can.
+    /// a reminder, cancellation or move notice about an evening that is over, a reminder for a
+    /// booking that was cancelled or has begun — are settled first, so they stop sitting in front
+    /// of the ones that can. A staff message is never settled by the clock: it is about whatever
+    /// staff chose to say, and staff were told it was sent.
     pub async fn claim_due(
         &self,
         limit: i64,
@@ -106,6 +117,7 @@ impl Store {
              from booking b
              where b.id = n.booking_id
                and n.sent_at is null and n.gave_up_at is null and n.scheduled_for <= $1
+               and n.kind in ('reminder', 'cancelled', 'moved')
                and (b.ends_at <= $1
                     or (n.kind = 'reminder' and (b.status = 'cancelled' or b.starts_at <= $1)))",
         )
@@ -130,7 +142,8 @@ impl Store {
              )
              update notification set attempts = attempts + 1, scheduled_for = $3
              where id in (select id from due)
-             returning id, bar_id, booking_id, telegram_user_id, kind, body, attempts",
+             returning id, bar_id, booking_id, telegram_user_id, kind, body, attempts,
+                       scheduled_for",
         )
         .bind(now)
         .bind(limit)
@@ -149,18 +162,22 @@ impl Store {
                     kind: row.try_get("kind")?,
                     body: row.try_get("body")?,
                     attempts: row.try_get("attempts")?,
+                    lease: row.try_get("scheduled_for")?,
                 })
             })
             .collect()
     }
 
     /// Records a delivered message.
-    pub async fn mark_sent(&self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+    pub async fn mark_sent(&self, claimed: &PendingNotification, now: DateTime<Utc>) -> Result<()> {
         sqlx::query(
-            "update notification set sent_at = $2, last_error = null
-             where id = $1 and sent_at is null and gave_up_at is null",
+            "update notification set sent_at = $4, last_error = null
+             where id = $1 and scheduled_for = $2 and attempts = $3
+               and sent_at is null and gave_up_at is null",
         )
-        .bind(id)
+        .bind(claimed.id)
+        .bind(claimed.lease)
+        .bind(claimed.attempts)
         .bind(now)
         .execute(self.pool())
         .await?;
@@ -168,12 +185,20 @@ impl Store {
     }
 
     /// Records a failed attempt, and when to try again.
-    pub async fn defer(&self, id: Uuid, retry_at: DateTime<Utc>, error: &str) -> Result<()> {
+    pub async fn defer(
+        &self,
+        claimed: &PendingNotification,
+        retry_at: DateTime<Utc>,
+        error: &str,
+    ) -> Result<()> {
         sqlx::query(
-            "update notification set scheduled_for = $2, last_error = $3
-             where id = $1 and sent_at is null and gave_up_at is null",
+            "update notification set scheduled_for = $4, last_error = $5
+             where id = $1 and scheduled_for = $2 and attempts = $3
+               and sent_at is null and gave_up_at is null",
         )
-        .bind(id)
+        .bind(claimed.id)
+        .bind(claimed.lease)
+        .bind(claimed.attempts)
         .bind(retry_at)
         .bind(error)
         .execute(self.pool())
@@ -185,13 +210,21 @@ impl Store {
     ///
     /// Being told to slow down says nothing about whether this message can be delivered, so it
     /// must not bring the message closer to being given up on.
-    pub async fn postpone(&self, id: Uuid, retry_at: DateTime<Utc>, error: &str) -> Result<()> {
+    pub async fn postpone(
+        &self,
+        claimed: &PendingNotification,
+        retry_at: DateTime<Utc>,
+        error: &str,
+    ) -> Result<()> {
         sqlx::query(
             "update notification
-             set scheduled_for = $2, last_error = $3, attempts = greatest(attempts - 1, 0)
-             where id = $1 and sent_at is null and gave_up_at is null",
+             set scheduled_for = $4, last_error = $5, attempts = greatest(attempts - 1, 0)
+             where id = $1 and scheduled_for = $2 and attempts = $3
+               and sent_at is null and gave_up_at is null",
         )
-        .bind(id)
+        .bind(claimed.id)
+        .bind(claimed.lease)
+        .bind(claimed.attempts)
         .bind(retry_at)
         .bind(error)
         .execute(self.pool())
@@ -201,12 +234,20 @@ impl Store {
 
     /// Stops trying. Used for refusals that will not change however often they are retried — a
     /// blocked bot, a deleted account — and for a message that has exhausted its attempts.
-    pub async fn give_up(&self, id: Uuid, now: DateTime<Utc>, error: &str) -> Result<()> {
+    pub async fn give_up(
+        &self,
+        claimed: &PendingNotification,
+        now: DateTime<Utc>,
+        error: &str,
+    ) -> Result<()> {
         sqlx::query(
-            "update notification set gave_up_at = $2, last_error = $3
-             where id = $1 and sent_at is null and gave_up_at is null",
+            "update notification set gave_up_at = $4, last_error = $5
+             where id = $1 and scheduled_for = $2 and attempts = $3
+               and sent_at is null and gave_up_at is null",
         )
-        .bind(id)
+        .bind(claimed.id)
+        .bind(claimed.lease)
+        .bind(claimed.attempts)
         .bind(now)
         .bind(error)
         .execute(self.pool())

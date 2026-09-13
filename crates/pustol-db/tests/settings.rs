@@ -605,6 +605,69 @@ async fn somebody_never_invited_is_not_staff() {
 }
 
 #[tokio::test]
+async fn an_account_remembered_from_a_session_claims_no_seat_and_rewrites_nothing() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let known = fresh_account("Анна");
+    store.identify(bar, &known, morning()).await.expect("identified");
+
+    let mut remembered = known.clone();
+    remembered.username = Some("anna_mgr".to_owned());
+    remembered.first_name = "Старое имя".to_owned();
+    let viewer = store
+        .recognise(bar, &remembered, morning())
+        .await
+        .expect("recognised");
+
+    assert!(!viewer.is_staff, "a username kept in a session proves nothing about who holds it now");
+    assert_eq!(viewer.account, known, "the account as stored, not as remembered");
+    let bound = store
+        .config(bar)
+        .await
+        .expect("loads")
+        .staff
+        .iter()
+        .find(|member| member.username == "anna_mgr")
+        .and_then(|member| member.telegram_user_id);
+    assert_eq!(bound, None);
+}
+
+#[tokio::test]
+async fn an_account_first_seen_through_a_session_is_recorded_as_given() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let account = fresh_account("Гость");
+    let viewer = store
+        .recognise(bar, &account, morning())
+        .await
+        .expect("recognised");
+    assert_eq!(viewer.account, account);
+    assert!(viewer.reminders.should_ask());
+}
+
+#[tokio::test]
+async fn choosing_reminders_does_not_rewrite_a_known_account() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let known = fresh_account("Анна");
+    store.identify(bar, &known, morning()).await.expect("identified");
+
+    let mut stale = known.clone();
+    stale.username = Some("old_name".to_owned());
+    store
+        .choose_reminders(&stale, pustol_db::identity::ReminderChoice::OptIn, morning())
+        .await
+        .expect("chosen");
+
+    let viewer = store
+        .recognise(bar, &known, morning())
+        .await
+        .expect("recognised");
+    assert_eq!(viewer.account, known);
+    assert!(viewer.reminders.opted_in);
+}
+
+#[tokio::test]
 async fn editing_the_guest_messages_and_cancellation_reasons_replaces_the_lists() {
     let store = store().await;
     let (bar, config) = default_bar(&store).await;

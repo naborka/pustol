@@ -110,7 +110,7 @@ async fn deliver(
         .await
     {
         Ok(()) => {
-            store.mark_sent(message.id, clock.now()).await?;
+            store.mark_sent(message, clock.now()).await?;
             // A delivery is the only positive evidence there is that the bot can reach this guest.
             store.set_reachable(message.recipient, true).await?;
         }
@@ -119,7 +119,7 @@ async fn deliver(
             // does not keep trying an account that has blocked the bot.
             store.set_reachable(message.recipient, false).await?;
             store
-                .give_up(message.id, clock.now(), &failure.to_string())
+                .give_up(message, clock.now(), &failure.to_string())
                 .await?;
         }
         Err(SendError::RateLimited {
@@ -127,7 +127,7 @@ async fn deliver(
         }) => {
             store
                 .postpone(
-                    message.id,
+                    message,
                     clock.now() + TimeDelta::seconds(retry_after_seconds),
                     "telegram asked to wait",
                 )
@@ -138,7 +138,7 @@ async fn deliver(
                 tracing::warn!(id = %message.id, kind = ?message.kind, attempts = message.attempts, error = %failure, "giving up on a message");
                 store
                     .give_up(
-                        message.id,
+                        message,
                         clock.now(),
                         &format!("gave up after {} attempts: {failure}", message.attempts),
                     )
@@ -147,7 +147,7 @@ async fn deliver(
                 let wait = backoff(message.attempts);
                 tracing::warn!(id = %message.id, kind = ?message.kind, attempts = message.attempts, retry_in_seconds = wait.num_seconds(), error = %failure, "a delivery failed");
                 store
-                    .defer(message.id, clock.now() + wait, &failure.to_string())
+                    .defer(message, clock.now() + wait, &failure.to_string())
                     .await?;
             }
         }
@@ -155,7 +155,7 @@ async fn deliver(
             // Refused on its merits. Repeating the same request repeats the same refusal.
             tracing::warn!(id = %message.id, kind = ?message.kind, error = %failure, "telegram refused a message");
             store
-                .give_up(message.id, clock.now(), &failure.to_string())
+                .give_up(message, clock.now(), &failure.to_string())
                 .await?;
         }
     }

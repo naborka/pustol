@@ -50,6 +50,7 @@ const STAFF: Record<string, string> = {
   would_strand_bookings:
     "Эти брони уже приняты по действующим правилам. Сначала перенесите или отмените их.",
   unknown_timezone: "Такого часового пояса нет.",
+  already_booked_tonight: "У гостя уже есть другая бронь на этот вечер.",
 };
 
 const FALLBACK = "Не получилось. Попробуйте ещё раз.";

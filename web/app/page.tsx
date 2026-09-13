@@ -30,7 +30,6 @@ import {
   type SettingsDraft,
   type SettingsView,
   type ShiftBooking,
-  type ShiftTable,
   type ShiftView,
 } from "@/lib/api";
 import {
@@ -48,6 +47,7 @@ import {
   strandedLines,
 } from "@/lib/outcomes";
 import { firstReason, differs } from "@/lib/settingsRules";
+import { refreshedSheet, withBooking, type OpenSheet } from "@/lib/sheet";
 import { hasStarted } from "@/lib/status";
 import { credentials, haptics, openBotChat, openContact, webApp } from "@/lib/telegram";
 import { TIMING } from "@/lib/tokens";
@@ -77,19 +77,6 @@ import { Failure, MainButton, Spinner, Toast, type ToastMessage } from "@/compon
 type Tab = StaffTab;
 type GuestScreen = "home" | "book" | "done";
 
-type OpenSheet =
-  | { kind: "none" }
-  | { kind: "booking"; booking: ShiftBooking }
-  | { kind: "templates"; booking: ShiftBooking }
-  | { kind: "cancelBooking"; booking: ShiftBooking }
-  | { kind: "table"; table: ShiftTable }
-  | { kind: "conflict"; reasons: string[] }
-  | { kind: "days" }
-  | { kind: "walkIn" }
-  | { kind: "manual" }
-  | { kind: "move"; booking: ShiftBooking }
-  | { kind: "guestCancel" };
-
 /**
  * What a staff-side party size starts at, and the placeholder the picker holds until it is opened.
  *
@@ -116,11 +103,39 @@ function failureOf(error: unknown): ApiFailure {
 }
 
 /**
+ * Numbers the reads of one thing, so only the answer to the newest one counts.
+ *
+ * Numbered rather than aborted, because an abort still has to be raced against the state update. A
+ * write that puts its own answer on screen supersedes every read already on its way: each of those
+ * was asked before the write happened.
+ */
+function useReadOrder() {
+  const asked = useRef(0);
+  const reading = useRef(0);
+  return useMemo(
+    () => ({
+      begin: () => {
+        reading.current += 1;
+        return (asked.current += 1);
+      },
+      end: () => {
+        reading.current -= 1;
+      },
+      isLatest: (question: number) => question === asked.current,
+      supersede: () => {
+        asked.current += 1;
+      },
+      busy: () => reading.current > 0,
+    }),
+    [],
+  );
+}
+
+/**
  * Fetches, keeps only the answer to the newest question, and says while a newer one is on its way.
  *
  * Tapping 2 then 4 guests fires two requests, and without this the first to come back wins — which
  * on a bad connection is how a guest is shown the times for a party they are no longer bringing.
- * Numbered rather than aborted, because an abort still has to be raced against the state update.
  *
  * The last answer stays until the next arrives, marked pending, rather than being blanked: blanking
  * swapped the grid for a spinner on every tap and made the page jump under the guest's thumb.
@@ -131,25 +146,26 @@ function useLatest<T>(
   onFailure: (error: unknown) => void,
   onSuccess: () => void,
 ): [load: () => Promise<void>, pending: boolean] {
-  const asked = useRef(0);
+  const reads = useReadOrder();
   const [pending, setPending] = useState(false);
   const load = useCallback(async () => {
-    const question = (asked.current += 1);
+    const question = reads.begin();
     setPending(true);
     try {
       const answer = await ask();
-      if (question !== asked.current) return;
+      if (!reads.isLatest(question)) return;
       keep(answer);
       onSuccess();
     } catch (error) {
-      if (question !== asked.current) return;
+      if (!reads.isLatest(question)) return;
       // An answer to an older question must not stand in for one that failed.
       keep(null);
       onFailure(error);
     } finally {
-      if (question === asked.current) setPending(false);
+      reads.end();
+      if (reads.isLatest(question)) setPending(false);
     }
-  }, [ask, keep, onFailure, onSuccess]);
+  }, [reads, ask, keep, onFailure, onSuccess]);
   return [load, pending];
 }
 
@@ -298,17 +314,21 @@ export default function Page() {
     [],
   );
 
+  const sessionReads = useReadOrder();
   const reload = useCallback(
     async (quiet = false) => {
       if (!api) return;
+      const question = sessionReads.begin();
       try {
         const next = await api.session();
+        if (!sessionReads.isLatest(question)) return;
         hasSession.current = true;
         setSession(next);
         setServiceDate((current) => current ?? next.bookable_days[0] ?? next.bar.today);
         setShiftDate((current) => current ?? next.bar.today);
         setFatal(null);
       } catch (error) {
+        if (!sessionReads.isLatest(question)) return;
         if (quiet) {
           reportQuietly(error);
           return;
@@ -317,9 +337,25 @@ export default function Page() {
         // leaves the screen as it was and says so, rather than replacing it with a dead end.
         const failure = report(error, "guest");
         if (!hasSession.current) setFatal(failure);
+      } finally {
+        sessionReads.end();
       }
     },
-    [api, report, reportQuietly],
+    [api, report, reportQuietly, sessionReads],
+  );
+
+  /**
+   * Puts what a write answered on screen at once.
+   *
+   * A reread afterwards only freshens it, so its failure can never turn something that happened
+   * into an error.
+   */
+  const amendSession = useCallback(
+    (change: Partial<Session>) => {
+      sessionReads.supersede();
+      setSession((current) => (current ? { ...current, ...change } : current));
+    },
+    [sessionReads],
   );
 
   useEffect(() => {
@@ -370,66 +406,103 @@ export default function Page() {
     void loadAvailability();
   }, [screen, loadAvailability]);
 
-  // Numbered like `useLatest`, so a slow answer for the evening just left cannot replace the one
-  // just asked for — but not blanked first: a refresh of the same evening keeps it on screen.
-  const shiftAsked = useRef(0);
+  // Read when a load starts rather than passed in: an action that answers after a step to another
+  // evening reloads the evening on screen, not the one it was taken on.
+  const shiftDateNow = useRef(shiftDate);
+  useEffect(() => {
+    shiftDateNow.current = shiftDate;
+  }, [shiftDate]);
+
+  // Numbered, so a slow answer for the evening just left cannot replace the one just asked for —
+  // but not blanked first: a refresh of the same evening keeps it on screen.
+  const shiftReads = useReadOrder();
   const loadShift = useCallback(
-    async (date: string, quiet = false) => {
-      if (!api) return;
-      const question = (shiftAsked.current += 1);
+    async (quiet = false) => {
+      const date = shiftDateNow.current;
+      if (!api || date === null) return;
+      const question = shiftReads.begin();
       try {
         const next = await api.shift(date);
-        if (question !== shiftAsked.current) return;
+        if (!shiftReads.isLatest(question)) return;
         setShift(next);
         setShiftFailed(false);
+        setSheet((current) => refreshedSheet(current, next));
       } catch (error) {
-        if (question !== shiftAsked.current) return;
+        if (!shiftReads.isLatest(question)) return;
         if (quiet) {
           reportQuietly(error);
           return;
         }
         setShiftFailed(true);
         report(error, "staff");
+      } finally {
+        shiftReads.end();
       }
     },
-    [api, report, reportQuietly],
+    [api, report, reportQuietly, shiftReads],
   );
 
   useEffect(() => {
     if (tab !== "shift" || shiftDate === null) return;
     // Another evening is not a refresh of this one: what is on screen goes, rather than standing
-    // under the new day's name while it loads.
+    // under the new day's name while it loads — and so does a failure to read the last one.
     setShift((current) => (current?.service_date === shiftDate ? current : null));
-    void loadShift(shiftDate);
+    setShiftFailed(false);
+    void loadShift();
   }, [tab, shiftDate, loadShift]);
 
+  // A refresh nobody asked for never overtakes a read still on its way. It would throw that answer
+  // away, and if it then failed it would say nothing, leaving a spinner turning for ever.
   useWhileVisible(
     useMemo(
-      () => (tab === "shift" && shiftDate !== null ? () => void loadShift(shiftDate, true) : null),
-      [tab, shiftDate, loadShift],
+      () =>
+        tab === "shift" && shiftDate !== null
+          ? () => {
+              if (!shiftReads.busy()) void loadShift(true);
+            }
+          : null,
+      [tab, shiftDate, loadShift, shiftReads],
     ),
     SHIFT_REFRESH_MS,
   );
   useWhileVisible(
     useMemo(
-      () => (tab === "client" && screen === "home" ? () => void reload(true) : null),
-      [tab, screen, reload],
+      () =>
+        tab === "client" && screen === "home"
+          ? () => {
+              if (!sessionReads.busy()) void reload(true);
+            }
+          : null,
+      [tab, screen, reload, sessionReads],
     ),
     HOME_REFRESH_MS,
   );
 
+  const draftNow = useRef(draft);
+  useEffect(() => {
+    draftNow.current = draft;
+  }, [draft]);
+
+  const settingsReads = useReadOrder();
   const loadSettings = useCallback(
     async (date: string) => {
       if (!api) return;
+      const question = settingsReads.begin();
+      const asked = draftNow.current;
       try {
         const next = await api.settings(date);
+        if (!settingsReads.isLatest(question)) return;
         setSettings(next);
-        setDraft(draftOf(next));
+        // An edit typed while this was on its way is the manager's, not the server's to replace.
+        setDraft((current) => (current === asked ? draftOf(next) : current));
       } catch (error) {
+        if (!settingsReads.isLatest(question)) return;
         report(error, "staff");
+      } finally {
+        settingsReads.end();
       }
     },
-    [api, report],
+    [api, report, settingsReads],
   );
 
   const settingsDirty = settings !== null && draft !== null && differs(draft, draftOf(settings));
@@ -561,7 +634,7 @@ export default function Page() {
       setMoved(taken.replaced !== null);
       // The answer already says what was booked. Showing it does not wait on rereading the home
       // screen, whose failure must never turn a booking that happened into an error.
-      setSession((current) => (current ? { ...current, booking: taken.booking } : current));
+      amendSession({ booking: taken.booking });
       setScreen("done");
       void reload(true);
     } catch (error) {
@@ -577,14 +650,14 @@ export default function Page() {
   /** Books the same slot again, for a guest who has just changed their mind about cancelling. */
   const rebook = exclusive(async (was: GuestBooking) => {
     try {
-      await api.book(was.service_date, was.start_minutes, was.party_size);
+      const taken = await api.book(was.service_date, was.start_minutes, was.party_size);
       haptics.success();
-      await reload();
+      amendSession({ booking: taken.booking });
       tell("Бронь вернулась.");
     } catch (error) {
       report(error, "guest");
-      await reload();
     }
+    void reload(true);
   });
 
   const cancelMine = exclusive(async () => {
@@ -594,11 +667,12 @@ export default function Page() {
       await api.cancelMine();
       haptics.success();
       closeSheet();
-      await reload();
+      amendSession({ booking: null });
       say({
         text: "Бронь отменена. Стол снова свободен.",
         undo: { label: "Вернуть", run: () => void rebook(was) },
       });
+      void reload(true);
     } catch (error) {
       report(error, "guest");
     }
@@ -606,8 +680,8 @@ export default function Page() {
 
   const enableReminders = exclusive(async () => {
     try {
-      await api.optInToReminders();
-      await reload();
+      amendSession({ reminders: await api.optInToReminders() });
+      void reload(true);
       openBotChat(process.env.NEXT_PUBLIC_BOT_USERNAME ?? "");
       tell(`Напомним за ${fmt.hoursWord(bar.remind_hours)} до брони.`);
     } catch (error) {
@@ -617,8 +691,8 @@ export default function Page() {
 
   const dismissReminders = exclusive(async () => {
     try {
-      await api.dismissReminderPrompt();
-      await reload();
+      amendSession({ reminders: await api.dismissReminderPrompt() });
+      void reload(true);
     } catch (error) {
       report(error, "guest");
     }
@@ -643,7 +717,7 @@ export default function Page() {
   // ---- staff actions -------------------------------------------------------------------------
 
   const afterShiftChange = async (message?: ToastMessage) => {
-    await loadShift(shiftDate);
+    await loadShift();
     if (message) say(message);
   };
 
@@ -659,7 +733,7 @@ export default function Page() {
       try {
         const updated = await api.setAttendance(booking.id, attendance);
         haptics.success();
-        if (sheet.kind === "booking") setSheet({ kind: "booking", booking: updated });
+        setSheet((current) => withBooking(current, updated));
         await afterShiftChange({
           text: attendanceOutcome(updated, attendance),
           ...(undoable
@@ -683,8 +757,8 @@ export default function Page() {
   const setNote = exclusive(async (booking: ShiftBooking, note: string | null) => {
     try {
       const updated = await api.setNote(booking.id, note);
-      if (sheet.kind === "booking") setSheet({ kind: "booking", booking: updated });
-      await loadShift(shiftDate);
+      setSheet((current) => withBooking(current, updated));
+      await loadShift();
     } catch (error) {
       report(error, "staff");
     }
@@ -721,63 +795,63 @@ export default function Page() {
    * Runs something that rearranges the shift, then reloads and reports what moved — per booking,
    * by name, never as a count of what it hoped to do.
    */
-  const rearrange = exclusive(
-    async (
-      run: () => Promise<Reconciliation>,
-      lead: string,
-      whenNothingMoved: string,
-      orphanLead?: string,
-      undo?: ToastMessage["undo"],
-    ) => {
-      try {
-        const summary = reconciliationReport(await run(), orphanLead);
-        const text = summary.length > 0 ? `${lead} ${summary}`.trim() : whenNothingMoved;
-        await afterShiftChange(undo ? { text, undo } : { text });
-      } catch (error) {
-        report(error, "staff");
-      }
-    },
-  );
+  const rearrange = async (
+    run: () => Promise<Reconciliation>,
+    lead: string,
+    whenNothingMoved: string,
+    orphanLead?: string,
+    undo?: ToastMessage["undo"],
+  ) => {
+    try {
+      const summary = reconciliationReport(await run(), orphanLead);
+      const text = summary.length > 0 ? `${lead} ${summary}`.trim() : whenNothingMoved;
+      await afterShiftChange(undo ? { text, undo } : { text });
+    } catch (error) {
+      report(error, "staff");
+    }
+  };
 
-  const blockTables = (tableIds: string[], reason: string, number: number) => {
+  const blockTables = exclusive(async (tableIds: string[], reason: string, number: number) => {
     closeSheet();
-    return rearrange(
+    await rearrange(
       () => api.blockTables(shiftDate, tableIds, reason),
       `Стол ${number} закрыт на вечер.`,
       `Стол ${number} закрыт на вечер. Броней там не было.`,
       "Остались без стола",
       { label: "Вернуть", run: () => void unblockTables(tableIds, number) },
     );
-  };
+  });
 
   /**
    * Opening a table back up is as reversible as closing it, so it offers the same way back — with
    * the reason it was closed for, which is the only way re-closing it puts the room where it was.
    */
-  const unblockTables = (tableIds: string[], number: number, wasClosedFor?: string) => {
-    closeSheet();
-    return rearrange(
-      () => api.unblockTables(shiftDate, tableIds),
-      `Стол ${number} снова в подборе.`,
-      `Стол ${number} снова в подборе.`,
-      undefined,
-      wasClosedFor === undefined
-        ? undefined
-        : {
-            label: "Вернуть",
-            run: () => void blockTables(tableIds, wasClosedFor, number),
-          },
-    );
-  };
+  const unblockTables = exclusive(
+    async (tableIds: string[], number: number, wasClosedFor?: string) => {
+      closeSheet();
+      await rearrange(
+        () => api.unblockTables(shiftDate, tableIds),
+        `Стол ${number} снова в подборе.`,
+        `Стол ${number} снова в подборе.`,
+        undefined,
+        wasClosedFor === undefined
+          ? undefined
+          : {
+              label: "Вернуть",
+              run: () => void blockTables(tableIds, wasClosedFor, number),
+            },
+      );
+    },
+  );
 
-  const findTables = () => {
+  const findTables = exclusive(async () => {
     closeSheet();
-    return rearrange(
+    await rearrange(
       () => api.reconcileShift(shiftDate),
       "",
       "Свободных столов на это время нет. Откройте закрытый стол или предложите другое время.",
     );
-  };
+  });
 
   const seatWalkIn = exclusive(async (tableId: string) => {
     try {
@@ -787,7 +861,7 @@ export default function Page() {
       await afterShiftChange({ text: `Посадили за стол ${created.table_number}.` });
     } catch (error) {
       report(error, "staff");
-      await loadShift(shiftDate);
+      await loadShift();
     }
   });
 
@@ -831,7 +905,7 @@ export default function Page() {
       });
     } catch (error) {
       report(error, "staff");
-      await loadShift(shiftDate);
+      await loadShift();
     }
   },
   );
@@ -841,6 +915,7 @@ export default function Page() {
     setSaving(true);
     try {
       const saved = await api.saveSettings(shiftDate, draft);
+      settingsReads.supersede();
       setSettings(saved.settings);
       setDraft(draftOf(saved.settings));
       const parts = ["Настройки сохранены.", reconciliationReport(saved.reconciliation)];
@@ -848,7 +923,7 @@ export default function Page() {
         parts.push(`${fmt.bookings(saved.above_cap)} больше нового лимита — они остаются в силе.`);
       }
       tell(parts.filter(Boolean).join(" "));
-      await reload();
+      void reload(true);
     } catch (error) {
       const failure = report(error, "staff");
       if (failure.code === "would_strand_bookings") {
@@ -1125,7 +1200,7 @@ export default function Page() {
           <Failure
             message="Не удалось прочитать смену."
             actionLabel="Попробовать снова"
-            onAction={() => void loadShift(shiftDate)}
+            onAction={() => void loadShift()}
           />
         ) : (
           <Spinner label="Читаем смену" />

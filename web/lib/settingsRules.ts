@@ -64,18 +64,41 @@ function within(value: number, bounds: Bounds): boolean {
   return value >= bounds.min && value <= bounds.max;
 }
 
+/**
+ * A text as the server keeps it: Rust's `str::trim`, which strips Unicode White_Space.
+ *
+ * `String.prototype.trim` strips a different set — it takes a byte-order mark and leaves U+0085.
+ */
+export function trimmed(text: string): string {
+  return text.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+}
+
 /** Telegram's published rule: five to thirty-two characters, starting with a letter. */
 export function isTelegramUsername(candidate: string): boolean {
   return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(candidate);
 }
 
+const PHONE_MAX_CHARS = 32;
+
 /** A phone number or a Telegram username: `Contact::parse` in `pustol-domain`, advisory here. */
 export function isContact(text: string): boolean {
-  const trimmed = text.trim();
-  if (trimmed.length === 0 || characters(trimmed) > 32) return false;
-  if (isTelegramUsername(trimmed.startsWith("@") ? trimmed.slice(1) : trimmed)) return true;
-  const digits = trimmed.replace(/\D/g, "").length;
-  return /^\+?[0-9 ()-]+$/.test(trimmed) && digits >= 7 && digits <= 15;
+  const contact = trimmed(text);
+  if (isTelegramUsername(contact.startsWith("@") ? contact.slice(1) : contact)) return true;
+  const digits = contact.replace(/\D/g, "").length;
+  return (
+    characters(contact) <= PHONE_MAX_CHARS &&
+    /^\+?[0-9 ()-]+$/.test(contact) &&
+    digits >= 7 &&
+    digits <= 15
+  );
+}
+
+function isBlank(text: string): boolean {
+  return trimmed(text).length === 0;
+}
+
+function longerThan(text: string, limit: number): boolean {
+  return characters(trimmed(text)) > limit;
 }
 
 export function largestTable(draft: SettingsDraft): number {
@@ -86,11 +109,11 @@ export function largestTable(draft: SettingsDraft): number {
 export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   const reasons: Reason[] = [];
 
-  if (draft.name.trim().length === 0) reasons.push({ kind: "blank_name" });
-  if (draft.address.trim().length === 0) reasons.push({ kind: "blank_address" });
-  if (characters(draft.name) > limits.text.name) reasons.push({ kind: "name_too_long" });
-  if (characters(draft.address) > limits.text.address) reasons.push({ kind: "address_too_long" });
-  if (draft.contact.trim().length > 0 && !isContact(draft.contact)) {
+  if (isBlank(draft.name)) reasons.push({ kind: "blank_name" });
+  if (isBlank(draft.address)) reasons.push({ kind: "blank_address" });
+  if (longerThan(draft.name, limits.text.name)) reasons.push({ kind: "name_too_long" });
+  if (longerThan(draft.address, limits.text.address)) reasons.push({ kind: "address_too_long" });
+  if (!isBlank(draft.contact) && !isContact(draft.contact)) {
     reasons.push({ kind: "malformed_contact" });
   }
 
@@ -138,17 +161,17 @@ export function reasonsAgainst(draft: SettingsDraft, limits: Limits): Reason[] {
   }
 
   if (draft.message_templates.length === 0) reasons.push({ kind: "no_message_templates" });
-  if (draft.message_templates.some((text) => text.trim().length === 0)) {
+  if (draft.message_templates.some(isBlank)) {
     reasons.push({ kind: "blank_message_template" });
   }
   if (draft.cancel_reasons.length === 0) reasons.push({ kind: "no_cancel_reasons" });
-  if (draft.cancel_reasons.some((text) => text.trim().length === 0)) {
+  if (draft.cancel_reasons.some(isBlank)) {
     reasons.push({ kind: "blank_cancel_reason" });
   }
-  if (draft.message_templates.some((text) => characters(text) > limits.text.message)) {
+  if (draft.message_templates.some((text) => longerThan(text, limits.text.message))) {
     reasons.push({ kind: "message_template_too_long" });
   }
-  if (draft.cancel_reasons.some((text) => characters(text) > limits.text.reason)) {
+  if (draft.cancel_reasons.some((text) => longerThan(text, limits.text.reason))) {
     reasons.push({ kind: "cancel_reason_too_long" });
   }
 

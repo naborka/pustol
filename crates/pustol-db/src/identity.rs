@@ -51,11 +51,11 @@ pub struct Viewer {
 }
 
 impl Store {
-    /// Records the account and works out what it is allowed to do.
+    /// Records an account Telegram has just signed and works out what it is allowed to do.
     ///
-    /// Called on every authenticated request, because the Telegram payload is the freshest source
-    /// for a display name, and because a member of staff invited a minute ago should get in on
-    /// their first visit rather than after a cache expires.
+    /// Only for a fresh payload: it rewrites the stored profile and lets an invited username claim
+    /// its seat, so a member of staff invited a minute ago gets in on their next visit. An account
+    /// known only from a session goes to [`Self::recognise`].
     pub async fn identify(
         &self,
         bar: BarId,
@@ -76,11 +76,36 @@ impl Store {
         })
     }
 
+    /// Works out what an account known from a session is allowed to do.
+    ///
+    /// A session carries the profile as Telegram signed it, up to a day ago, and its username may
+    /// have passed to somebody else since. So it rewrites no profile and claims no seat; it only
+    /// records an account never seen before. The account in the answer is the one stored.
+    pub async fn recognise(
+        &self,
+        bar: BarId,
+        account: &TelegramAccount,
+        now: DateTime<Utc>,
+    ) -> Result<Viewer> {
+        let mut transaction = self.pool().begin().await?;
+        let account = note_account(&mut transaction, account, now).await?;
+        let is_staff = is_staff(&mut transaction, bar, account.id).await?;
+        let reminders = load_reminder_standing(&mut transaction, account.id).await?;
+        transaction.commit().await?;
+
+        Ok(Viewer {
+            account,
+            is_staff,
+            reminders,
+        })
+    }
+
     /// Records what the guest decided about reminders and reports where that leaves them.
     ///
-    /// The account is recorded in the same transaction as the choice. Requiring the caller to have
-    /// created the row first would make this method correct only when called in a particular order —
-    /// a rule no signature expresses and every new caller has to be told.
+    /// An account never seen before is recorded in the same transaction as the choice. Requiring
+    /// the caller to have created the row first would make this method correct only when called in
+    /// a particular order — a rule no signature expresses and every new caller has to be told. A
+    /// known account's profile is left alone: only a fresh payload rewrites it.
     pub async fn choose_reminders(
         &self,
         account: &TelegramAccount,
@@ -88,7 +113,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<ReminderStanding> {
         let mut transaction = self.pool().begin().await?;
-        upsert_account(&mut transaction, account, now).await?;
+        note_account(&mut transaction, account, now).await?;
         // `returning` rather than a second read: the answer the caller needs is the row just
         // written, and reading it again could observe somebody else's write instead.
         let row = sqlx::query(match choice {
@@ -135,7 +160,37 @@ pub enum ReminderChoice {
     NotNow,
 }
 
-pub(crate) async fn upsert_account(
+/// Records an account never seen before and returns the account as stored.
+async fn note_account(
+    connection: &mut PgConnection,
+    account: &TelegramAccount,
+    now: DateTime<Utc>,
+) -> Result<TelegramAccount> {
+    let row = sqlx::query(
+        "insert into telegram_user (id, username, first_name, last_name, language_code,
+                                    first_seen_at, last_seen_at)
+         values ($1, $2, $3, $4, $5, $6, $6)
+         on conflict (id) do update set last_seen_at = excluded.last_seen_at
+         returning id, username, first_name, last_name, language_code",
+    )
+    .bind(account.id.0)
+    .bind(&account.username)
+    .bind(&account.first_name)
+    .bind(&account.last_name)
+    .bind(&account.language_code)
+    .bind(now)
+    .fetch_one(connection)
+    .await?;
+    Ok(TelegramAccount {
+        id: TelegramUserId(row.try_get("id")?),
+        username: row.try_get("username")?,
+        first_name: row.try_get("first_name")?,
+        last_name: row.try_get("last_name")?,
+        language_code: row.try_get("language_code")?,
+    })
+}
+
+async fn upsert_account(
     connection: &mut PgConnection,
     account: &TelegramAccount,
     now: DateTime<Utc>,

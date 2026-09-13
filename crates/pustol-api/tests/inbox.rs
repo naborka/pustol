@@ -7,6 +7,8 @@ mod common;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -16,7 +18,7 @@ use pustol_api::inbox::Inbox;
 use pustol_api::state::Clock;
 use pustol_domain::BookingId;
 use pustol_telegram::{Bot, BotToken, Update};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use common::{Caller, Harness, harness, utc};
@@ -25,6 +27,9 @@ use common::{Caller, Harness, harness, utc};
 struct Telegram {
     calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     updates: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// When set, a reply to a guest is held until `release` is notified.
+    hold_replies: Arc<AtomicBool>,
+    release: Arc<Notify>,
 }
 
 impl Telegram {
@@ -45,6 +50,9 @@ async fn method(
     Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     stub.calls.lock().await.push((method.clone(), body.clone()));
+    if method == "sendMessage" && stub.hold_replies.load(Ordering::Relaxed) {
+        stub.release.notified().await;
+    }
     if method == "getUpdates" {
         let offset = body["offset"].as_i64().unwrap_or(0);
         let result: Vec<serde_json::Value> = stub
@@ -236,6 +244,7 @@ async fn a_message_nobody_will_read_is_answered_with_where_to_go_instead() {
     let sent = stub.calls_to("sendMessage").await;
     assert_eq!(sent.len(), 1, "silence reads as being ignored");
     assert_eq!(sent[0]["chat_id"], 77);
+    assert!(sent[0]["text"].as_str().expect("text").contains("в приложении"), "{}", sent[0]);
 }
 
 #[tokio::test]
@@ -253,6 +262,47 @@ async fn polling_hands_each_update_over_once_and_moves_past_it() {
     let polls = stub.calls_to("getUpdates").await;
     assert_eq!(polls[1]["offset"], 8, "confirming update 7 so Telegram stops sending it");
     assert_eq!(stub.calls_to("sendMessage").await.len(), 1, "handled once, not twice");
+}
+
+#[tokio::test]
+async fn a_stop_while_answering_still_tells_telegram_what_was_answered() {
+    let app = harness().await;
+    let (bot, stub) = stub_telegram().await;
+    stub.hold_replies.store(true, Ordering::Relaxed);
+    stub.updates.lock().await.push(said(7, 77, "привет"));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(inbox(&app, bot).run(stopped));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while stub.calls_to("sendMessage").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the message is being answered");
+    stop.send(true).expect("the inbox is listening");
+    stub.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the inbox stopped")
+        .expect("the inbox did not panic");
+
+    let polls = stub.calls_to("getUpdates").await;
+    let last = polls.last().expect("polled");
+    assert_eq!(last["offset"], 8, "otherwise the next process answers update 7 again: {polls:?}");
+    assert_eq!(last["timeout"], 0, "a stop does not wait for more: {polls:?}");
+}
+
+#[tokio::test]
+async fn confirming_hands_telegram_the_offset_without_waiting() {
+    let app = harness().await;
+    let (bot, stub) = stub_telegram().await;
+    inbox(&app, bot).confirm(8).await.expect("telegram answered");
+
+    let polls = stub.calls_to("getUpdates").await;
+    assert_eq!(polls.len(), 1);
+    assert_eq!(polls[0]["offset"], 8);
+    assert_eq!(polls[0]["timeout"], 0);
 }
 
 #[tokio::test]

@@ -67,6 +67,32 @@ fn a_session_and_a_telegram_payload_cannot_stand_in_for_each_other() {
 }
 
 #[test]
+fn a_session_signed_with_the_key_telegram_payloads_use_is_refused() {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+
+    let hmac = |key: &[u8], message: &[u8]| -> Vec<u8> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key length");
+        mac.update(message);
+        mac.finalize().into_bytes().to_vec()
+    };
+    let payload_key = hmac(b"WebAppData", TOKEN.as_bytes());
+    let claims = hex::encode(
+        serde_json::to_vec(&serde_json::json!({
+            "user": user(7),
+            "exp": (now() + TimeDelta::hours(1)).timestamp(),
+        }))
+        .expect("plain data"),
+    );
+    let signature = hex::encode(hmac(&payload_key, claims.as_bytes()));
+
+    assert_eq!(
+        verify_session(&format!("{claims}.{signature}"), &token(), now()),
+        Err(VerifyError::BadSignature)
+    );
+}
+
+#[test]
 fn nonsense_is_refused_without_panicking() {
     for nonsense in ["", ".", "zz.zz", "abc", "7b7d.", ".00"] {
         assert!(verify_session(nonsense, &token(), now()).is_err(), "{nonsense:?}");

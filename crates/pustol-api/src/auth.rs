@@ -43,12 +43,23 @@ const PAYLOAD_SCHEME: &str = "tma ";
 /// The scheme for a session this server issued.
 const SESSION_SCHEME: &str = "session ";
 
+/// How a caller proved who they are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Proof {
+    /// A payload Telegram signed within [`MAX_INIT_DATA_AGE`]: its profile is current.
+    Telegram,
+    /// A session this server issued: its profile is as it was when Telegram signed, up to
+    /// [`SESSION_LIFETIME`] ago.
+    Session,
+}
+
 /// A caller whose identity Telegram signed, directly or through a session.
 ///
 /// Says nothing about what they may do. That is [`Staff`]'s job.
 #[derive(Clone, Debug)]
 pub struct Authenticated {
-    pub user: TelegramUser,
+    user: TelegramUser,
+    proof: Proof,
     /// When the proof this caller holds stops being accepted.
     pub expires_at: DateTime<Utc>,
 }
@@ -59,16 +70,29 @@ impl Authenticated {
         TelegramUserId(self.user.id)
     }
 
-    /// The account, in the shape storage records.
     #[must_use]
-    pub fn account(&self) -> TelegramAccount {
-        TelegramAccount {
+    pub const fn proof(&self) -> Proof {
+        self.proof
+    }
+
+    /// The account as storage knows it, and what it may do.
+    ///
+    /// The one way a handler learns about the caller beyond their id. Only a fresh payload may
+    /// rewrite the stored profile or claim a staff seat by username; a session's username may have
+    /// passed to somebody else since it was signed.
+    pub async fn viewer(&self, state: &AppState) -> Result<Viewer, ApiError> {
+        let account = TelegramAccount {
             id: self.user_id(),
             username: self.user.username.clone(),
             first_name: self.user.first_name.clone(),
             last_name: self.user.last_name.clone(),
             language_code: self.user.language_code.clone(),
-        }
+        };
+        let now = state.now();
+        Ok(match self.proof {
+            Proof::Telegram => state.store.identify(state.bar, &account, now).await?,
+            Proof::Session => state.store.recognise(state.bar, &account, now).await?,
+        })
     }
 
     /// A session for this caller, ending when their current proof does.
@@ -101,6 +125,7 @@ impl FromRequestParts<AppState> for Authenticated {
             return Ok(Self {
                 expires_at: verified.auth_date + SESSION_LIFETIME,
                 user: verified.user,
+                proof: Proof::Telegram,
             });
         }
         if let Some(session) = header.strip_prefix(SESSION_SCHEME) {
@@ -108,6 +133,7 @@ impl FromRequestParts<AppState> for Authenticated {
             return Ok(Self {
                 user: verified.user,
                 expires_at: verified.expires_at,
+                proof: Proof::Session,
             });
         }
         Err(ApiError::unauthorised(
@@ -134,12 +160,7 @@ impl FromRequestParts<AppState> for Staff {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let authenticated = Authenticated::from_request_parts(parts, state).await?;
-        // Recording the account here is what lets an invitation take effect on somebody's first
-        // visit rather than after a cache expires.
-        let viewer = state
-            .store
-            .identify(state.bar, &authenticated.account(), state.now())
-            .await?;
+        let viewer = authenticated.viewer(state).await?;
         if !viewer.is_staff {
             return Err(ApiError::forbidden(
                 "this account is not on the bar's admin list",

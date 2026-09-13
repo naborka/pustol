@@ -15,6 +15,7 @@
 import type { BarView, DayOffer, GuestBooking, Session } from "@/lib/api";
 import * as fmt from "@/lib/format";
 import type { Availability } from "@/lib/api";
+import { hasStarted } from "@/lib/status";
 import { RADIUS, SPACE, TAP, TEXT } from "@/lib/tokens";
 import {
   Card,
@@ -89,6 +90,10 @@ export function BookingCard({
   onMove: () => void;
   onCancel: () => void;
 }) {
+  // The server refuses a second booking while one is running, so a move could only fail.
+  const started =
+    booking.service_date < bar.today ||
+    (booking.service_date === bar.today && hasStarted(booking, bar.now_minutes));
   return (
     <Card padding={SPACE[4] + 2} gap={SPACE[3] + 2}>
       <div style={{ display: "flex", alignItems: "center", gap: SPACE[2] }}>
@@ -126,9 +131,11 @@ export function BookingCard({
         уйти другим гостям.
       </Note>
       <div style={{ display: "flex", gap: SPACE[2] }}>
-        <div style={{ flex: 1 }}>
-          <CardAction tone="primary" label="Перенести" onClick={onMove} />
-        </div>
+        {started ? null : (
+          <div style={{ flex: 1 }}>
+            <CardAction tone="primary" label="Перенести" onClick={onMove} />
+          </div>
+        )}
         <div style={{ flex: 1 }}>
           <CardAction tone="destructive" label="Отменить" onClick={onCancel} />
         </div>

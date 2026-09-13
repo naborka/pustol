@@ -704,22 +704,23 @@ pub enum Contact {
     Telegram { username: String },
 }
 
-/// Longer than any phone number or username, short enough for one line of a screen.
-const CONTACT_MAX_CHARS: usize = 32;
+/// The longest phone number as written, spaces and brackets included: one line of a screen. A
+/// username needs no cap of its own, because Telegram's rule already bounds it.
+const PHONE_MAX_CHARS: usize = 32;
 
 impl Contact {
     /// Reads a contact as a manager typed it, or `None` when it is neither kind.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
-        if text.is_empty() || text.chars().count() > CONTACT_MAX_CHARS {
-            return None;
-        }
         let username = text.strip_prefix('@').unwrap_or(text);
         if is_telegram_username(username) {
             return Some(Self::Telegram {
                 username: username.to_owned(),
             });
+        }
+        if text.chars().count() > PHONE_MAX_CHARS {
+            return None;
         }
         let digits: String = text.chars().filter(char::is_ascii_digit).collect();
         let shaped = text

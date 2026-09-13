@@ -26,6 +26,7 @@ import type {
 import * as fmt from "@/lib/format";
 import { tableOffers, walkInOffers } from "@/lib/occupancy";
 import type { TableOffer } from "@/lib/occupancy";
+import { trimmed } from "@/lib/settingsRules";
 import { hasStarted, isSettled, standingOf, statusLabel } from "@/lib/status";
 import { openChatWith } from "@/lib/telegram";
 import { RADIUS, SPACE, TEXT } from "@/lib/tokens";
@@ -823,7 +824,7 @@ export function ManualBookingSheet({
       ? tableOffers(shift, partySize, chosenMinutes, chosenMinutes + turnMinutes)
       : [];
   const table = chosenTable(offers, chosenTableId);
-  const ready = guestName.trim().length > 0 && chosenMinutes !== null && table !== null;
+  const ready = trimmed(guestName).length > 0 && chosenMinutes !== null && table !== null;
 
   return (
     <Sheet

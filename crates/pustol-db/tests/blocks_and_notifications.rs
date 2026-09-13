@@ -3,8 +3,9 @@
 mod common;
 
 use chrono::Duration;
+use pustol_db::bookings::MoveTo;
 use pustol_db::identity::ReminderChoice;
-use pustol_db::notifications::NotificationKind;
+use pustol_db::notifications::{NotificationKind, PendingNotification};
 
 use common::{bar_with, config_with, default_bar, fresh_account, guest_booking, morning, numbered, staff_booking, store, table, thursday, utc};
 
@@ -238,7 +239,7 @@ async fn a_claimed_message_is_not_handed_to_a_second_worker() {
     let first = store.claim_due(10, due).await.expect("reads");
     assert_eq!(first.len(), 1);
     store
-        .mark_sent(first[0].id, due)
+        .mark_sent(&first[0], due)
         .await
         .expect("recorded");
     assert!(
@@ -415,7 +416,7 @@ async fn a_deferred_message_comes_back_when_its_retry_falls_due() {
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
         .expect("free");
-    let id = store
+    store
         .send_template(
             bar,
             created.record.booking.id,
@@ -430,7 +431,7 @@ async fn a_deferred_message_comes_back_when_its_retry_falls_due() {
     assert_eq!(claimed.len(), 1);
     let retry_at = morning() + Duration::minutes(5);
     store
-        .defer(id, retry_at, "429 too many requests")
+        .defer(&claimed[0], retry_at, "429 too many requests")
         .await
         .expect("deferred");
 
@@ -450,7 +451,7 @@ async fn a_message_given_up_on_is_never_offered_again() {
         .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
         .await
         .expect("free");
-    let id = store
+    store
         .send_template(
             bar,
             created.record.booking.id,
@@ -461,12 +462,12 @@ async fn a_message_given_up_on_is_never_offered_again() {
         .await
         .expect("queued");
 
-    store
+    let claimed = store
         .claim_due(10, morning())
         .await
         .expect("reads");
     store
-        .give_up(id, morning(), "403 bot was blocked by the user")
+        .give_up(&claimed[0], morning(), "403 bot was blocked by the user")
         .await
         .expect("gave up");
     assert!(
@@ -507,6 +508,74 @@ async fn the_reminder_prompt_is_shown_once_and_then_left_alone() {
         .expect("identified");
     assert!(opted.reminders.opted_in);
     assert!(!opted.reminders.should_ask());
+}
+
+/// A 20:00 reminder claimed by a worker at 17:00 Belgrade, and the booking moved to 23:00 a minute
+/// later, while that worker is still waiting on Telegram.
+async fn reminder_claimed_then_moved(
+    store: &pustol_db::Store,
+) -> (pustol_domain::allocator::BookingId, PendingNotification) {
+    let (bar, _) = default_bar(store).await;
+    let account = fresh_account("Тоня");
+    store.identify(bar, &account, morning()).await.expect("ok");
+    store.choose_reminders(&account, ReminderChoice::OptIn, morning()).await.expect("ok");
+    let created = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free");
+    let claimed = store.claim_due(10, utc(2026, 7, 30, 15, 0)).await.expect("reads");
+    assert_eq!(claimed.len(), 1);
+    store
+        .move_booking(
+            bar,
+            created.record.booking.id,
+            MoveTo { start_minutes: 1380, table: None, party_size: None },
+            Some(common::move_words()),
+            utc(2026, 7, 30, 15, 1),
+        )
+        .await
+        .expect("moved");
+    (created.record.booking.id, claimed.into_iter().next().expect("one"))
+}
+
+async fn reminders_due(store: &pustol_db::Store, now: chrono::DateTime<chrono::Utc>) -> Vec<PendingNotification> {
+    store
+        .claim_due(10, now)
+        .await
+        .expect("reads")
+        .into_iter()
+        .filter(|message| message.kind == NotificationKind::Reminder)
+        .collect()
+}
+
+#[tokio::test]
+async fn delivering_a_reminder_that_was_rewritten_meanwhile_does_not_mark_the_new_one_sent() {
+    let store = store().await;
+    let (booking, stale) = reminder_claimed_then_moved(&store).await;
+
+    store.mark_sent(&stale, utc(2026, 7, 30, 15, 2)).await.expect("recorded");
+
+    assert!(reminders_due(&store, utc(2026, 7, 30, 17, 59)).await.is_empty());
+    let due = reminders_due(&store, utc(2026, 7, 30, 18, 0)).await;
+    assert_eq!(due.len(), 1, "the reminder naming 23:00 is still owed");
+    assert_eq!(due[0].booking, booking);
+}
+
+#[tokio::test]
+async fn a_failed_delivery_of_a_rewritten_reminder_does_not_pull_the_new_one_early() {
+    let store = store().await;
+    let (_, stale) = reminder_claimed_then_moved(&store).await;
+
+    store
+        .defer(&stale, utc(2026, 7, 30, 15, 10), "502 bad gateway")
+        .await
+        .expect("recorded");
+
+    assert!(
+        reminders_due(&store, utc(2026, 7, 30, 15, 10)).await.is_empty(),
+        "a reminder for 23:00 goes out at 20:00, not at ten past five"
+    );
+    assert_eq!(reminders_due(&store, utc(2026, 7, 30, 18, 0)).await.len(), 1);
 }
 
 #[tokio::test]

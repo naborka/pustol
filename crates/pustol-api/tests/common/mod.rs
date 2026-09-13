@@ -166,6 +166,42 @@ pub fn config_with(tables: Vec<BarTable>) -> BarConfig {
     }
 }
 
+/// The settings screen's payload turned back into the proposal the screen would send.
+pub fn draft_from(settings: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": settings["name"],
+        "address": settings["address"],
+        "timezone": settings["timezone"],
+        "week": settings["week"],
+        "zones": settings["zones"],
+        "tables": settings["tables"]
+            .as_array()
+            .expect("tables")
+            .iter()
+            .map(|table| serde_json::json!({
+                "kind": "existing",
+                "id": table["id"],
+                "seats": table["seats"],
+                "zone": table["zone"],
+            }))
+            .collect::<Vec<_>>(),
+        "turn_minutes": settings["turn_minutes"],
+        "slot_step_minutes": settings["slot_step_minutes"],
+        "max_party": settings["max_party"],
+        "horizon_days": settings["horizon_days"],
+        "remind_hours": settings["remind_hours"],
+        "grace_minutes": settings["grace_minutes"],
+        "message_templates": settings["message_templates"],
+        "cancel_reasons": settings["cancel_reasons"],
+        "staff": settings["staff"]
+            .as_array()
+            .expect("staff")
+            .iter()
+            .map(|member| serde_json::json!({ "username": member["username"] }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// Builds an app whose clock is stopped at `now`.
 pub async fn harness_at(now: DateTime<Utc>, config: BarConfig) -> Harness {
     let store = fresh_store().await;

@@ -29,6 +29,15 @@ describe("what a failure says", () => {
     expect(messageFor(null, "guest")).toBeTruthy();
   });
 
+  it("tells staff restoring a booking that the guest already holds another tonight", () => {
+    expect(messageFor(failure("already_booked_tonight"), "staff")).toBe(
+      "У гостя уже есть другая бронь на этот вечер.",
+    );
+    expect(messageFor(failure("already_booked_tonight"), "guest")).toBe(
+      "На этот вечер у вас уже есть бронь.",
+    );
+  });
+
   it("has words for every failure the staff side can produce", () => {
     for (const code of [
       "blank_guest_name",

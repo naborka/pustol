@@ -646,6 +646,112 @@ async fn a_guest_already_at_their_table_is_told_they_have_tonight_rather_than_an
 }
 
 #[tokio::test]
+async fn an_evening_nobody_marked_as_over_does_not_stop_the_guest_booking_again() {
+    for marked in [None, Some("arrived")] {
+        let app = harness().await;
+        let guest = Caller::new("Сева");
+        let id = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+            .as_str()
+            .expect("an id")
+            .to_owned();
+        if let Some(attendance) = marked {
+            staff_mark(&app.at(utc(2026, 7, 30, 18, 30)), &Caller::manager(), &id, attendance).await;
+        }
+
+        // 20:00 to 22:00 Belgrade is over at 22:30, whatever staff did or did not press.
+        let after = app.at(utc(2026, 7, 30, 20, 30));
+        let session = after.get("/api/session", &guest).await.expect_ok().clone();
+        assert!(session["booking"].is_null(), "{marked:?}: the app shows no booking");
+        after.post("/api/booking", &guest, book_at(1380)).await.expect_ok();
+    }
+}
+
+#[tokio::test]
+async fn a_guest_whose_table_is_still_held_through_the_grace_period_has_tonight() {
+    let app = harness().await;
+    let guest = Caller::new("Рита");
+    let id = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let late = app.at(utc(2026, 7, 30, 18, 5));
+    staff_mark(&late, &Caller::manager(), &id, "no_show").await;
+
+    let answer = late.post("/api/booking", &guest, book_at(1320)).await;
+    assert_eq!(answer.status, axum::http::StatusCode::CONFLICT, "{}", answer.body);
+    assert_eq!(answer.error_code(), Some("already_booked_tonight"));
+}
+
+#[tokio::test]
+async fn staff_cannot_restore_a_no_show_that_would_give_the_guest_two_tables_tonight() {
+    let app = harness().await;
+    let guest = Caller::new("Нина");
+    let first = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let staff = Caller::manager();
+    let later = app.at(utc(2026, 7, 30, 18, 20));
+    staff_mark(&later, &staff, &first, "no_show").await;
+    later.post("/api/booking", &guest, book_at(1320)).await.expect_ok();
+
+    let answer = later
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{first}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "confirmed" }),
+        )
+        .await;
+    assert_eq!(answer.status, axum::http::StatusCode::CONFLICT, "{}", answer.body);
+    assert_eq!(answer.error_code(), Some("already_booked_tonight"));
+}
+
+#[tokio::test]
+async fn a_party_marked_gone_cannot_be_held_again_while_the_guest_has_another_table() {
+    let app = harness().await;
+    let guest = Caller::new("Оля");
+    let first = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let staff = Caller::manager();
+    let early = app.at(utc(2026, 7, 30, 18, 5));
+    staff_mark(&early, &staff, &first, "arrived").await;
+    staff_mark(&early, &staff, &first, "left").await;
+    early.post("/api/booking", &guest, book_at(1320)).await.expect_ok();
+
+    // A no-show is held until the grace period ends, a quarter past.
+    let answer = early
+        .send(
+            "PATCH",
+            &format!("/api/admin/bookings/{first}/attendance"),
+            &staff,
+            serde_json::json!({ "attendance": "no_show" }),
+        )
+        .await;
+    assert_eq!(answer.status, axum::http::StatusCode::CONFLICT, "{}", answer.body);
+    assert_eq!(answer.error_code(), Some("already_booked_tonight"));
+}
+
+#[tokio::test]
+async fn staff_can_correct_an_evening_that_is_over_while_the_guest_sits_at_another_table() {
+    let app = harness().await;
+    let guest = Caller::new("Гена");
+    let first = app.post("/api/booking", &guest, book_at(1200)).await.expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let staff = Caller::manager();
+    let later = app.at(utc(2026, 7, 30, 18, 20));
+    staff_mark(&later, &staff, &first, "no_show").await;
+    later.post("/api/booking", &guest, book_at(1320)).await.expect_ok();
+
+    // They did come after all. Recording it holds nothing: that booking ended at 22:00.
+    staff_mark(&app.at(utc(2026, 7, 30, 20, 30)), &staff, &first, "arrived").await;
+}
+
+#[tokio::test]
 async fn rebooking_another_evening_gives_the_table_left_behind_to_a_party_without_one() {
     let app = harness_at(
         morning(),

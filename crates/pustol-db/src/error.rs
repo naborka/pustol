@@ -107,8 +107,9 @@ pub enum Error {
     #[error("the proposed configuration would strand {} booking(s)", .0.len())]
     WouldStrandBookings(Vec<crate::bar::StrandedBooking>),
 
-    /// The guest already holds a booking on this shift that is still running, such as the table
-    /// they are sitting at.
+    /// The guest would hold two running bookings on one shift: a table they are sitting at, or one
+    /// still held for them through the grace period. Decided by occupancy under the bar's lock, not
+    /// by a constraint, because whether a booking still runs depends on the clock.
     #[error("this guest already has a booking on this shift")]
     AlreadyBookedThisShift,
 
@@ -134,7 +135,6 @@ pub enum Error {
 /// meaningful error into a generic one.
 mod constraint {
     pub const TABLE_OVERLAP: &str = "booking_one_party_per_table_at_a_time";
-    pub const GUEST_PER_SHIFT: &str = "booking_one_live_per_guest_per_shift";
 }
 
 impl Error {
@@ -145,7 +145,6 @@ impl Error {
         };
         match db.constraint() {
             Some(constraint::TABLE_OVERLAP) => Self::TableTakenConcurrently,
-            Some(constraint::GUEST_PER_SHIFT) => Self::AlreadyBookedThisShift,
             _ => Self::Database(error),
         }
     }

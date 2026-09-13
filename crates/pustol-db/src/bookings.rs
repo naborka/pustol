@@ -152,7 +152,7 @@ pub type ReminderWording = fn(&ValidConfig, Interval, i32) -> String;
 /// Words the notice a guest gets when staff cancel their booking.
 pub type CancellationWording = fn(&ValidConfig, &BookingRecord, &str) -> String;
 
-/// Words the notice for a moved booking. The record is where it was, the interval where it goes.
+/// Words the notice for a moved booking, from the booking as it was and as it now is.
 pub type MoveWording = fn(&ValidConfig, &BookingRecord, &BookingRecord) -> String;
 
 /// What the bot says when a booking moves: the notice now, and the reminder that would otherwise
@@ -402,7 +402,15 @@ impl Store {
         // same transaction, so there is no instant in which they hold two or none.
         let replaced = match &request.channel {
             Channel::Guest { user, .. } => {
-                cancel_not_yet_started(&mut transaction, request.bar, *user, now).await?
+                let replaced =
+                    cancel_not_yet_started(&mut transaction, request.bar, *user, now).await?;
+                let running =
+                    running_on(&mut transaction, request.bar, *user, request.service_day, now)
+                        .await?;
+                if !running.is_empty() {
+                    return Err(Error::AlreadyBookedThisShift);
+                }
+                replaced
             }
             Channel::Staff { .. } => None,
         };
@@ -558,6 +566,15 @@ impl Store {
         .map_err(Error::from_write)?;
 
         let record = fetch_booking(&mut transaction, bar, booking).await?;
+        // A change that holds this table again may not give the guest a second one tonight. A
+        // record corrected after its evening is over holds nothing, so it is never refused.
+        if let Some(user) = record.telegram_user_id {
+            let running =
+                running_on(&mut transaction, bar, user, record.booking.service_day, now).await?;
+            if running.contains(&booking) && running.len() > 1 {
+                return Err(Error::AlreadyBookedThisShift);
+            }
+        }
         let reconciliation = reconcile_shift(
             &mut transaction,
             bar,
@@ -1479,6 +1496,25 @@ async fn running_bookings_of_guest(
         }
     }
     Ok(running)
+}
+
+/// The guest's running bookings on one shift.
+///
+/// A guest holds at most one. Asked here, under the bar's lock, rather than by an index: whether a
+/// booking still runs depends on the clock.
+async fn running_on(
+    connection: &mut PgConnection,
+    bar: BarId,
+    user: TelegramUserId,
+    day: ServiceDay,
+    now: DateTime<Utc>,
+) -> Result<Vec<BookingId>> {
+    Ok(running_bookings_of_guest(connection, bar, user, now)
+        .await?
+        .into_iter()
+        .filter(|record| record.booking.service_day == day)
+        .map(|record| record.booking.id)
+        .collect())
 }
 
 /// Cancels a booking inside a transaction that already holds the bar's lock and read `config`.

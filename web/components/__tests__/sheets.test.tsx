@@ -456,7 +456,7 @@ describe("moving a booking", () => {
 
 describe("writing a booking down", () => {
   function manualSheet(
-    chosen: { minutes?: number | null; table?: string | null } = {},
+    chosen: { minutes?: number | null; table?: string | null; name?: string } = {},
     onCreate: (tableId: string) => void = noop,
   ) {
     return render(
@@ -469,7 +469,7 @@ describe("writing a booking down", () => {
         partySize={2}
         chosenMinutes={chosen.minutes ?? null}
         chosenTableId={chosen.table ?? null}
-        guestName="Глеб"
+        guestName={chosen.name ?? "Глеб"}
         failedToLoad={false}
         onClose={noop}
         onPartySize={noop}
@@ -498,6 +498,15 @@ describe("writing a booking down", () => {
 
     await userEvent.click(screen.getByText("Записать на 21:30, стол 10"));
     expect(onCreate).toHaveBeenCalledWith("t3");
+  });
+
+  it("calls a name blank exactly when the server would", () => {
+    const { unmount } = manualSheet({ minutes: 1_290, table: "t3", name: "　" });
+    expect(screen.getByText("Имя и время").closest("button")?.disabled).toBe(true);
+    unmount();
+
+    manualSheet({ minutes: 1_290, table: "t3", name: "﻿" });
+    expect(screen.getByText("Записать на 21:30, стол 10").closest("button")?.disabled).toBe(false);
   });
 });
 
