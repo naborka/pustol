@@ -91,6 +91,52 @@ fn an_added_table_is_given_the_next_number_that_has_never_been_used() {
 }
 
 #[test]
+fn a_table_in_the_shapes_the_previous_app_sent_is_still_understood() {
+    // An app opened before the upgrade keeps sending what it sent: a kind beside every table, and no
+    // identity on a table it is adding.
+    let current = default_config();
+    let existing = current.tables[4].id.0;
+    for shape in [
+        serde_json::json!({ "kind": "existing", "id": existing, "seats": 6, "zone": "Зал" }),
+        serde_json::json!({ "id": existing, "seats": 6, "zone": "Зал" }),
+    ] {
+        let table: TableDraft = serde_json::from_value(shape.clone()).expect("understood");
+        assert_eq!((table.id, table.seats, table.zone.as_str()), (existing, 6, "Зал"), "{shape}");
+    }
+
+    let added = || {
+        serde_json::from_value::<TableDraft>(
+            serde_json::json!({ "kind": "new", "seats": 2, "zone": "Бар" }),
+        )
+        .expect("understood")
+    };
+    let (one, other) = (added(), added());
+    assert_ne!(one.id, other.id, "the server names a table the app did not");
+
+    let mut draft = draft_of(&current);
+    draft.tables.push(one.clone());
+    let resolved = draft.resolve(&current).expect("resolvable");
+    let table = resolved
+        .tables
+        .iter()
+        .find(|table| table.id == TableId(one.id))
+        .expect("added");
+    assert_eq!((table.number, table.seats), (16, 2));
+
+    for nonsense in [
+        serde_json::json!({ "kind": "new", "id": id(7), "seats": 2, "zone": "Бар" }),
+        serde_json::json!({ "kind": "existing", "seats": 2, "zone": "Бар" }),
+        serde_json::json!({ "seats": 2, "zone": "Бар" }),
+        serde_json::json!({ "kind": "retired", "id": existing, "seats": 2, "zone": "Бар" }),
+    ] {
+        assert!(
+            serde_json::from_value::<TableDraft>(nonsense.clone()).is_err(),
+            "{nonsense}"
+        );
+    }
+}
+
+#[test]
 fn several_added_tables_take_consecutive_numbers() {
     let current = default_config();
     let mut draft = draft_of(&current);

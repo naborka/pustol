@@ -13,20 +13,32 @@ import {
   failureOn,
   marked,
   pendingOn,
+  pendingUpTo,
   valueOn,
   written,
   type Ledger,
-  type Newer,
+  type Order,
 } from "../reads";
 
 const boom = { code: "internal", message: "boom" };
 const offline = { code: "network", message: "offline" };
 
 type Room = { version: number; name: string };
-const byVersion: Newer<Room> = (next, shown) => next.version >= shown.version;
+const byVersion: Order<Room> = (next, shown) => next.version - shown.version;
 
 function ask<T>(ledger: Ledger<T>, key: string): [Ledger<T>, number] {
   return begun(ledger, key);
+}
+
+/** A write's own answer, numbered when it was sent. */
+function write<T>(
+  ledger: Ledger<T>,
+  key: string,
+  sent: number,
+  change: (current: T | undefined) => T | undefined,
+  order?: Order<T>,
+) {
+  return written(ledger, key, sent, change, order);
 }
 
 describe("an answer", () => {
@@ -45,17 +57,25 @@ describe("an answer", () => {
     expect(valueOn(late.ledger, "12")).toBe("tomorrow");
   });
 
-  it("is applied, and clears the failure, when a later ask of the same question failed first", () => {
-    let ledger: Ledger<string> = EMPTY_LEDGER;
+  it("is applied, and keeps the failure of a later ask of the same question, which is newer news", () => {
+    // What is on screen then is older than a read that failed, and the screen says so.
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
     let first: number;
     let retry: number;
     [ledger, first] = ask(ledger, "11|2");
     [ledger, retry] = ask(ledger, "11|2");
     ledger = failed(ledger, retry, "11|2", boom).ledger;
-    const outcome = answered(ledger, first, "11|2", "times");
+    const outcome = answered(ledger, first, "11|2", { version: 1, name: "times" }, byVersion);
     expect(outcome.apply).toBe(true);
-    expect(valueOn(outcome.ledger, "11|2")).toBe("times");
-    expect(failureOn(outcome.ledger, "11|2")).toBeNull();
+    expect(valueOn(outcome.ledger, "11|2")?.name).toBe("times");
+    expect(failureOn(outcome.ledger, "11|2")).toEqual(boom);
+
+    let unordered: Ledger<string> = EMPTY_LEDGER;
+    [unordered, first] = ask(unordered, "11|2");
+    [unordered, retry] = ask(unordered, "11|2");
+    unordered = failed(unordered, retry, "11|2", boom).ledger;
+    unordered = answered(unordered, first, "11|2", "times").ledger;
+    expect(failureOn(unordered, "11|2")).toEqual(boom);
   });
 
   it("is dropped when a later ask of the same question already answered", () => {
@@ -81,11 +101,48 @@ describe("an answer", () => {
     expect(answered(ledger, first, "11", { version: 3, name: "first" }, byVersion).apply).toBe(false);
   });
 
+  it("goes by when it was asked when the order it is given cannot tell two answers apart", () => {
+    // A room's version does not move with the clock or with whether the bot can reach a guest, so
+    // two rooms of one version still differ, and the one asked later is the fresher.
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
+    let older: number;
+    let newer: number;
+    [ledger, older] = ask(ledger, "11");
+    [ledger, newer] = ask(ledger, "11");
+    ledger = answered(ledger, newer, "11", { version: 5, name: "21:40" }, byVersion).ledger;
+    const late = answered(ledger, older, "11", { version: 5, name: "21:30" }, byVersion);
+    expect(late.apply).toBe(false);
+    expect(valueOn(late.ledger, "11")?.name).toBe("21:40");
+
+    let reversed: Ledger<Room> = EMPTY_LEDGER;
+    [reversed, older] = ask(reversed, "11");
+    [reversed, newer] = ask(reversed, "11");
+    reversed = answered(reversed, older, "11", { version: 5, name: "21:30" }, byVersion).ledger;
+    expect(answered(reversed, newer, "11", { version: 5, name: "21:40" }, byVersion).apply).toBe(true);
+  });
+
+  it("breaks a tie by when the answer on record was asked, not by the newest ask that answered", () => {
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
+    let first: number;
+    let second: number;
+    let third: number;
+    [ledger, first] = ask(ledger, "11");
+    [ledger, second] = ask(ledger, "11");
+    [ledger, third] = ask(ledger, "11");
+    ledger = answered(ledger, third, "11", { version: 5, name: "third" }, byVersion).ledger;
+    ledger = answered(ledger, first, "11", { version: 6, name: "first" }, byVersion).ledger;
+    const tie = answered(ledger, second, "11", { version: 6, name: "second" }, byVersion);
+    expect(tie.apply).toBe(true);
+    expect(valueOn(tie.ledger, "11")?.name).toBe("second");
+  });
+
   it("counts as answered even when it is not applied", () => {
     let ledger: Ledger<string> = EMPTY_LEDGER;
     let read: number;
+    let sent: number;
     [ledger, read] = ask(ledger, "session");
-    ledger = written(ledger, "session", () => "written").ledger;
+    [ledger, sent] = marked(ledger);
+    ledger = write(ledger, "session", sent, () => "written").ledger;
     ledger = answered(ledger, read, "session", "read").ledger;
     expect(valueOn(ledger, "session")).toBe("written");
     expect(answeredUpTo(ledger, "session")).toBe(read);
@@ -96,10 +153,12 @@ describe("a write that puts its own answer on screen", () => {
   it("outranks every read asked before it", () => {
     let ledger: Ledger<string> = EMPTY_LEDGER;
     let tick: number;
+    let sent: number;
     [ledger, tick] = ask(ledger, "11");
-    const write = written(ledger, "11", () => "written");
-    expect(write.apply).toBe(true);
-    ledger = write.ledger;
+    [ledger, sent] = marked(ledger);
+    const outcome = write(ledger, "11", sent, () => "written");
+    expect(outcome.apply).toBe(true);
+    ledger = outcome.ledger;
     expect(answered(ledger, tick, "11", "tick").apply).toBe(false);
     expect(failed(ledger, tick, "11", boom).recorded).toBe(false);
   });
@@ -107,31 +166,77 @@ describe("a write that puts its own answer on screen", () => {
   it("is made on the value on record for its own question", () => {
     let ledger: Ledger<string[]> = EMPTY_LEDGER;
     let read: number;
+    let sent: number;
     [ledger, read] = ask(ledger, "session");
     ledger = answered(ledger, read, "session", ["b1", "b2"]).ledger;
-    ledger = written(ledger, "session", (held) => held?.filter((id) => id !== "b1")).ledger;
+    [ledger, sent] = marked(ledger);
+    ledger = write(ledger, "session", sent, (held) => held?.filter((id) => id !== "b1")).ledger;
     expect(valueOn(ledger, "session")).toEqual(["b2"]);
-    expect(written(EMPTY_LEDGER as Ledger<string>, "other", () => undefined).apply).toBe(false);
+    expect(write(EMPTY_LEDGER as Ledger<string>, "other", 1, () => undefined).apply).toBe(false);
   });
 
   it("is dropped when the room on record is newer than the one it answered with", () => {
     let ledger: Ledger<Room> = EMPTY_LEDGER;
     let tick: number;
+    let sent: number;
     [ledger, tick] = ask(ledger, "11");
     ledger = answered(ledger, tick, "11", { version: 7, name: "colleague" }, byVersion).ledger;
-    const write = written(ledger, "11", () => ({ version: 6, name: "mine" }), byVersion);
-    expect(write.apply).toBe(false);
-    expect(valueOn(write.ledger, "11")?.name).toBe("colleague");
-    expect(written(ledger, "11", () => ({ version: 7, name: "mine" }), byVersion).apply).toBe(true);
+    [ledger, sent] = marked(ledger);
+    const outcome = write(ledger, "11", sent, () => ({ version: 6, name: "mine" }), byVersion);
+    expect(outcome.apply).toBe(false);
+    expect(valueOn(outcome.ledger, "11")?.name).toBe("colleague");
+    expect(write(ledger, "11", sent, () => ({ version: 7, name: "mine" }), byVersion).apply).toBe(true);
+  });
+
+  it("ties with a room of its version by when it was sent: after a read asked before, before a read asked after", () => {
+    let ledger: Ledger<Room> = EMPTY_LEDGER;
+    let before: number;
+    let sent: number;
+    let after: number;
+    [ledger, before] = ask(ledger, "11");
+    [ledger, sent] = marked(ledger);
+    [ledger, after] = ask(ledger, "11");
+    ledger = answered(ledger, after, "11", { version: 5, name: "read after" }, byVersion).ledger;
+    const mine = write(ledger, "11", sent, () => ({ version: 5, name: "mine" }), byVersion);
+    expect(mine.apply).toBe(false);
+    expect(valueOn(mine.ledger, "11")?.name).toBe("read after");
+
+    let other: Ledger<Room> = EMPTY_LEDGER;
+    [other, before] = ask(other, "11");
+    [other, sent] = marked(other);
+    other = write(other, "11", sent, () => ({ version: 5, name: "mine" }), byVersion).ledger;
+    expect(answered(other, before, "11", { version: 5, name: "read before" }, byVersion).apply).toBe(false);
+    expect(valueOn(other, "11")?.name).toBe("mine");
   });
 
   it("clears the failure of a read asked before it", () => {
     let ledger: Ledger<string> = EMPTY_LEDGER;
     let read: number;
+    let sent: number;
     [ledger, read] = ask(ledger, "11");
     ledger = failed(ledger, read, "11", boom).ledger;
-    ledger = written(ledger, "11", () => "written").ledger;
+    [ledger, sent] = marked(ledger);
+    ledger = write(ledger, "11", sent, () => "written").ledger;
     expect(failureOn(ledger, "11")).toBeNull();
+  });
+});
+
+describe("the reads on their way", () => {
+  it("name the newest one asked, so a read asked before a moment is not taken for one asked after", () => {
+    let ledger: Ledger<string> = EMPTY_LEDGER;
+    let before: number;
+    let mark: number;
+    let after: number;
+    expect(pendingUpTo(ledger, "session")).toBe(0);
+    [ledger, before] = ask(ledger, "session");
+    [ledger, mark] = marked(ledger);
+    expect(pendingUpTo(ledger, "session")).toBe(before);
+    expect(pendingUpTo(ledger, "session")).toBeLessThan(mark);
+    [ledger, after] = ask(ledger, "session");
+    expect(pendingUpTo(ledger, "session")).toBe(after);
+    ledger = failed(ledger, after, "session", boom).ledger;
+    expect(pendingUpTo(ledger, "session")).toBe(before);
+    expect(pendingUpTo(ledger, "other")).toBe(0);
   });
 });
 

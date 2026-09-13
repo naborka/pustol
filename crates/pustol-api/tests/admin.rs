@@ -2140,3 +2140,279 @@ async fn every_change_to_the_room_moves_the_evening_version_forward() {
         );
     }
 }
+
+/// `date` written into a query string, where a `+` would otherwise read as a space.
+fn in_query(date: &str) -> String {
+    date.replace('+', "%2B")
+}
+
+#[tokio::test]
+async fn a_date_outside_the_calendar_is_refused_as_an_invalid_date_wherever_it_is_written() {
+    // PostgreSQL holds no year before 4713 BC and refused -5000-01-01 as a server fault. Years 1 to
+    // 9999 are the dates this API reads; anything else in a date is refused before storage sees it.
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let guest = Caller::new("Вера");
+    let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    let first = table_id(&app, &staff, 1).await;
+
+    for date in ["-5000-01-01", "0000-12-31", "+10000-01-01", "10000-01-01", "2026-02-30", ""] {
+        let query = in_query(date);
+        let mut answers = vec![
+            app.get(&format!("/api/availability?service_date={query}&party_size=2"), &guest).await,
+            app.post(
+                "/api/booking",
+                &guest,
+                serde_json::json!({ "service_date": date, "start_minutes": 1200, "party_size": 2 }),
+            )
+            .await,
+            app.get(&format!("/api/admin/shift?service_date={query}"), &staff).await,
+            app.get(&format!("/api/admin/availability?service_date={query}&party_size=2"), &staff)
+                .await,
+            app.get(&format!("/api/admin/settings?service_date={query}"), &staff).await,
+            app.send(
+                "PUT",
+                &format!("/api/admin/settings?service_date={query}"),
+                &staff,
+                draft_from(&settings),
+            )
+            .await,
+        ];
+        for (method, path, body) in [
+            (
+                "POST",
+                "/api/admin/bookings",
+                serde_json::json!({
+                    "service_date": date, "start_minutes": 1200, "party_size": 2, "guest_name": "Глеб"
+                }),
+            ),
+            ("POST", "/api/admin/walkins", serde_json::json!({ "service_date": date, "party_size": 2 })),
+            (
+                "POST",
+                "/api/admin/blocks",
+                serde_json::json!({ "service_date": date, "table_ids": [first], "reason": "Дождь" }),
+            ),
+            ("DELETE", "/api/admin/blocks", serde_json::json!({ "service_date": date, "table_ids": [first] })),
+            ("POST", "/api/admin/shift/reconcile", serde_json::json!({ "service_date": date })),
+        ] {
+            answers.push(app.send(method, path, &staff, body).await);
+        }
+        for answer in answers {
+            assert_eq!(answer.status, axum::http::StatusCode::BAD_REQUEST, "{date:?}: {}", answer.body);
+            assert_eq!(answer.error_code(), Some("invalid_date"), "{date:?}: {}", answer.body);
+        }
+    }
+
+    let mut from_nowhere = draft_from(&settings);
+    from_nowhere["version"] = serde_json::json!("-5000-01-01T00:00:00Z");
+    let refused = app.send("PUT", SETTINGS, &staff, from_nowhere).await;
+    assert_eq!(refused.error_code(), Some("invalid_date"), "{}", refused.body);
+
+    for edge in ["0001-01-01", "9999-12-31"] {
+        app.get(&format!("/api/admin/shift?service_date={edge}"), &staff)
+            .await
+            .expect_ok();
+    }
+    let shift = app.get(SHIFT, &staff).await.expect_ok().clone();
+    assert!(shift["bookings"].as_array().expect("bookings").is_empty(), "{shift}");
+    assert!(shift["tables"][0]["blocked_because"].is_null(), "{shift}");
+}
+
+#[tokio::test]
+async fn closing_or_opening_a_table_the_room_does_not_have_is_not_found_and_writes_nothing() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let first = table_id(&app, &staff, 1).await;
+    let nowhere = uuid::Uuid::new_v4().to_string();
+
+    for (method, body) in [
+        (
+            "POST",
+            serde_json::json!({
+                "service_date": "2026-07-30", "table_ids": [first, nowhere], "reason": "Дождь"
+            }),
+        ),
+        (
+            "DELETE",
+            serde_json::json!({ "service_date": "2026-07-30", "table_ids": [nowhere] }),
+        ),
+    ] {
+        let refused = app.send(method, "/api/admin/blocks", &staff, body).await;
+        assert_eq!(refused.status, axum::http::StatusCode::NOT_FOUND, "{method}: {}", refused.body);
+        assert_eq!(refused.error_code(), Some("not_found"), "{method}");
+    }
+    let shift = app.get(SHIFT, &staff).await.expect_ok().clone();
+    assert!(shift["tables"][0]["blocked_because"].is_null(), "{shift}");
+}
+
+#[tokio::test]
+async fn a_party_seated_late_holds_its_table_only_until_its_shift_stops_running() {
+    // Thursday closes at 02:00 with two-hour sittings, so it stops running at midnight UTC. Seated at
+    // half past one and held two hours, the party ran into Friday: Friday's screen, reading Friday's
+    // bookings, called the table free, and the room refused it to the next party at the door.
+    let app = harness_at(
+        common::utc(2026, 7, 30, 23, 30),
+        config_with(vec![table(1, 2, "Бар")]),
+    )
+    .await;
+    let staff = manager(&app).await;
+    let seated = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "party_size": 2 }),
+        )
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(seated["booking"]["start_minutes"], 1_530, "{seated}");
+    assert_eq!(seated["booking"]["end_minutes"], 1_560, "{seated}");
+    let only = table_id(&app, &staff, 1).await;
+
+    let friday = app.at(common::utc(2026, 7, 31, 0, 30));
+    let shift = friday
+        .get("/api/admin/shift?service_date=2026-07-31", &staff)
+        .await
+        .expect_ok()
+        .clone();
+    assert_eq!(shift["today"], "2026-07-31", "{shift}");
+    assert_eq!(shift["stats"]["free_now"], 1, "{shift}");
+    assert_eq!(shift["largest_party_seatable_now"], 2, "{shift}");
+    friday
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-31", "party_size": 2, "table_id": only }),
+        )
+        .await
+        .expect_ok();
+}
+
+#[tokio::test]
+async fn once_the_shift_has_ended_nobody_can_be_seated_now_and_the_shift_says_so() {
+    // Closing at 23:00 with two-hour sittings: at half past eleven Thursday is still the calendar's
+    // today, and its last sitting is over.
+    let mut config = config_with(vec![table(1, 2, "Бар")]);
+    config.week = pustol_domain::WeekSchedule::uniform(pustol_domain::DayHours {
+        open_minutes: 600,
+        close_minutes: 1_380,
+        closed: false,
+    });
+    let app = harness_at(common::utc(2026, 7, 30, 21, 30), config).await;
+    let staff = manager(&app).await;
+
+    let shift = app.get(SHIFT, &staff).await.expect_ok().clone();
+    assert_eq!(shift["today"], "2026-07-30", "{shift}");
+    assert!(shift["largest_party_seatable_now"].is_null(), "{shift}");
+    let refused = app
+        .post(
+            "/api/admin/walkins",
+            &staff,
+            serde_json::json!({ "service_date": "2026-07-30", "party_size": 2 }),
+        )
+        .await;
+    assert_eq!(refused.error_code(), Some("not_the_running_shift"), "{}", refused.body);
+}
+
+#[tokio::test]
+async fn a_message_to_a_guest_the_bot_cannot_reach_is_refused_and_nothing_is_queued() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let guest = Caller::new("Лёша");
+    let booking = app
+        .post(
+            "/api/booking",
+            &guest,
+            serde_json::json!({ "service_date": "2026-07-30", "start_minutes": 1200, "party_size": 2 }),
+        )
+        .await
+        .expect_ok()["booking"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    app.store
+        .set_reachable(pustol_db::TelegramUserId(guest.id), false)
+        .await
+        .expect("recorded");
+
+    let refused = app
+        .post(
+            &format!("/api/admin/bookings/{booking}/message"),
+            &staff,
+            serde_json::json!({ "text": "Ваш стол готов, ждём вас!" }),
+        )
+        .await;
+    assert_eq!(refused.status, axum::http::StatusCode::BAD_REQUEST, "{}", refused.body);
+    assert_eq!(refused.error_code(), Some("no_bot_chat"));
+    let queued: i64 = sqlx::query_scalar(
+        "select count(*) from notification where booking_id = $1::uuid and kind = 'staff_message'",
+    )
+    .bind(&booking)
+    .fetch_one(app.store.pool())
+    .await
+    .expect("counted");
+    assert_eq!(queued, 0);
+}
+
+#[tokio::test]
+async fn a_settings_save_answers_with_the_settings_exactly_as_reading_them_again_does() {
+    // The roster is read back in username order; the save used to answer in the order it was sent.
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    let mut draft = draft_from(&settings);
+    draft["staff"]
+        .as_array_mut()
+        .expect("staff")
+        .push(serde_json::json!({ "username": "aaron" }));
+
+    let saved = app.send("PUT", SETTINGS, &staff, draft).await.expect_ok().clone();
+
+    let read = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    assert_eq!(saved["settings"]["version"], read["version"]);
+    assert_eq!(saved["settings"]["staff"][0]["username"], "aaron", "{saved}");
+    assert_eq!(saved["settings"], read);
+}
+
+#[tokio::test]
+async fn a_settings_save_in_the_shapes_the_previous_app_sent_is_still_understood() {
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    let mut draft = draft_from(&settings);
+    let tables = draft["tables"].as_array_mut().expect("tables");
+    for table in tables.iter_mut() {
+        table["kind"] = serde_json::json!("existing");
+    }
+    tables.push(serde_json::json!({ "kind": "new", "seats": 4, "zone": "Зал" }));
+
+    let saved = app.send("PUT", SETTINGS, &staff, draft).await.expect_ok().clone();
+
+    let tables = saved["settings"]["tables"].as_array().expect("tables");
+    assert_eq!(tables.len(), 16, "{saved}");
+    assert_eq!(tables[15]["number"], 16);
+    assert_eq!(tables[15]["seats"], 4);
+}
+
+#[tokio::test]
+async fn hours_and_turns_at_the_ends_of_the_integers_are_refused_as_invalid_settings() {
+    // They used to overflow: a panic in a debug build, and a wrapped-round number in a release one.
+    let app = harness().await;
+    let staff = manager(&app).await;
+    let settings = app.get(SETTINGS, &staff).await.expect_ok().clone();
+    for (open_minutes, close_minutes, turn_minutes) in [(600, i32::MIN, 1), (i32::MAX, i32::MIN, 120)] {
+        let mut draft = draft_from(&settings);
+        draft["week"][5] = serde_json::json!({
+            "open_minutes": open_minutes, "close_minutes": close_minutes, "closed": false
+        });
+        draft["turn_minutes"] = serde_json::json!(turn_minutes);
+        let refused = app.send("PUT", SETTINGS, &staff, draft).await;
+        assert_eq!(
+            refused.status,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+        assert_eq!(refused.error_code(), Some("settings_invalid"));
+    }
+}

@@ -19,6 +19,7 @@ use pustol_telegram::init_data::{CLOCK_SKEW, TelegramUser};
 use pustol_telegram::session::{issue, verify_session};
 use pustol_telegram::{BotToken, verify};
 
+use crate::body::refuse_nul;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -132,26 +133,43 @@ impl FromRequestParts<AppState> for Authenticated {
 
         if let Some(payload) = header.strip_prefix(PAYLOAD_SCHEME) {
             let verified = verify(payload, state.bot_token(), state.now(), MAX_INIT_DATA_AGE)?;
-            return Ok(Self {
-                expires_at: verified.auth_date + SESSION_LIFETIME,
-                user: verified.user,
-                proof: Proof::Telegram {
+            return Self::accepted(
+                verified.user,
+                Proof::Telegram {
                     signed_at: verified.auth_date,
                 },
-            });
+                verified.auth_date + SESSION_LIFETIME,
+            );
         }
         if let Some(session) = header.strip_prefix(SESSION_SCHEME) {
             let verified = verify_session(session, state.bot_token(), state.now())?;
-            return Ok(Self {
-                user: verified.user,
-                expires_at: verified.expires_at,
-                proof: Proof::Session,
-            });
+            return Self::accepted(verified.user, Proof::Session, verified.expires_at);
         }
         Err(ApiError::unauthorised(
             "no_credentials",
             "expected an Authorization header of the form `tma <initData>` or `session <token>`",
         ))
+    }
+}
+
+impl Authenticated {
+    /// A caller whose proof holds, unless their profile carries text storage cannot keep.
+    ///
+    /// Every request records the account it names, and `PostgreSQL` text cannot hold U+0000: a name
+    /// carrying one came back as a server fault. Asked of every string of the profile, as a body's
+    /// are, and of a session as of a payload, since a session carries the profile it was issued with.
+    fn accepted(
+        user: TelegramUser,
+        proof: Proof,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, ApiError> {
+        let profile = serde_json::to_value(&user).expect("a profile is plain data");
+        refuse_nul(&profile, "the Telegram profile")?;
+        Ok(Self {
+            user,
+            proof,
+            expires_at,
+        })
     }
 }
 

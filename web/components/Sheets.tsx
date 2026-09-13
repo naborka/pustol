@@ -24,7 +24,7 @@ import type {
   ShiftView,
 } from "@/lib/api";
 import * as fmt from "@/lib/format";
-import { tableOffers, walkInOffers } from "@/lib/occupancy";
+import { tableOffers, walkInOffers, walkInUntil } from "@/lib/occupancy";
 import type { Refusal } from "@/lib/outcomes";
 import type { TableOffer } from "@/lib/occupancy";
 import { trimmed } from "@/lib/settingsRules";
@@ -286,6 +286,7 @@ export function ChoiceSheet({
   title,
   hint,
   choices,
+  empty = "Список пуст — заполните его в настройках.",
   onClose,
   onChoose,
 }: {
@@ -293,6 +294,8 @@ export function ChoiceSheet({
   title: string;
   hint: string;
   choices: string[];
+  /** What an empty list says; null when the hint already says why there is nothing to choose. */
+  empty?: string | null;
   onClose: () => void;
   onChoose: (choice: string) => void;
 }) {
@@ -303,7 +306,9 @@ export function ChoiceSheet({
         <Note>{hint}</Note>
         <div style={{ display: "flex", flexDirection: "column", gap: SPACE[2] }}>
           {choices.length === 0 ? (
-            <Note tone="warn">Список пуст — заполните его в настройках.</Note>
+            empty === null ? null : (
+              <Note tone="warn">{empty}</Note>
+            )
           ) : (
             choices.map((choice) => (
               <SheetChoice key={choice} text={choice} onClick={() => onChoose(choice)} />
@@ -343,6 +348,41 @@ export function CancelReasonSheet({
       title="Причина отмены"
       hint={`${told} Отменить это нельзя.`}
       choices={reasons}
+      onClose={onClose}
+      onChoose={onChoose}
+    />
+  );
+}
+
+/**
+ * A message to the guest, chosen from the bar's own list, offered only while the bot can reach them.
+ * A refresh or a refused send can say it no longer can; the sheet then says what to do instead.
+ */
+export function MessageSheet({
+  open,
+  booking,
+  templates,
+  onClose,
+  onChoose,
+}: {
+  open: boolean;
+  booking: ShiftBooking | null;
+  templates: string[];
+  onClose: () => void;
+  onChoose: (text: string) => void;
+}) {
+  const reachable = booking?.reachable_by_bot ?? false;
+  return (
+    <ChoiceSheet
+      open={open}
+      title="Написать гостю"
+      hint={
+        reachable
+          ? `Уйдёт от бота в чат гостя. ${booking?.guest_name ?? ""} получит его сразу — отменить отправку нельзя.`
+          : "Бот не может написать гостю — позвоните или откройте чат."
+      }
+      choices={reachable ? templates : []}
+      {...(reachable ? {} : { empty: null })}
       onClose={onClose}
       onChoose={onChoose}
     />
@@ -621,8 +661,8 @@ export function WalkInSheet({
   onChooseTable: (tableId: string) => void;
   onSeat: (tableId: string) => void;
 }) {
-  if (!shift || shift.now_minutes === null) return null;
-  const until = shift.now_minutes + turnMinutes;
+  const until = shift ? walkInUntil(shift, turnMinutes) : null;
+  if (!shift || until === null) return null;
   const offers = walkInOffers(shift, partySize, turnMinutes);
   const chosen = chosenTable(offers, chosenTableId);
 

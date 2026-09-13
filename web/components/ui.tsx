@@ -1004,6 +1004,19 @@ export function Empty({ title, detail }: { title: string; detail?: string }) {
   );
 }
 
+/**
+ * What is on screen could not be read again. Said where it is shown, never as a toast: a read nobody
+ * is looking at any more has nobody to tell.
+ */
+export function StaleNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Card gap={SPACE[2]}>
+      <Note tone="warn">Не удалось обновить — показано прежнее.</Note>
+      <CardAction label="Повторить" onClick={onRetry} />
+    </Card>
+  );
+}
+
 /** A dead end with an explanation and, where there is one, a way out. */
 export function Failure({
   message,

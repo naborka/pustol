@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { draftOf, type SettingsDraft, type SettingsView } from "../api";
 import { edited } from "../settingsRules";
 import {
+  asStored,
   compareVersions,
   fresh,
   isDirty,
@@ -40,23 +41,69 @@ describe("which settings are newer", () => {
   });
 });
 
-describe("merging somebody else's save into an edit", () => {
-  const base = draftOf(v1);
+describe("a proposal as the server stores it", () => {
+  it("trims what the server trims, lists staff and tables in the server's order, and keeps the rest as typed", () => {
+    const draft = edited(draftOf(v1), (next) => {
+      next.name = " Чердак ";
+      next.address = "Невский, 1 ";
+      next.contact = " @podval_bar ";
+      next.zones = [" Зал", "Стойка"];
+      next.message_templates = [" Ждём вас "];
+      next.cancel_reasons = ["Дождь\n"];
+      next.staff = [{ username: "pavel" }, { username: "Aaron" }, { username: "marina" }];
+      next.tables = [
+        { id: "new-1", seats: 2, zone: "Стойка" },
+        { id: "t2", seats: 6, zone: "Зал" },
+        { id: "t1", seats: 2, zone: "Стойка" },
+        { id: "new-2", seats: 4, zone: "Зал" },
+      ];
+    });
+    expect(asStored(draft, v1)).toEqual({
+      ...draft,
+      name: "Чердак",
+      address: "Невский, 1",
+      contact: "@podval_bar",
+      message_templates: ["Ждём вас"],
+      cancel_reasons: ["Дождь"],
+      staff: [{ username: "Aaron" }, { username: "marina" }, { username: "pavel" }],
+      tables: [
+        { id: "t1", seats: 2, zone: "Стойка" },
+        { id: "t2", seats: 6, zone: "Зал" },
+        { id: "new-1", seats: 2, zone: "Стойка" },
+        { id: "new-2", seats: 4, zone: "Зал" },
+      ],
+    });
+  });
+});
 
+describe("merging somebody else's save into an edit", () => {
   it("takes their field where mine is untouched, keeps mine where theirs is, and takes their version", () => {
-    const mine = { ...base, name: "Чердак" };
-    const theirs = { ...draftOf(v2), address: "Невский, 1" };
-    const merged = mergeDrafts(base, mine, theirs);
+    const mine = { ...draftOf(v1), name: "Чердак" };
+    const theirs = settingsView({ address: "Невский, 1", version: v2.version });
+    const merged = mergeDrafts(v1, mine, theirs);
     expect(merged.draft).toMatchObject({ name: "Чердак", address: "Невский, 1", version: v2.version });
     expect(merged.conflicts).toEqual([]);
   });
 
   it("keeps mine and names the field when both changed it differently", () => {
-    const mine = { ...base, name: "Чердак", turn_minutes: 150 };
-    const theirs = { ...draftOf(v2), name: "Подвал", turn_minutes: 150 };
-    const merged = mergeDrafts(base, mine, theirs);
+    const mine = { ...draftOf(v1), name: "Чердак", turn_minutes: 150 };
+    const theirs = settingsView({ name: "Подвал", turn_minutes: 150, version: v2.version });
+    const merged = mergeDrafts(v1, mine, theirs);
     expect(merged.draft.name).toBe("Чердак");
     expect(merged.conflicts).toEqual(["name"]);
+  });
+
+  it("takes theirs, naming no conflict, for a field that is mine once the server has stored it", () => {
+    const mine = {
+      ...draftOf(v1),
+      name: "Чердак ",
+      message_templates: v1.message_templates.map((text) => ` ${text}`),
+      staff: [...v1.staff].reverse().map(({ username }) => ({ username })),
+    };
+    const theirs = settingsView({ name: "Чердак", version: v2.version });
+    const merged = mergeDrafts(v1, mine, theirs);
+    expect(merged.draft).toEqual(draftOf(theirs));
+    expect(merged.conflicts).toEqual([]);
   });
 });
 
@@ -83,6 +130,70 @@ describe("settings that arrive", () => {
     });
     const { pair, notice } = received(current, tomorrow);
     expect(pair).toEqual({ ...current, settings: tomorrow });
+    expect(notice).toBeNull();
+  });
+
+  it("of the same version change nothing but the evening's counts, whatever order they list the staff in", () => {
+    // A save answered in the order it was sent while reads listed the staff sorted: the reread made
+    // the manager's untouched roster look like an edit, and the next save put back a member somebody
+    // else had removed.
+    const shown = settingsView({
+      version: v2.version,
+      staff: [
+        { username: "nastya", bound: true },
+        { username: "pavel", bound: false },
+        { username: "aaron", bound: false },
+      ],
+    });
+    const reread = settingsView({
+      version: v2.version,
+      service_date: "2026-09-12",
+      staff: [...shown.staff].sort((left, right) => left.username.localeCompare(right.username)),
+      tables: shown.tables.map((table) => ({ ...table, bookings_today: 3 })),
+    });
+    for (const current of [fresh(shown), editing(shown, (draft) => void (draft.name = "Мансарда"))]) {
+      const { pair, notice } = received(current, reread);
+      expect(pair.draft).toBe(current.draft);
+      expect(pair.settings).toEqual({ ...shown, service_date: "2026-09-12", tables: reread.tables });
+      expect(notice).toBeNull();
+    }
+  });
+
+  it("never bring back a member somebody else removed because the edit lists the staff in another order", () => {
+    const sorted = settingsView({
+      version: v2.version,
+      staff: [
+        { username: "aaron", bound: false },
+        { username: "nastya", bound: true },
+        { username: "pavel", bound: false },
+      ],
+    });
+    const current: SettingsPair = {
+      settings: sorted,
+      draft: {
+        ...draftOf(sorted),
+        name: "Мансарда",
+        staff: [{ username: "nastya" }, { username: "pavel" }, { username: "aaron" }],
+      },
+    };
+    const removed = settingsView({
+      version: "2026-09-13T09:00:00Z",
+      staff: sorted.staff.filter((member) => member.username !== "pavel"),
+    });
+    const { pair, notice } = received(current, removed);
+    expect(pair.draft.staff).toEqual([{ username: "aaron" }, { username: "nastya" }]);
+    expect(pair.draft.name).toBe("Мансарда");
+    expect(notice).toBe("Пока вы редактировали, настройки обновились. Ваши правки на месте — проверьте и сохраните.");
+  });
+
+  it("take a save of one's own the server trimmed as saved, with nothing left to save", () => {
+    // The save committed and its answer was lost: the reread holds the name as the server trimmed it.
+    const current = editing(v1, (draft) => {
+      draft.name = "Чердак ";
+    });
+    const { pair, notice } = received(current, settingsView({ name: "Чердак", version: v2.version }));
+    expect(pair.draft.name).toBe("Чердак");
+    expect(isDirty(pair)).toBe(false);
     expect(notice).toBeNull();
   });
 

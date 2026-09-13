@@ -32,6 +32,7 @@ import {
   Separator,
   SlotGrid,
   Spinner,
+  StaleNotice,
 } from "./ui";
 
 // ---- what a new booking would do ---------------------------------------------------------------
@@ -59,28 +60,6 @@ export function heldAfter(
       left.service_date.localeCompare(right.service_date) ||
       left.start_minutes - right.start_minutes,
   );
-}
-
-/**
- * Whether a booking can be moved from its card. A held no-show is replaced only by a booking on its
- * own evening, so only while that evening still takes arrivals by the bar's clock.
- */
-export function movable(
-  held: GuestBooking,
-  bar: Pick<BarView, "today" | "now_minutes" | "last_arrival_minutes">,
-): boolean {
-  switch (held.rebooking_replaces) {
-    case "any_evening":
-      return true;
-    case "same_evening":
-      return (
-        held.service_date === bar.today &&
-        bar.last_arrival_minutes !== null &&
-        bar.now_minutes < bar.last_arrival_minutes
-      );
-    case null:
-      return false;
-  }
 }
 
 /** Whether the guest already holds `serviceDate` with a booking a new one there would not replace. */
@@ -311,7 +290,7 @@ export function HomeScreen({
             key={held.id}
             booking={held}
             bar={bar}
-            onMove={movable(held, bar) ? () => onMove(held) : null}
+            onMove={held.rebooking_replaces === null ? null : () => onMove(held)}
             onCancel={() => onCancel(held)}
           />
         ))
@@ -454,7 +433,10 @@ export function BookScreen({
   partySize: number;
   serviceDate: string;
   chosenMinutes: number | null;
-  /** Kept apart from `timesFailed`: one succeeding must not hide that the other failed. */
+  /**
+   * The newest read of the evenings failed: a card when there are none to show, a notice under the
+   * ones shown. Kept apart from `timesFailed`: one succeeding must not hide that the other failed.
+   */
   daysFailed: boolean;
   timesFailed: boolean;
   /** The times on screen answer a question the guest has since changed. */
@@ -510,15 +492,20 @@ export function BookScreen({
           ) : (
             <Spinner label="Смотрим вечера" />
           )
-        ) : days.length === 0 ? (
-          <Note tone="warn">Бар пока не принимает брони.</Note>
         ) : (
-          <DayRailStrip
-            days={days}
-            today={bar.today}
-            serviceDate={serviceDate}
-            onServiceDate={onServiceDate}
-          />
+          <>
+            {days.length === 0 ? (
+              <Note tone="warn">Бар пока не принимает брони.</Note>
+            ) : (
+              <DayRailStrip
+                days={days}
+                today={bar.today}
+                serviceDate={serviceDate}
+                onServiceDate={onServiceDate}
+              />
+            )}
+            {daysFailed ? <StaleNotice onRetry={onRetry} /> : null}
+          </>
         )}
       </div>
 
@@ -541,21 +528,26 @@ export function BookScreen({
           ) : (
             <Spinner label="Считаем свободные окна" />
           )
-        ) : offered.length === 0 ? (
-          <Note tone="warn">В этот вечер не осталось ни одного времени. Выберите другой.</Note>
         ) : (
           <>
-            <SlotGrid
-              slots={offered}
-              chosen={chosenMinutes}
-              onPick={onPick}
-              onTaken={onTakenSlot}
-              stale={timesPending}
-            />
-            <Note>
-              Зачёркнутое время занято. Свободных окон: {availability.free_count} — за каждым уже
-              стоит настоящий стол на {fmt.guests(partySize)}.
-            </Note>
+            {offered.length === 0 ? (
+              <Note tone="warn">В этот вечер не осталось ни одного времени. Выберите другой.</Note>
+            ) : (
+              <>
+                <SlotGrid
+                  slots={offered}
+                  chosen={chosenMinutes}
+                  onPick={onPick}
+                  onTaken={onTakenSlot}
+                  stale={timesPending}
+                />
+                <Note>
+                  Зачёркнутое время занято. Свободных окон: {availability.free_count} — за каждым
+                  уже стоит настоящий стол на {fmt.guests(partySize)}.
+                </Note>
+              </>
+            )}
+            {timesFailed ? <StaleNotice onRetry={onRetry} /> : null}
           </>
         )}
       </div>

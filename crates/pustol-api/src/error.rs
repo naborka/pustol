@@ -140,6 +140,7 @@ impl From<DbError> for ApiError {
                 .with_detail(serde_json::json!({ "service_date": service_day })),
             DbError::UnknownCancelReason => refused("unknown_cancel_reason"),
             DbError::UnknownMessage => refused("unknown_message"),
+            DbError::NoBotChat => refused("no_bot_chat"),
             DbError::ProposedConfigInvalid(errors) => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "settings_invalid",

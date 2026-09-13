@@ -20,10 +20,11 @@ import {
   failureOn,
   marked,
   pendingOn,
+  pendingUpTo,
   valueOn,
   written,
   type Ledger,
-  type Newer,
+  type Order,
 } from "./reads";
 
 /** A read the screen is asking: what it is about, and how to ask it. */
@@ -39,14 +40,6 @@ export interface Landing {
   onScreen: boolean;
 }
 
-/** A failed read, as whoever asked should hear of it. */
-export interface Failed {
-  /** Worth a word: somebody asked, and nothing newer about the question is on record. */
-  tell: boolean;
-  /** When the read was asked, to compare with `mark`. */
-  number: number;
-}
-
 /** A failure as the API described it, or as close as the app can get. */
 export function failureOf(error: unknown): ApiFailure {
   return error instanceof ApiError ? error.failure : { code: "internal", message: String(error) };
@@ -55,17 +48,18 @@ export function failureOf(error: unknown): ApiFailure {
 export function useRead<T>(
   question: Question<T> | null,
   onAnswer: (answer: T, landing: Landing) => void,
-  onFailure: (failure: ApiFailure, failed: Failed) => void,
+  /** A read failed; `number` is when it was asked, to compare with `mark`. */
+  onFailure: (failure: ApiFailure, number: number) => void,
   /** How the server orders answers to this question, when it does. */
-  newer?: Newer<T>,
+  order?: Order<T>,
 ) {
   const [ledger, setLedger] = useState<Ledger<T>>(EMPTY_LEDGER);
   const ledgerNow = useRef<Ledger<T>>(EMPTY_LEDGER);
   // The answer last applied while its question was on screen, drawn while a new question loads.
   const [lastOnScreen, setLastOnScreen] = useState<T | null>(null);
-  const latest = useRef({ question, onAnswer, onFailure, newer });
+  const latest = useRef({ question, onAnswer, onFailure, order });
   useEffect(() => {
-    latest.current = { question, onAnswer, onFailure, newer };
+    latest.current = { question, onAnswer, onFailure, order };
   });
 
   const actions = useMemo(() => {
@@ -80,9 +74,14 @@ export function useRead<T>(
       if (onScreen) setLastOnScreen(data);
       latest.current.onAnswer(data, { key, onScreen });
     };
+    const mark = (): number => {
+      const [next, number] = marked(ledgerNow.current);
+      commit(next);
+      return number;
+    };
     return {
-      /** Asks the question on screen now. `quiet` is a refresh nobody asked for. */
-      load: async (quiet = false) => {
+      /** Asks the question on screen now. */
+      load: async () => {
         const asking = latest.current.question;
         if (!asking) return;
         const [started, number] = begun(ledgerNow.current, asking.key);
@@ -92,10 +91,8 @@ export function useRead<T>(
           answer = await asking.ask();
         } catch (error) {
           const failure = failureOf(error);
-          const outcome = failed(ledgerNow.current, number, asking.key, failure);
-          commit(outcome.ledger);
-          const tell = !quiet && outcome.recorded && asking.key === keyNow();
-          latest.current.onFailure(failure, { tell, number });
+          commit(failed(ledgerNow.current, number, asking.key, failure).ledger);
+          latest.current.onFailure(failure, number);
           return;
         }
         const outcome = answered(
@@ -103,27 +100,28 @@ export function useRead<T>(
           number,
           asking.key,
           answer,
-          latest.current.newer,
+          latest.current.order,
         );
         commit(outcome.ledger);
         if (outcome.apply) land(asking.key, answer);
       },
       /**
-       * Puts a write's own answer about `key` on record, made on the value there now. Returns whether
-       * it was applied: a question the server orders keeps a newer answer it already has.
+       * Puts a write's own answer about `key` on record, made on the value there now and numbered
+       * `sent`, the mark taken when the write was sent; without one, now. Returns whether it was
+       * applied.
        */
-      put: (key: string, change: (current: T | undefined) => T | undefined): boolean => {
-        const outcome = written(ledgerNow.current, key, change, latest.current.newer);
+      put: (
+        key: string,
+        change: (current: T | undefined) => T | undefined,
+        sent: number = mark(),
+      ): boolean => {
+        const outcome = written(ledgerNow.current, key, sent, change, latest.current.order);
         commit(outcome.ledger);
         if (outcome.apply && outcome.data !== undefined) land(key, outcome.data);
         return outcome.apply;
       },
       /** A moment every read asked from now on comes after. */
-      mark: (): number => {
-        const [next, number] = marked(ledgerNow.current);
-        commit(next);
-        return number;
-      },
+      mark,
     };
   }, []);
 
@@ -135,10 +133,12 @@ export function useRead<T>(
     value,
     /** That answer, or while there is none yet, the one shown for the question before. */
     shown: value ?? lastOnScreen,
-    /** The failure to show for the question on screen, or null. */
+    /** The failure of the newest read of the question on screen, once nothing else is on its way. */
     failure: failureOn(ledger, key),
     /** A read of the question on screen is on its way. */
     pending: pendingOn(ledger, key),
+    /** The number of the newest read of the question on screen on its way, 0 when none, to compare with `mark`. */
+    pendingUpTo: pendingUpTo(ledger, key),
     /** The number of the newest read of the question on screen that answered, to compare with `mark`. */
     answeredUpTo: answeredUpTo(ledger, key),
   };

@@ -1781,15 +1781,46 @@ async fn an_evening_is_one_moment_of_the_room_whatever_commits_while_it_is_read(
 }
 
 mod test_databases {
+    use std::time::Duration;
+
     use crate::common::database::{
         ABANDONED_AFTER, connect_to, create_database, database_name, maintenance, sweep_abandoned,
         unix_seconds,
     };
 
-    /// A pid no process of this machine has, and a counter no other test draws, so the names these
-    /// tests make are theirs alone.
-    fn unused_name(made_at: u64) -> String {
-        database_name(made_at, u32::MAX, uuid::Uuid::new_v4().as_u64_pair().0)
+    /// A prefix of `test`'s own. The suites' sweep never matches it, and neither does another of
+    /// these tests' sweeps, so nothing but `test` makes or drops a database under it. It still starts
+    /// with `pustol_t`, which `scripts/pg.sh start` clears if a run leaves one behind.
+    fn private(test: &str) -> String {
+        format!("pustol_tsweep_{test}_")
+    }
+
+    fn unused_name(prefix: &str, made_at: u64) -> String {
+        database_name(
+            prefix,
+            made_at,
+            std::process::id(),
+            uuid::Uuid::new_v4().as_u64_pair().0,
+        )
+    }
+
+    /// Waits until the cluster no longer lists a connection to `name`. A closed pool's backend
+    /// leaves `pg_stat_activity` a moment after the pool says it has closed.
+    async fn wait_until_nobody_is_connected(admin: &sqlx::PgPool, name: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while sqlx::query_scalar::<_, bool>(
+                "select exists (select 1 from pg_stat_activity where datname = $1)",
+            )
+            .bind(name)
+            .fetch_one(admin)
+            .await
+            .expect("listed")
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the closed connection leaves the cluster");
     }
 
     async fn exists(admin: &sqlx::PgPool, name: &str) -> bool {
@@ -1812,10 +1843,11 @@ mod test_databases {
     #[tokio::test]
     async fn a_young_test_database_nobody_is_connected_to_is_kept() {
         let admin = maintenance().await;
+        let prefix = private("young");
         let now = unix_seconds();
-        let young = create_database(&admin, || unused_name(now)).await;
+        let young = create_database(&admin, || unused_name(&prefix, now)).await;
 
-        sweep_abandoned(&admin, now).await;
+        sweep_abandoned(&admin, &prefix, now).await;
 
         assert!(exists(&admin, &young).await, "a run may not have connected to it yet");
         drop_database(&admin, &young).await;
@@ -1825,30 +1857,63 @@ mod test_databases {
     async fn an_old_test_database_is_dropped_only_once_nobody_is_connected_to_it() {
         // Another run, in a container this machine cannot see into, is still using it.
         let admin = maintenance().await;
+        let prefix = private("old");
         let now = unix_seconds();
         let old = create_database(&admin, || {
-            unused_name(now - ABANDONED_AFTER.as_secs() - 60)
+            unused_name(&prefix, now - ABANDONED_AFTER.as_secs() - 60)
         })
         .await;
         let user = connect_to(&old).await;
         let held = user.acquire().await.expect("connected");
 
-        sweep_abandoned(&admin, now).await;
+        sweep_abandoned(&admin, &prefix, now).await;
         assert!(exists(&admin, &old).await, "somebody is connected to it");
 
         drop(held);
         user.close().await;
-        sweep_abandoned(&admin, now).await;
+        wait_until_nobody_is_connected(&admin, &old).await;
+        sweep_abandoned(&admin, &prefix, now).await;
         assert!(!exists(&admin, &old).await, "old, and nobody is connected");
+    }
+
+    #[tokio::test]
+    async fn a_name_not_in_the_form_this_suite_writes_is_never_read_for_a_second() {
+        // Old and idle, and each is what a name made some other way looks like under the prefix.
+        let admin = maintenance().await;
+        let prefix = private("form");
+        let old = unix_seconds() - ABANDONED_AFTER.as_secs() - 60;
+        let pid = std::process::id();
+        let strangers = [
+            format!("{prefix}{old}_{pid}"),
+            format!("{prefix}{old}_{pid}_2_3"),
+            format!("{prefix}{old}x_{pid}_2"),
+            format!("{prefix}_{old}_{pid}_2"),
+        ];
+        for stranger in &strangers {
+            let name = stranger.clone();
+            create_database(&admin, move || name.clone()).await;
+        }
+        let ours = database_name(&prefix, old, pid, 2);
+        let name = ours.clone();
+        create_database(&admin, move || name.clone()).await;
+
+        sweep_abandoned(&admin, &prefix, unix_seconds()).await;
+
+        for stranger in &strangers {
+            assert!(exists(&admin, stranger).await, "{stranger}");
+            drop_database(&admin, stranger).await;
+        }
+        assert!(!exists(&admin, &ours).await, "{ours}");
     }
 
     #[tokio::test]
     async fn a_name_another_process_has_taken_is_passed_over() {
         // Two suites in different pid namespaces can be the same pid in the same second.
         let admin = maintenance().await;
+        let prefix = private("taken");
         let now = unix_seconds();
-        let taken = create_database(&admin, || unused_name(now)).await;
-        let mut offered = vec![unused_name(now), taken.clone()];
+        let taken = create_database(&admin, || unused_name(&prefix, now)).await;
+        let mut offered = vec![unused_name(&prefix, now), taken.clone()];
 
         let made = create_database(&admin, || offered.pop().expect("a name")).await;
 

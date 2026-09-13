@@ -66,6 +66,11 @@ pub enum Error {
     #[error("that is not one of this bar's messages")]
     UnknownMessage,
 
+    /// A message for a guest the bot cannot write to: a booking taken at the door, with no account
+    /// behind it, or an account the bot has found it cannot reach. Somebody has to call them.
+    #[error("the bot has no chat with this guest")]
+    NoBotChat,
+
     /// Closing a table without saying why. Guarded here so the reason can never be optional in
     /// storage, where staff would find rows they cannot explain.
     #[error("closing a table needs a reason")]
@@ -75,10 +80,12 @@ pub enum Error {
     #[error("a note is at most {limit} characters")]
     NoteTooLong { limit: usize },
 
-    /// Seating somebody "now" on a shift that is not the one running.
+    /// Seating somebody "now" on a shift that is not the one running, that has already ended, or
+    /// that is a day off.
     ///
-    /// There is no now on next Tuesday. Refused here rather than in a handler, because the only
-    /// thing that knows which shift is running is the configuration this layer reads.
+    /// There is no now on next Tuesday, nor after the last sitting of tonight. Refused here rather
+    /// than in a handler, because the only thing that knows which shift is running is the
+    /// configuration this layer reads.
     #[error("{service_day} is not the shift that is running")]
     NotTheRunningShift { service_day: chrono::NaiveDate },
 

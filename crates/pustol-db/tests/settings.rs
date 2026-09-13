@@ -985,6 +985,93 @@ async fn a_payload_of_the_same_second_as_the_stored_profile_rewrites_it_only_whe
 }
 
 #[tokio::test]
+async fn a_second_that_carried_two_profiles_claims_nothing_until_a_newer_payload_settles_it() {
+    // Two payloads of one second name the account pavel_bar and renamed_v, and nothing says which came
+    // last. The first could not claim pavel_bar because the account already held a seat. Once that
+    // seat is gone, sending the first again must not claim pavel_bar under a name the account may
+    // have given up within that very second.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    invite(&store, bar, &["pavel_bar", "own_seat"], morning()).await;
+    let mut account = fresh_account("Павел");
+    account.username = Some("own_seat".to_owned());
+    let seated = morning() + chrono::TimeDelta::minutes(5);
+    store
+        .identify(bar, &account, signed(seated), seated)
+        .await
+        .expect("identified");
+    assert_eq!(holder_of(&store, bar, "own_seat").await, Some(account.id.0));
+
+    let second = morning() + chrono::TimeDelta::minutes(10);
+    let mut first = account.clone();
+    first.username = Some("pavel_bar".to_owned());
+    store
+        .identify(bar, &first, signed(second), second)
+        .await
+        .expect("identified");
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, None, "one account, one seat");
+    let mut other = account.clone();
+    other.username = Some("renamed_v".to_owned());
+    let viewer = store
+        .identify(bar, &other, signed(second), second)
+        .await
+        .expect("identified");
+    assert_eq!(viewer.account.username.as_deref(), Some("pavel_bar"), "a tie rewrites nothing");
+
+    let mut draft = draft_of(&store, bar).await;
+    draft.staff.retain(|member| member.username != "own_seat");
+    store
+        .save_settings(bar, &draft, thursday(), second)
+        .await
+        .expect("saved");
+
+    let viewer = store
+        .identify(bar, &first, signed(second), second)
+        .await
+        .expect("identified");
+    assert!(!viewer.is_staff, "the second is contested");
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, None);
+
+    let later = second + chrono::TimeDelta::seconds(1);
+    let viewer = store
+        .identify(bar, &first, signed(later), later)
+        .await
+        .expect("identified");
+    assert!(viewer.is_staff, "a strictly newer payload settles it");
+    assert_eq!(holder_of(&store, bar, "pavel_bar").await, Some(account.id.0));
+}
+
+#[tokio::test]
+async fn a_save_answers_with_the_settings_as_storage_holds_them_at_its_version() {
+    // Storage reads the roster back in username order. A save answering in the order the screen sent
+    // it named one order for a version whose every later reading names another.
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let mut draft = draft_of(&store, bar).await;
+    draft.staff.push(StaffDraft {
+        username: "aaron".to_owned(),
+    });
+
+    let saved = store
+        .save_settings(bar, &draft, thursday(), morning())
+        .await
+        .expect("saved");
+
+    let read = store.settings(bar).await.expect("reads");
+    assert_eq!(saved.version, read.version);
+    assert_eq!(saved.config, read.config);
+    assert_eq!(
+        saved
+            .config
+            .staff
+            .iter()
+            .map(|member| member.username.as_str())
+            .collect::<Vec<_>>(),
+        vec!["aaron", "anna_mgr"]
+    );
+}
+
+#[tokio::test]
 async fn an_account_that_holds_a_seat_claims_no_second_one() {
     let store = store().await;
     let (bar, _) = default_bar(&store).await;

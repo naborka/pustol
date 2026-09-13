@@ -3,11 +3,93 @@
 mod common;
 
 use chrono::Duration;
+use pustol_db::Error;
 use pustol_db::bookings::MoveTo;
 use pustol_db::identity::ReminderChoice;
 use pustol_db::notifications::{NotificationKind, PendingNotification};
+use pustol_domain::TableId;
 
-use common::{bar_with, config_with, signed, default_bar, fresh_account, guest_booking, morning, numbered, staff_booking, store, table, thursday, utc};
+use common::{bar_with, config_with, signed, default_bar, draft_of, fresh_account, guest_booking, morning, numbered, staff_booking, store, table, thursday, utc};
+
+#[tokio::test]
+async fn closing_or_opening_a_table_that_is_not_in_the_room_writes_nothing() {
+    // One that never existed, one of another bar, and one this bar retired. The first used to reach
+    // the database as a foreign key it refused; the second was accepted.
+    let store = store().await;
+    let (bar, config) = default_bar(&store).await;
+    let (_, other) = default_bar(&store).await;
+    let retired = numbered(&config.tables, 2).id;
+    let mut draft = draft_of(&store, bar).await;
+    draft.tables.retain(|table| table.id != retired.0);
+    store
+        .save_settings(bar, &draft, thursday(), morning())
+        .await
+        .expect("saved");
+    let ours = numbered(&config.tables, 1).id;
+
+    for unknown in [
+        TableId(uuid::Uuid::new_v4()),
+        numbered(&other.tables, 1).id,
+        retired,
+    ] {
+        let closed = store
+            .block_tables(bar, thursday(), &[ours, unknown], "Дождь", None, morning())
+            .await;
+        assert!(
+            matches!(closed, Err(Error::NotFound { entity: "table" })),
+            "{closed:?}"
+        );
+        let opened = store
+            .unblock_tables(bar, thursday(), &[unknown], morning())
+            .await;
+        assert!(
+            matches!(opened, Err(Error::NotFound { entity: "table" })),
+            "{opened:?}"
+        );
+    }
+    let evening = store.evening(bar, thursday(), morning()).await.expect("reads");
+    assert!(evening.blocks.is_empty(), "{:?}", evening.blocks);
+}
+
+#[tokio::test]
+async fn a_message_to_a_guest_the_bot_cannot_reach_is_refused_and_nothing_is_queued() {
+    let store = store().await;
+    let (bar, _) = default_bar(&store).await;
+    let account = fresh_account("Лёша");
+    store.identify(bar, &account, signed(morning()), morning()).await.expect("ok");
+    let theirs = store
+        .create_booking(&guest_booking(bar, &account, 1200, 2), morning())
+        .await
+        .expect("free")
+        .record
+        .booking
+        .id;
+    let at_the_door = store
+        .create_booking(&staff_booking(bar, "Без телефона", 1200, 2), morning())
+        .await
+        .expect("free")
+        .record
+        .booking
+        .id;
+    store.set_reachable(account.id, false).await.expect("recorded");
+
+    for booking in [theirs, at_the_door] {
+        let refused = store
+            .send_template(bar, booking, "Ваш стол готов, ждём вас!", morning())
+            .await;
+        assert!(matches!(refused, Err(Error::NoBotChat)), "{refused:?}");
+    }
+    assert!(
+        store.claim_due(10, morning()).await.expect("reads").is_empty(),
+        "nothing was queued"
+    );
+
+    store.set_reachable(account.id, true).await.expect("recorded");
+    store
+        .send_template(bar, theirs, "Ваш стол готов, ждём вас!", morning())
+        .await
+        .expect("queued once the guest can be reached again");
+}
 
 #[tokio::test]
 async fn closing_a_table_moves_the_party_sitting_at_it() {
@@ -399,7 +481,6 @@ async fn a_staff_message_goes_out_regardless_of_the_reminder_preference() {
         .send_template(
             bar,
             created.record.booking.id,
-            account.id,
             "Ваш стол готов, ждём вас!",
             morning(),
         )
@@ -426,7 +507,6 @@ async fn a_deferred_message_comes_back_when_its_retry_falls_due() {
         .send_template(
             bar,
             created.record.booking.id,
-            account.id,
             "Опаздываете? Держим стол ещё 15 минут.",
             morning(),
         )
@@ -461,7 +541,6 @@ async fn a_message_given_up_on_is_never_offered_again() {
         .send_template(
             bar,
             created.record.booking.id,
-            account.id,
             "Ваш стол готов, ждём вас!",
             morning(),
         )
@@ -598,7 +677,6 @@ async fn a_message_being_delivered_is_not_handed_to_a_second_worker() {
         .send_template(
             bar,
             created.record.booking.id,
-            account.id,
             "Ваш стол готов, ждём вас!",
             morning(),
         )

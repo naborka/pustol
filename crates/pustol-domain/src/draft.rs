@@ -24,11 +24,55 @@ use crate::schedule::{BarTable, TableId, Zone, ZoneError, next_table_number};
 ///
 /// One shape for a table the bar has and one it is adding, because the app cannot know which a row
 /// is by the time a save arrives: the first attempt at a save may already have added it.
+///
+/// The previous app's shapes are read too, because an app opened before an upgrade keeps sending
+/// them: `kind: "existing"` beside an identity means the identity alone, and `kind: "new"` with no
+/// identity is a table the server names. That app never named the tables it added, so its save sent
+/// twice adds two, as it always did.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "TableShape")]
 pub struct TableDraft {
     pub id: Uuid,
     pub seats: i32,
     pub zone: String,
+}
+
+/// A table in any shape an app sends one in, before it is settled into a [`TableDraft`].
+#[derive(Deserialize)]
+struct TableShape {
+    #[serde(default)]
+    kind: Option<TableKind>,
+    #[serde(default)]
+    id: Option<Uuid>,
+    seats: i32,
+    zone: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TableKind {
+    Existing,
+    New,
+}
+
+impl TryFrom<TableShape> for TableDraft {
+    type Error = &'static str;
+
+    fn try_from(shape: TableShape) -> Result<Self, Self::Error> {
+        let id = match (shape.kind, shape.id) {
+            (None | Some(TableKind::Existing), Some(id)) => id,
+            (Some(TableKind::New), None) => Uuid::new_v4(),
+            (None | Some(TableKind::Existing), None) => {
+                return Err("a table needs an id, or to be marked new");
+            }
+            (Some(TableKind::New), Some(_)) => return Err("a table marked new carries no id"),
+        };
+        Ok(Self {
+            id,
+            seats: shape.seats,
+            zone: shape.zone,
+        })
+    }
 }
 
 /// One weekday's proposed hours.

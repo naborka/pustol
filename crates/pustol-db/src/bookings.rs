@@ -818,6 +818,9 @@ impl Store {
     /// `table` is the one staff chose — the bartender can see the room and the allocator cannot.
     /// Checked against the allocator's own list, in the transaction that writes. `None` asks the
     /// room to choose.
+    ///
+    /// The party holds a turn, cut short where the shift ends: [`ValidConfig::walk_in_window`], the
+    /// window the shift's "who fits" line asks about.
     pub async fn seat_walk_in(
         &self,
         bar: BarId,
@@ -830,13 +833,12 @@ impl Store {
         lock_bar(&mut transaction, bar).await?;
         let config = load_config(&mut transaction, bar).await?;
         check_party_size(party_size, &config)?;
-        if config.current_service_day(now) != day {
-            return Err(Error::NotTheRunningShift {
+        let window = (config.current_service_day(now) == day)
+            .then(|| config.walk_in_window(day, now))
+            .flatten()
+            .ok_or(Error::NotTheRunningShift {
                 service_day: day.date(),
-            });
-        }
-
-        let window = Interval::from_duration(now, config.turn_minutes)?;
+            })?;
         let bookings = load_window(&mut transaction, bar, day).await?;
         let blocks = load_blocks(&mut transaction, bar, day).await?;
         let request = pustol_domain::allocator::Request {
@@ -1028,6 +1030,10 @@ impl Store {
     ///
     /// What changed is read from the rows the statements actually wrote, not from what was asked:
     /// a table closed twice, or opened when it was never shut, is not news to report.
+    ///
+    /// Every table named has to be one of this room's live tables, or nothing is written. An
+    /// identity no table has reached the database as a key it refused, and one of another bar's
+    /// tables was stored against this bar.
     async fn change_blocks(
         &self,
         bar: BarId,
@@ -1039,6 +1045,14 @@ impl Store {
     ) -> Result<BlocksChanged> {
         let mut transaction = self.pool().begin().await?;
         lock_bar(&mut transaction, bar).await?;
+        let config = load_config(&mut transaction, bar).await?;
+        if add
+            .iter()
+            .chain(remove)
+            .any(|asked| !config.active_tables().any(|table| table.id == *asked))
+        {
+            return Err(Error::NotFound { entity: "table" });
+        }
 
         let mut reopened = Vec::new();
         if !remove.is_empty() {
@@ -1086,7 +1100,6 @@ impl Store {
             closed = in_order_asked(add, inserted, |table| *table);
         }
 
-        let config = load_config(&mut transaction, bar).await?;
         let reconciliation = reconcile_shift(&mut transaction, bar, &config, day, now).await?;
         let evening = read_evening(&mut transaction, bar, config, day, now).await?;
         transaction.commit().await?;

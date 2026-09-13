@@ -170,7 +170,9 @@ async fn a_body_holding_a_nul_character_anywhere_is_refused_as_text_the_bar_cann
 }
 
 #[tokio::test]
-async fn a_body_that_is_not_json_of_the_right_shape_is_refused_as_it_always_was() {
+async fn a_body_that_is_not_json_of_the_right_shape_is_refused_with_a_code_the_app_can_read() {
+    // The statuses are axum's own. The body used to be a line of plain text, which the app, reading a
+    // code out of JSON, reported as a failure to parse.
     let app = harness().await;
     let guest = Caller::new("Вера");
     let cases = [
@@ -187,6 +189,12 @@ async fn a_body_that_is_not_json_of_the_right_shape_is_refused_as_it_always_was(
             .send_text("POST", "/api/booking", &guest, content_type, body)
             .await;
         assert_eq!(answer.status, status, "{content_type} {body}: {}", answer.body);
+        assert_eq!(answer.error_code(), Some("body_invalid"), "{content_type} {body}: {}", answer.body);
+        assert!(
+            answer.body["error"]["message"].as_str().is_some_and(|message| !message.is_empty()),
+            "{}",
+            answer.body
+        );
     }
 }
 
@@ -1222,6 +1230,49 @@ async fn a_guest_whose_table_is_held_tonight_books_another_evening_and_tonight_s
     );
     assert_eq!(session["bookings"][0]["rebooking_replaces"], "same_evening");
     assert_eq!(session["bookings"][1]["rebooking_replaces"], "any_evening");
+}
+
+#[tokio::test]
+async fn a_no_show_is_offered_a_move_to_tonight_only_while_tonight_has_an_arrival_time_left() {
+    // Ninety-minute sittings: by the hours the last arrival is 00:30. On an hourly grid it is
+    // midnight, so at ten past there is nothing to move to; on a half-hourly grid 00:30 is still
+    // ahead.
+    for (step, offered) in [
+        (60, serde_json::Value::Null),
+        (30, serde_json::json!("same_evening")),
+    ] {
+        let mut config = config_with(common::default_tables());
+        config.turn_minutes = 90;
+        config.slot_step_minutes = step;
+        let app = harness_at(morning(), config).await;
+        let guest = Caller::new("Стас");
+        let id = app
+            .post("/api/booking", &guest, book_at(1440))
+            .await
+            .expect_ok()["booking"]["id"]
+            .as_str()
+            .expect("an id")
+            .to_owned();
+        staff_mark(
+            &app.at(utc(2026, 7, 30, 21, 0)),
+            &Caller::manager(),
+            &id,
+            "no_show",
+        )
+        .await;
+
+        let session = app
+            .at(utc(2026, 7, 30, 22, 10))
+            .get("/api/session", &guest)
+            .await
+            .expect_ok()
+            .clone();
+        assert_eq!(ids_of(&session["bookings"]), vec![id], "step {step}: {session}");
+        assert_eq!(
+            session["bookings"][0]["rebooking_replaces"], offered,
+            "step {step}: {session}"
+        );
+    }
 }
 
 /// A guest seated at tonight's only table, with a plan for the same table on Friday.

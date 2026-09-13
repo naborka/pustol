@@ -95,6 +95,33 @@ describe("what the newest refusals say", () => {
     expect(messageFor(failure("text_invalid"), "guest")).toBe("В тексте есть недопустимый символ.");
   });
 
+  it("tells whoever holds an app too old for the server to reopen it", () => {
+    for (const audience of ["guest", "staff"] as const) {
+      expect(messageFor(failure("body_invalid"), audience)).toBe(
+        "Приложение устарело — закройте и откройте его заново.",
+      );
+    }
+  });
+
+  it("says a date that does not exist does not exist", () => {
+    for (const audience of ["guest", "staff"] as const) {
+      expect(messageFor(failure("invalid_date"), audience)).toBe("Такой даты нет.");
+    }
+  });
+
+  it("tells staff the bot cannot write to a guest without guessing why", () => {
+    // A guest from the app who blocked the bot is refused the same way as one written down by hand.
+    expect(messageFor(failure("no_bot_chat"), "staff")).toBe(
+      "Бот не может написать этому гостю — позвоните или откройте чат.",
+    );
+  });
+
+  it("tells staff what was not found could be a table as well as a booking", () => {
+    const said = messageFor(failure("not_found"), "staff");
+    expect(said).toMatch(/брон/);
+    expect(said).toMatch(/стол/);
+  });
+
   it("tells staff a table taken since is taken, and where to reseat", () => {
     expect(messageFor(failure("table_taken"), "staff")).toBe(
       "Стол уже заняли — пересадите бронь через «Перенести».",

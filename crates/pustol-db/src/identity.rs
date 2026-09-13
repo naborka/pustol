@@ -228,9 +228,13 @@ struct RecordedProfile {
 /// already, and returns the account as stored.
 ///
 /// Telegram stamps whole seconds, so two payloads of one second can carry two profiles, and nothing
-/// says which is the newer. Neither rewrites the other: a payload stamped the second already stored
-/// counts as recorded only when its profile is the one stored, so a username given up in that second
-/// cannot claim a seat under it.
+/// says which is the newer. Neither rewrites the other, and that second is marked contested. A
+/// payload of a contested second counts as recorded even when its profile is the one stored: sent
+/// again once a seat opens, it would claim that seat under a username the account may have given up
+/// within the very second. Only a payload of a later second settles it.
+///
+/// Read and written under the row lock [`note_account`] takes, so two payloads of one account are
+/// settled one after the other.
 async fn record_profile(
     connection: &mut PgConnection,
     account: &TelegramAccount,
@@ -238,36 +242,50 @@ async fn record_profile(
     now: DateTime<Utc>,
 ) -> Result<RecordedProfile> {
     let stored = note_account(&mut *connection, account, now).await?;
-    let rewritten = sqlx::query(
-        "update telegram_user
-         set username = $2, first_name = $3, last_name = $4, language_code = $5,
-             profile_signed_at = $6
-         where id = $1
-           and (profile_signed_at is null
-                or profile_signed_at < $6
-                or (profile_signed_at = $6
-                    and username is not distinct from $2 and first_name = $3
-                    and last_name is not distinct from $4
-                    and language_code is not distinct from $5))
-         returning id, username, first_name, last_name, language_code",
+    let row = sqlx::query(
+        "select profile_signed_at, profile_contested from telegram_user where id = $1",
     )
     .bind(account.id.0)
-    .bind(&account.username)
-    .bind(&account.first_name)
-    .bind(&account.last_name)
-    .bind(&account.language_code)
-    .bind(signed_at)
-    .fetch_optional(connection)
+    .fetch_one(&mut *connection)
     .await?;
-    Ok(match rewritten {
-        Some(row) => RecordedProfile {
-            account: account_from(&row)?,
+    let stored_at: Option<DateTime<Utc>> = row.try_get("profile_signed_at")?;
+    let contested: bool = row.try_get("profile_contested")?;
+    let same_profile = stored == *account;
+
+    let rewritten = match stored_at {
+        None => true,
+        Some(at) if at == signed_at => same_profile && !contested,
+        Some(at) => at < signed_at,
+    };
+    if rewritten {
+        sqlx::query(
+            "update telegram_user
+             set username = $2, first_name = $3, last_name = $4, language_code = $5,
+                 profile_signed_at = $6, profile_contested = false
+             where id = $1",
+        )
+        .bind(account.id.0)
+        .bind(&account.username)
+        .bind(&account.first_name)
+        .bind(&account.last_name)
+        .bind(&account.language_code)
+        .bind(signed_at)
+        .execute(connection)
+        .await?;
+        return Ok(RecordedProfile {
+            account: account.clone(),
             rewritten: true,
-        },
-        None => RecordedProfile {
-            account: stored,
-            rewritten: false,
-        },
+        });
+    }
+    if stored_at == Some(signed_at) && !same_profile {
+        sqlx::query("update telegram_user set profile_contested = true where id = $1")
+            .bind(account.id.0)
+            .execute(connection)
+            .await?;
+    }
+    Ok(RecordedProfile {
+        account: stored,
+        rewritten: false,
     })
 }
 

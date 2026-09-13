@@ -6,20 +6,26 @@
  * tomorrow never decides whether an answer about tonight is news: one number shared by every
  * question dropped a good answer whenever another question had answered in between.
  *
- * An answer replaces the value on record when it was asked later, or, for a question the server
- * orders itself (a room carries a version), when the server says it is at least as new. A failure
- * is recorded only when it was asked after the value on record, is cleared by any answer applied
- * after it, and is shown only while nothing else is on its way for that question.
+ * An answer replaces the value on record when the server orders it after that value (a room carries
+ * a version), or, when the server cannot tell the two apart or orders nothing, when it was asked
+ * later. A write's own answer is numbered when the write was sent. A failure is recorded only when
+ * it was asked after every answer applied, is cleared by an answer asked after it, and is shown only
+ * while nothing else is on its way for that question — beside the value on record, if there is one.
  */
 
 import type { ApiFailure } from "./errors";
 
-/** Whether `next` may replace `shown`. Without one, the later ask wins. */
-export type Newer<T> = (next: T, shown: T) => boolean;
+/**
+ * How the server orders two answers to one question: above zero when `next` is newer, below when it
+ * is older, zero when the server cannot tell them apart.
+ */
+export type Order<T> = (next: T, shown: T) => number;
 
 export interface Entry<T> {
   /** The value on record, and the number of the read or write that brought it. */
   readonly value?: { readonly number: number; readonly data: T };
+  /** The newest number among the answers applied: a failure asked before it is older news. */
+  readonly settled: number;
   readonly failure?: { readonly number: number; readonly failure: ApiFailure };
   /** The newest read of this question that answered, applied or not; 0 before any. */
   readonly answered: number;
@@ -34,7 +40,7 @@ export interface Ledger<T> {
 
 export const EMPTY_LEDGER: Ledger<never> = { asked: 0, inFlight: [], entries: {} };
 
-const NOTHING: Entry<never> = { answered: 0 };
+const NOTHING: Entry<never> = { settled: 0, answered: 0 };
 
 function entryOf<T>(ledger: Ledger<T>, key: string): Entry<T> {
   return ledger.entries[key] ?? NOTHING;
@@ -46,6 +52,25 @@ function withEntry<T>(ledger: Ledger<T>, key: string, entry: Entry<T>): Ledger<T
 
 function landed<T>(ledger: Ledger<T>, number: number): Ledger<T> {
   return { ...ledger, inFlight: ledger.inFlight.filter((read) => read.number !== number) };
+}
+
+/** Whether `data`, asked as `number`, replaces what `entry` has on record. */
+function replaces<T>(entry: Entry<T>, number: number, data: T, order?: Order<T>): boolean {
+  const shown = entry.value;
+  if (shown === undefined) return true;
+  const said = order ? order(data, shown.data) : 0;
+  return said > 0 || (said === 0 && number > shown.number);
+}
+
+/** `entry` with `data`, asked as `number`, on record: a failure of a read asked after it stays. */
+function applied<T>(entry: Entry<T>, number: number, data: T): Entry<T> {
+  const failure = entry.failure && entry.failure.number > number ? entry.failure : undefined;
+  return {
+    value: { number, data },
+    settled: Math.max(entry.settled, number),
+    ...(failure ? { failure } : {}),
+    answered: entry.answered,
+  };
 }
 
 /** A read of `key` starting, and the number it goes by. */
@@ -66,25 +91,17 @@ export function answered<T>(
   number: number,
   key: string,
   data: T,
-  newer?: Newer<T>,
+  order?: Order<T>,
 ): { ledger: Ledger<T>; apply: boolean } {
   const next = landed(ledger, number);
   const entry = entryOf(next, key);
-  const shown = entry.value;
-  const apply =
-    shown === undefined || (newer ? newer(data, shown.data) : number > shown.number);
+  const apply = replaces(entry, number, data, order);
   const answeredUpTo = Math.max(entry.answered, number);
-  if (!apply) return { ledger: withEntry(next, key, { ...entry, answered: answeredUpTo }), apply };
-  return {
-    ledger: withEntry(next, key, {
-      value: { number: Math.max(number, shown?.number ?? 0), data },
-      answered: answeredUpTo,
-    }),
-    apply,
-  };
+  const kept = apply ? applied(entry, number, data) : entry;
+  return { ledger: withEntry(next, key, { ...kept, answered: answeredUpTo }), apply };
 }
 
-/** A read of `key` failed: recorded only when it was asked after the value on record. */
+/** A read of `key` failed: recorded only when it was asked after every answer applied. */
 export function failed<T>(
   ledger: Ledger<T>,
   number: number,
@@ -93,7 +110,7 @@ export function failed<T>(
 ): { ledger: Ledger<T>; recorded: boolean } {
   const next = landed(ledger, number);
   const entry = entryOf(next, key);
-  const recorded = number > (entry.value?.number ?? 0);
+  const recorded = number > entry.settled;
   if (!recorded || (entry.failure && entry.failure.number > number)) {
     return { ledger: next, recorded };
   }
@@ -101,31 +118,34 @@ export function failed<T>(
 }
 
 /**
- * A write's own answer about `key`, made on the value on record: newer than every read asked before
- * it, unless the question is ordered by the server and the server says otherwise.
+ * A write's own answer about `key`, made on the value on record and numbered `sent`, the mark taken
+ * when the write was sent.
  */
 export function written<T>(
   ledger: Ledger<T>,
   key: string,
+  sent: number,
   change: (current: T | undefined) => T | undefined,
-  newer?: Newer<T>,
+  order?: Order<T>,
 ): { ledger: Ledger<T>; apply: boolean; data: T | undefined } {
   const entry = entryOf(ledger, key);
   const data = change(entry.value?.data);
-  const apply =
-    data !== undefined && (entry.value === undefined || !newer || newer(data, entry.value.data));
+  const apply = data !== undefined && replaces(entry, sent, data, order);
   if (!apply) return { ledger, apply, data };
-  const [next, number] = marked(ledger);
-  return {
-    ledger: withEntry(next, key, { value: { number, data }, answered: entry.answered }),
-    apply,
-    data,
-  };
+  return { ledger: withEntry(ledger, key, applied(entry, sent, data)), apply, data };
 }
 
 /** Whether a read of `key` is on its way. */
 export function pendingOn<T>(ledger: Ledger<T>, key: string | null): boolean {
   return ledger.inFlight.some((read) => read.key === key);
+}
+
+/** The number of the newest read of `key` on its way; 0 when none is. */
+export function pendingUpTo<T>(ledger: Ledger<T>, key: string | null): number {
+  return ledger.inFlight.reduce(
+    (newest, read) => (read.key === key ? Math.max(newest, read.number) : newest),
+    0,
+  );
 }
 
 /** The value on record for `key`, or null. */

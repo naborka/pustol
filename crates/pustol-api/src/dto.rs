@@ -6,7 +6,7 @@
 //! the same type the allocator uses. And the admin projection carries staff usernames, which must
 //! be structurally incapable of reaching a guest's response.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use pustol_db::bookings::Attendance;
 use pustol_db::bookings::Reseated;
 use pustol_db::evening::Evening;
@@ -14,9 +14,43 @@ use pustol_db::identity::{ReminderStanding, Viewer};
 use pustol_db::records::{BookingRecord, BookingSource, blocks_of, bookings_of};
 use pustol_domain::config::{DayHours, LIMITS, ValidConfig};
 use pustol_domain::slots::{PartOfDay, Slot, SlotAvailability};
-use pustol_domain::{BookingStatus, Interval, Rebooking, ServiceDay, TableId, minutes_within};
+use pustol_domain::{BookingStatus, Rebooking, ServiceDay, TableId, minutes_within};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::error::{ApiError, ApiResult};
+
+/// A date as a request wrote it, in a query or a body, read only through [`Self::day`].
+///
+/// Kept as the text that arrived, so that a date is refused one way wherever it is written and no
+/// handler can reach storage with one it cannot hold: `PostgreSQL` refused `-5000-01-01` as a server
+/// fault.
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+pub struct ServiceDate(String);
+
+impl ServiceDate {
+    /// The shift this date names, or `invalid_date` when it is not a date of [`in_calendar`].
+    pub fn day(&self) -> ApiResult<ServiceDay> {
+        self.0
+            .parse::<NaiveDate>()
+            .ok()
+            .filter(|date| in_calendar(*date))
+            .map(ServiceDay::new)
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "invalid_date",
+                    format!("{:?} is not a date in the years 1 to 9999", self.0),
+                )
+            })
+    }
+}
+
+/// Whether a request may name `date`: years 1 to 9999, the dates a person writes, all of which
+/// storage holds.
+pub fn in_calendar(date: NaiveDate) -> bool {
+    (1..=9999).contains(&date.year())
+}
 
 /// A booking as its own guest sees it: when, how many, and nothing about the furniture.
 #[derive(Debug, Serialize)]
@@ -29,8 +63,9 @@ pub struct GuestBooking {
     pub status: Status,
     /// Whether the window has begun, by the bar's clock rather than the phone's.
     pub started: bool,
-    /// Which new booking would replace this one, absent when none would. The app says so before
-    /// the guest taps, from the rule the booking endpoint then applies.
+    /// Which new booking would replace this one, absent when none would, or when only one tonight
+    /// would and tonight's grid has no arrival time left. The app offers «Перенести» exactly when this
+    /// is present, from the rule the booking endpoint then applies.
     pub rebooking_replaces: Option<RebookingView>,
 }
 
@@ -45,7 +80,7 @@ impl GuestBooking {
             party_size: record.booking.party_size,
             status: record.booking.status.into(),
             started: record.booking.has_started(now),
-            rebooking_replaces: record.booking.rebooking(now).map(Into::into),
+            rebooking_replaces: record.booking.rebooking_on_offer(config, now).map(Into::into),
         }
     }
 }
@@ -446,7 +481,10 @@ pub struct ShiftView {
     /// Where to draw the "now" line, absent for a shift that is not running.
     pub now_minutes: Option<i32>,
     /// The largest party the room could seat this minute, absent when none fits — and absent on
-    /// any shift but the one running, where "now" means nothing.
+    /// any shift but the one running, where "now" means nothing, and once that shift has ended.
+    ///
+    /// Asked over the window a party seated now would hold, the one the walk-in endpoint takes, so
+    /// the line never promises a table the door then refuses.
     ///
     /// Answered here, by the allocator, rather than inferred from a count of free tables: seven
     /// free two-tops do not seat the four people at the door, and a bartender who is sent to
@@ -513,7 +551,7 @@ impl ShiftView {
         });
         let now_minutes = is_running.then(|| minutes_within(day, now, config.timezone));
         let largest_party_seatable_now = is_running
-            .then(|| Interval::from_duration(now, config.turn_minutes).ok())
+            .then(|| config.walk_in_window(day, now))
             .flatten()
             .and_then(|window| {
                 pustol_domain::largest_party_seatable(
@@ -617,7 +655,7 @@ impl ReconciliationView {
 
 #[derive(Debug, Deserialize)]
 pub struct BookingRequest {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
     pub start_minutes: i32,
     pub party_size: i32,
     /// The bookings the app said this one replaces, which is what its «Перенести» promised. Refused
@@ -631,7 +669,7 @@ pub struct BookingRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct StaffBookingRequest {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
     pub start_minutes: i32,
     pub party_size: i32,
     pub guest_name: String,
@@ -642,7 +680,7 @@ pub struct StaffBookingRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct AvailabilityQuery {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
     pub party_size: i32,
     /// A booking being moved, which must not block its own time.
     #[serde(default)]
@@ -651,7 +689,7 @@ pub struct AvailabilityQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct ShiftQuery {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
 }
 
 #[derive(Debug, Deserialize)]
@@ -680,7 +718,7 @@ pub struct MoveRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct WalkInRequest {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
     pub party_size: i32,
     /// The table staff chose while looking at the room. Absent asks the room to choose, which is
     /// the same best fit every other booking gets.
@@ -709,20 +747,20 @@ pub struct MessageRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct BlockRequest {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
     pub table_ids: Vec<Uuid>,
     pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UnblockRequest {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
     pub table_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReconcileRequest {
-    pub service_date: NaiveDate,
+    pub service_date: ServiceDate,
 }
 
 // ---- settings ---------------------------------------------------------------------------------

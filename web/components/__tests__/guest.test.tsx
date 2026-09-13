@@ -118,16 +118,14 @@ describe("the guest's home screen", () => {
     expect(onCancel).toHaveBeenCalledWith(booking);
   });
 
-  it("offers a move exactly when a new booking would replace this one, and always a cancel", () => {
-    // The server says what a new booking would do to each; the card does not work it out again. A
-    // held no-show is replaced only by a booking on its own evening, so only while that evening
-    // still takes arrivals by the bar's clock.
+  it("offers a move exactly when the server says a new booking would replace this one, and always a cancel", () => {
+    // The server says what a new booking would do to each, by its own clock and its own slot grid;
+    // the card never works it out again. A held no-show with no arrival time left tonight is `null`.
     const cases: [string, GuestBooking, typeof bar, boolean][] = [
       ["a plan not yet begun", booking, bar, true],
       ["a no-show whose table is still held", heldNoShow, bar, true],
-      ["a held no-show after the last arrival", heldNoShow, { ...bar, now_minutes: 1_440 }, false],
-      ["a held no-show once the bar's day has moved on", heldNoShow, { ...bar, today: "2026-09-12" }, false],
-      ["a held no-show on an evening with no arrivals", heldNoShow, { ...bar, last_arrival_minutes: null }, false],
+      ["a held no-show after the last arrival, even by a clock that disagrees", heldNoShow, { ...bar, now_minutes: 1_440 }, true],
+      ["a held no-show whose evening has no time left", { ...heldNoShow, rebooking_replaces: null }, bar, false],
       ["a party at the table", seated, bar, false],
     ];
     for (const [name, held, clock, movable] of cases) {

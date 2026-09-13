@@ -27,7 +27,7 @@ use crate::dto::{
     AttendanceRequest, Availability, AvailabilityQuery, BlockRequest, CancelRequest, Hours,
     LimitsView, MessageRequest, MoveRequest, NoteRequest, ReconcileRequest, ReconciliationView,
     SavedSettingsView, SettingsTable, SettingsView, ShiftBooking, ShiftQuery, ShiftView,
-    StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest,
+    StaffBookingRequest, StaffView, UnblockRequest, WalkInRequest, in_calendar,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -55,7 +55,7 @@ async fn shift(
 ) -> ApiResult<Json<ShiftView>> {
     let evening = state
         .store
-        .evening(state.bar, ServiceDay::new(query.service_date), state.now())
+        .evening(state.bar, query.service_date.day()?, state.now())
         .await?;
     Ok(Json(ShiftView::of(&evening)))
 }
@@ -70,7 +70,7 @@ async fn availability(
     _staff: Staff,
     Query(query): Query<AvailabilityQuery>,
 ) -> ApiResult<Json<Availability>> {
-    let day = ServiceDay::new(query.service_date);
+    let day = query.service_date.day()?;
     let moving: Vec<BookingId> = query.ignoring.map(BookingId).into_iter().collect();
     let reading = state
         .store
@@ -96,6 +96,7 @@ async fn create_booking(
     _staff: Staff,
     JsonBody(request): JsonBody<StaffBookingRequest>,
 ) -> ApiResult<Json<BookedView>> {
+    let service_day = request.service_date.day()?;
     if request.guest_name.trim().is_empty() {
         return Err(ApiError::bad_request(
             "blank_guest_name",
@@ -107,7 +108,7 @@ async fn create_booking(
         .create_booking(
             &NewBooking {
                 bar: state.bar,
-                service_day: ServiceDay::new(request.service_date),
+                service_day,
                 start_minutes: request.start_minutes,
                 party_size: request.party_size,
                 channel: Channel::Staff {
@@ -249,7 +250,7 @@ async fn seat_walk_in(
         .store
         .seat_walk_in(
             state.bar,
-            ServiceDay::new(request.service_date),
+            request.service_date.day()?,
             request.party_size,
             request.table_id.map(TableId),
             state.now(),
@@ -322,20 +323,9 @@ async fn send_message(
     Path(id): Path<Uuid>,
     JsonBody(request): JsonBody<MessageRequest>,
 ) -> ApiResult<Json<MessageSent>> {
-    let records = state
-        .store
-        .bookings_by_id(state.bar, &[BookingId(id)])
-        .await?;
-    let record = records.first().ok_or_else(|| ApiError::not_found("booking"))?;
-    let Some(recipient) = record.telegram_user_id else {
-        return Err(ApiError::bad_request(
-            "no_bot_chat",
-            "this booking was taken at the door, so the bot has no chat with the guest",
-        ));
-    };
     state
         .store
-        .send_template(state.bar, BookingId(id), recipient, &request.text, state.now())
+        .send_template(state.bar, BookingId(id), &request.text, state.now())
         .await?;
     Ok(Json(MessageSent { queued: true }))
 }
@@ -353,6 +343,7 @@ async fn block(
     staff: Staff,
     JsonBody(request): JsonBody<BlockRequest>,
 ) -> ApiResult<Json<ClosedView>> {
+    let day = request.service_date.day()?;
     if request.reason.trim().is_empty() {
         return Err(ApiError::bad_request(
             "missing_block_reason",
@@ -364,7 +355,7 @@ async fn block(
         .store
         .block_tables(
             state.bar,
-            ServiceDay::new(request.service_date),
+            day,
             &tables,
             request.reason.trim(),
             Some(staff.viewer.account.id),
@@ -403,7 +394,7 @@ async fn unblock(
         .store
         .unblock_tables(
             state.bar,
-            ServiceDay::new(request.service_date),
+            request.service_date.day()?,
             &tables,
             state.now(),
         )
@@ -436,7 +427,7 @@ async fn reconcile_shift(
 ) -> ApiResult<Json<ReconciledView>> {
     let reconciled = state
         .store
-        .reconcile_shift(state.bar, ServiceDay::new(request.service_date), state.now())
+        .reconcile_shift(state.bar, request.service_date.day()?, state.now())
         .await?;
     Ok(Json(ReconciledView {
         reconciliation: ReconciliationView::of(&reconciled.reconciliation),
@@ -451,7 +442,7 @@ async fn settings(
 ) -> ApiResult<Json<SettingsView>> {
     let reading = state
         .store
-        .settings_on(state.bar, ServiceDay::new(query.service_date))
+        .settings_on(state.bar, query.service_date.day()?)
         .await?;
     Ok(Json(view_of(
         &reading.config,
@@ -468,14 +459,17 @@ async fn save_settings(
     Query(query): Query<ShiftQuery>,
     JsonBody(draft): JsonBody<Draft>,
 ) -> ApiResult<Json<SavedSettingsView>> {
+    let day = query.service_date.day()?;
+    // The version is an instant rather than a date, and it is a date in a request all the same.
+    if !in_calendar(draft.version.date_naive()) {
+        return Err(ApiError::bad_request(
+            "invalid_date",
+            "the settings version is not a moment in the years 1 to 9999",
+        ));
+    }
     let saved = state
         .store
-        .save_settings(
-            state.bar,
-            &draft,
-            ServiceDay::new(query.service_date),
-            state.now(),
-        )
+        .save_settings(state.bar, &draft, day, state.now())
         .await?;
     Ok(Json(SavedSettingsView {
         settings: view_of(

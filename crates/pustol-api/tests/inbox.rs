@@ -721,6 +721,117 @@ async fn an_update_taken_in_hand_but_not_answered_is_answered_on_the_next_fetch_
     );
 }
 
+/// A tap on a button, as `getUpdates` hands it over.
+fn tapped(update_id: i64, from: i64, data: &str) -> serde_json::Value {
+    serde_json::json!({
+        "update_id": update_id,
+        "callback_query": {
+            "id": format!("query-{update_id}"),
+            "from": { "id": from, "is_bot": false, "first_name": "Гость" },
+            "message": { "message_id": 55, "date": 0, "chat": { "id": from, "type": "private" } },
+            "chat_instance": "1",
+            "data": data
+        }
+    })
+}
+
+/// Makes every read of the bar's configuration fail, or work again.
+async fn set_timezone(app: &Harness, name: &str) {
+    sqlx::query("update bar set timezone = $2 where id = $1")
+        .bind(app.bar)
+        .bind(name)
+        .execute(app.store.pool())
+        .await
+        .expect("written");
+}
+
+async fn eventually(what: &str, mut done: impl AsyncFnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !done().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}"));
+}
+
+#[tokio::test]
+async fn a_stop_after_telegram_counted_ids_afresh_confirms_an_offset_lower_than_the_last_one() {
+    // The inbox last confirmed 901. Telegram now numbers from 5: update 5 is answered and update 6
+    // cannot be yet. Stopping must hand Telegram 6, or the next process answers 5 again.
+    let app = harness().await;
+    let (bot, stub) = stub_telegram().await;
+    stub.forgets_stale_offsets.store(true, Ordering::Relaxed);
+    stub.long_polls.store(true, Ordering::Relaxed);
+    stub.replace_updates(vec![said(900, 77, "привет")]).await;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(inbox(&app, bot).run(stopped));
+
+    eventually("update 900 is confirmed", async || {
+        stub.calls_to("getUpdates")
+            .await
+            .iter()
+            .any(|poll| poll["offset"] == 901)
+    })
+    .await;
+    set_timezone(&app, "Mars/Olympus").await;
+    stub.replace_updates(vec![
+        tapped(5, 78, "cancel_booking:not-a-booking"),
+        said(6, 79, "снова мы"),
+    ])
+    .await;
+    eventually("update 6 is taken in hand", async || {
+        sqlx::query_scalar::<_, bool>("select exists (select 1 from bot_update where update_id = 6)")
+            .fetch_one(app.store.pool())
+            .await
+            .expect("read")
+    })
+    .await;
+    stop.send(true).expect("the inbox is listening");
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the inbox stopped")
+        .expect("the inbox did not panic");
+
+    assert_eq!(stub.calls_to("answerCallbackQuery").await.len(), 1, "update 5 was answered");
+    let polls = stub.calls_to("getUpdates").await;
+    let last = polls.last().expect("polled");
+    assert_eq!(last["offset"], 6, "{polls:?}");
+    assert_eq!(last["timeout"], 0, "{polls:?}");
+}
+
+#[tokio::test]
+async fn an_update_that_cannot_be_answered_is_let_go_after_its_retries_and_the_next_is_answered() {
+    // The claim is fine; reading what the answer needs fails, every time. Trying for ever would leave
+    // every update behind it unanswered for as long as the fault lasts.
+    let app = harness().await;
+    let (bot, stub) = stub_telegram().await;
+    stub.replace_updates(vec![
+        said(7, 77, "привет"),
+        tapped(8, 78, "cancel_booking:not-a-booking"),
+    ])
+    .await;
+    set_timezone(&app, "Mars/Olympus").await;
+    let inbox = inbox(&app, bot);
+
+    // The first try and every retry but the last fail the poll; the last failure lets update 7 go.
+    for attempt in 1..=pustol_api::inbox::ANSWER_RETRIES {
+        let failed = inbox.poll_once(None).await;
+        assert!(failed.is_err(), "attempt {attempt}: {failed:?}");
+    }
+    let next = inbox
+        .poll_once(None)
+        .await
+        .expect("update 7 is let go, and update 8 answered");
+    assert_eq!(next, Some(9));
+    assert_eq!(stub.calls_to("answerCallbackQuery").await.len(), 1);
+    assert!(stub.answered().await.is_empty(), "update 7 was never answered");
+
+    assert_eq!(inbox.poll_once(next).await.expect("telegram answered"), Some(9));
+    let polls = stub.calls_to("getUpdates").await;
+    assert_eq!(polls.last().expect("polled")["offset"], 9, "update 7 is not fetched again");
+}
+
 #[tokio::test]
 async fn confirming_hands_telegram_the_offset_without_waiting() {
     let app = harness().await;

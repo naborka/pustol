@@ -43,6 +43,7 @@ pub struct StrandedBooking {
 /// What a settings save actually did.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SavedSettings {
+    /// The configuration as storage holds it once saved, read back before the save committed.
     pub config: ValidConfig,
     /// The version the settings are now, which the next proposal has to be made from.
     pub version: DateTime<Utc>,
@@ -161,23 +162,28 @@ impl Store {
         }
         let above_cap = parties_above_cap(&proposed, &live, now).len();
 
-        let version = write_bar(&mut transaction, bar, &proposed).await?;
+        write_bar(&mut transaction, bar, &proposed).await?;
         write_week(&mut transaction, bar, &proposed).await?;
         write_tables(&mut transaction, bar, &proposed).await?;
         write_staff(&mut transaction, bar, &proposed, now).await?;
 
+        // Read back, not answered from the proposal: storage decides the order of the roster and the
+        // room, and an answer in the order the screen sent them would describe this version
+        // differently from every reading of it after.
+        let saved = load_settings(&mut transaction, bar).await?;
+
         // The room may have shrunk. Anything that no longer fits goes through the same allocator
         // that seated it, and anything unseatable becomes an orphan for staff to settle.
         let reconciliation =
-            bookings::reconcile_from(&mut transaction, bar, &proposed, now).await?;
+            bookings::reconcile_from(&mut transaction, bar, &saved.config, now).await?;
 
-        let next_table_number = next_table_number(&proposed.tables);
+        let next_table_number = next_table_number(&saved.config.tables);
         let bookings = bookings::load_shift(&mut transaction, bar, day).await?;
         transaction.commit().await?;
 
         Ok(SavedSettings {
-            config: proposed,
-            version,
+            config: saved.config,
+            version: saved.version,
             reconciliation,
             above_cap,
             next_table_number,
@@ -345,18 +351,13 @@ async fn load_staff(connection: &mut PgConnection, bar: BarId) -> Result<Vec<Sta
         .collect()
 }
 
-async fn write_bar(
-    connection: &mut PgConnection,
-    bar: BarId,
-    config: &ValidConfig,
-) -> Result<DateTime<Utc>> {
-    let row = sqlx::query(
+async fn write_bar(connection: &mut PgConnection, bar: BarId, config: &ValidConfig) -> Result<()> {
+    sqlx::query(
         "update bar set name = $2, address = $3, timezone = $4, turn_minutes = $5,
                 slot_step_minutes = $6, max_party = $7, horizon_days = $8, remind_hours = $9,
                 grace_minutes = $10, zones = $11, message_templates = $12, cancel_reasons = $13,
                 contact = $14
-         where id = $1
-         returning updated_at",
+         where id = $1",
     )
     .bind(bar)
     .bind(&config.name)
@@ -378,9 +379,9 @@ async fn write_bar(
     .bind(&config.message_templates)
     .bind(&config.cancel_reasons)
     .bind(&config.contact)
-    .fetch_one(connection)
+    .execute(connection)
     .await?;
-    Ok(row.try_get("updated_at")?)
+    Ok(())
 }
 
 async fn write_week(

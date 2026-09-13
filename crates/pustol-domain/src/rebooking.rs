@@ -9,7 +9,9 @@
 use chrono::{DateTime, Utc};
 
 use crate::allocator::{Booking, BookingId, BookingStatus};
+use crate::config::ValidConfig;
 use crate::service_day::ServiceDay;
+use crate::slots::has_arrival_after;
 
 /// Which new booking of the same guest replaces a booking they hold.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +45,20 @@ impl Booking {
             | BookingStatus::Left
             | BookingStatus::Cancelled => None,
         }
+    }
+
+    /// What the guest's screen offers booking again to do to this booking at `now`, or `None` when
+    /// it offers nothing.
+    ///
+    /// [`Self::rebooking`], except for a no-show whose evening has no arrival time left: only a
+    /// booking on that evening takes its place, and none can be made. Offering «Перенести» there
+    /// would promise a move the grid has no time for.
+    #[must_use]
+    pub fn rebooking_on_offer(&self, config: &ValidConfig, now: DateTime<Utc>) -> Option<Rebooking> {
+        self.rebooking(now).filter(|rebooking| match rebooking {
+            Rebooking::AnyEvening => true,
+            Rebooking::SameEvening => has_arrival_after(config, self.service_day, now),
+        })
     }
 
     /// Whether this booking is a plan at `now`: confirmed, and its time not yet come.

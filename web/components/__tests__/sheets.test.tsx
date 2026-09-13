@@ -20,6 +20,7 @@ import {
   ChoiceSheet,
   DaySheet,
   ManualBookingSheet,
+  MessageSheet,
   MoveBookingSheet,
   TableSheet,
   WalkInSheet,
@@ -205,6 +206,35 @@ describe("what cannot be undone", () => {
     expect(screen.getByText("Ваш стол готов")).toBeDefined();
   });
 
+  it("offers nothing to send to a guest the bot cannot reach, and says what to do instead", async () => {
+    const onChoose = vi.fn();
+    const { rerender } = render(
+      <MessageSheet
+        open
+        booking={shiftBooking()}
+        templates={["Ваш стол готов"]}
+        onClose={noop}
+        onChoose={onChoose}
+      />,
+    );
+    await userEvent.click(screen.getByText("Ваш стол готов"));
+    expect(onChoose).toHaveBeenCalledWith("Ваш стол готов");
+    expect(screen.getByText(/Саша получит его сразу — отменить отправку нельзя/)).toBeDefined();
+
+    rerender(
+      <MessageSheet
+        open
+        booking={shiftBooking({ reachable_by_bot: false })}
+        templates={["Ваш стол готов"]}
+        onClose={noop}
+        onChoose={onChoose}
+      />,
+    );
+    expect(screen.queryByText("Ваш стол готов")).toBeNull();
+    expect(screen.queryByText(/Список пуст/)).toBeNull();
+    expect(screen.getByText("Бот не может написать гостю — позвоните или откройте чат.")).toBeDefined();
+  });
+
   it("says so when the bar has left the list empty, rather than showing an empty sheet", () => {
     render(
       <ChoiceSheet
@@ -322,6 +352,15 @@ describe("a party at the door", () => {
       ),
     ).toBeDefined();
     expect(screen.getByText("Посадить за стол 8")).toBeDefined();
+  });
+
+  it("says the table is held until closing when a turn would run past it, as the server holds it", () => {
+    walkInSheet(shift({ now_minutes: 1_500, bookings: [] }), 2);
+    expect(
+      within(screen.getByRole("dialog")).getByText(
+        "Сверху — самый маленький подходящий: большие столы остаются для больших компаний. Стол будет занят до 02:00.",
+      ),
+    ).toBeDefined();
   });
 
   it("seats them at the table staff chose rather than at the one it suggested", async () => {

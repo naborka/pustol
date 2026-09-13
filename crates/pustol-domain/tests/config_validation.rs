@@ -94,7 +94,7 @@ fn a_shift_exactly_one_turn_long_is_legal_and_offers_a_single_arrival() {
         },
     );
     assert_eq!(config.validate(), Vec::new());
-    assert_eq!(config.last_arrival_minutes(Weekday::Mon), Some(1020));
+    assert_eq!(force(config).last_arrival_minutes(Weekday::Mon), Some(1020));
 }
 
 #[test]
@@ -110,7 +110,71 @@ fn a_closed_day_is_not_asked_to_fit_a_turn() {
         },
     );
     assert_eq!(config.validate(), Vec::new());
-    assert_eq!(config.last_arrival_minutes(Weekday::Mon), None);
+    assert_eq!(force(config).last_arrival_minutes(Weekday::Mon), None);
+}
+
+#[test]
+fn hours_and_turns_at_the_ends_of_the_integers_are_refused_rather_than_overflowed() {
+    // A settings save carries whatever integers its body holds. Subtracting them in `i32` panicked
+    // in a debug build and wrapped round in a release one.
+    let cases = [
+        (600, i32::MIN, 1),
+        (i32::MAX, i32::MIN, 120),
+        (600, i32::MAX, i32::MIN),
+        (i32::MIN, i32::MAX, i32::MAX),
+    ];
+    for (open_minutes, close_minutes, turn_minutes) in cases {
+        let mut config = default_config();
+        config.turn_minutes = turn_minutes;
+        config.week = config.week.with(
+            Weekday::Fri,
+            DayHours {
+                open_minutes,
+                close_minutes,
+                closed: false,
+            },
+        );
+        let errors = config.validate();
+        assert!(
+            errors.contains(&ConfigError::CloseOutOfRange {
+                weekday: Weekday::Fri,
+                minutes: close_minutes,
+            }),
+            "{errors:?}"
+        );
+        assert_eq!(
+            errors.iter().any(|error| matches!(
+                error,
+                ConfigError::SettingOutOfRange {
+                    setting: Setting::TurnMinutes,
+                    ..
+                }
+            )),
+            !LIMITS.turn_minutes.contains(turn_minutes),
+            "{errors:?}"
+        );
+    }
+
+    let mut config = default_config();
+    config.week = config.week.with(
+        Weekday::Fri,
+        DayHours {
+            open_minutes: i32::MAX,
+            close_minutes: i32::MIN,
+            closed: false,
+        },
+    );
+    assert!(
+        config
+            .validate()
+            .contains(&ConfigError::ShiftShorterThanTurn {
+                weekday: Weekday::Fri,
+                shift_minutes: i64::from(i32::MIN) - i64::from(i32::MAX),
+                turn_minutes: 120,
+            }),
+        "{:?}",
+        config.validate()
+    );
 }
 
 #[test]
@@ -607,14 +671,14 @@ fn lowering_the_party_cap_reports_the_bookings_it_would_have_refused() {
 fn the_latest_arrival_is_always_closing_time_minus_one_turn() {
     let mut config = default_config();
     config.turn_minutes = 90;
-    assert_eq!(config.last_arrival_minutes(Weekday::Thu), Some(1470));
+    assert_eq!(force(config.clone()).last_arrival_minutes(Weekday::Thu), Some(1470));
     config.turn_minutes = 240;
-    assert_eq!(config.last_arrival_minutes(Weekday::Thu), Some(1320));
+    assert_eq!(force(config).last_arrival_minutes(Weekday::Thu), Some(1320));
 }
 
 #[test]
 fn the_bar_reports_the_shape_of_its_room() {
-    let config = default_config();
+    let config = force(default_config());
     assert_eq!(config.largest_table_seats(), 6);
     assert_eq!(config.total_seats(), 4 * 2 + 6 * 4 + 3 * 6 + 4 + 6);
     assert_eq!(config.timezone, BELGRADE);
@@ -790,6 +854,78 @@ fn the_shift_stops_running_at_the_very_moment_its_last_sitting_is_over() {
             "{close_minutes} on {day:?}"
         );
     }
+}
+
+#[test]
+fn on_the_night_the_clocks_skip_the_last_arrival_the_shift_outlasts_its_last_sitting() {
+    // Saturday 28 March 2026 closes at 03:00, with one-hour sittings every half hour. The latest
+    // arrival closing allows, 02:00, never happens: at 01:00Z the clocks jump from 02:00 to 03:00.
+    // The grid's last sitting arrives at 01:30 and is over at 01:30Z; the shift runs a turn past the
+    // moment the clocks jumped, to 02:00Z, and no sitting the grid offers runs past that.
+    let mut draft = default_config();
+    draft.turn_minutes = 60;
+    draft.week = WeekSchedule::uniform(DayHours {
+        open_minutes: 600,
+        close_minutes: 1620,
+        closed: false,
+    });
+    let config = force(draft);
+    let saturday = date(2026, 3, 28);
+    let last = booking(1, saturday, 1530, 2, None, 60);
+
+    assert_eq!(last.window.end(), utc(2026, 3, 29, 1, 30));
+    assert_eq!(config.current_service_day(utc(2026, 3, 29, 1, 45)), saturday);
+    assert_eq!(
+        config.current_service_day(utc(2026, 3, 29, 2, 0)),
+        date(2026, 3, 29)
+    );
+}
+
+#[test]
+fn a_party_seated_now_holds_its_table_no_later_than_its_shift_runs() {
+    // Thursday closes at 02:00 with two-hour sittings, so it stops running at midnight UTC. A party
+    // seated at half past one holds its table until then: holding it to half past three would run it
+    // into Friday, whose screen reads only Friday's bookings and would call the table free.
+    let config = force(default_config());
+    let friday = thursday().checked_add_days(1).expect("in range");
+
+    let evening = config
+        .walk_in_window(thursday(), utc(2026, 7, 30, 18, 0))
+        .expect("running");
+    assert_eq!(evening.start(), utc(2026, 7, 30, 18, 0));
+    assert_eq!(evening.end(), utc(2026, 7, 30, 20, 0), "a whole turn while the shift has one");
+
+    let late = config
+        .walk_in_window(thursday(), utc(2026, 7, 30, 23, 30))
+        .expect("still running");
+    assert_eq!(late.start(), utc(2026, 7, 30, 23, 30));
+    assert_eq!(late.end(), utc(2026, 7, 31, 0, 0));
+
+    let after = utc(2026, 7, 31, 0, 30);
+    assert_eq!(config.current_service_day(after), friday);
+    assert_eq!(config.walk_in_window(thursday(), after), None, "Thursday is over");
+    assert_eq!(
+        config
+            .walk_in_window(friday, after)
+            .map(pustol_domain::Interval::end),
+        Some(utc(2026, 7, 31, 2, 30))
+    );
+}
+
+#[test]
+fn nobody_is_seated_now_on_a_day_off() {
+    let mut draft = default_config();
+    draft.week = draft.week.with(
+        Weekday::Thu,
+        DayHours {
+            closed: true,
+            ..DEFAULT_HOURS
+        },
+    );
+    assert_eq!(
+        force(draft).walk_in_window(thursday(), utc(2026, 7, 30, 18, 0)),
+        None
+    );
 }
 
 #[test]

@@ -194,10 +194,11 @@ export function settingsView(overrides: Partial<SettingsView> = {}): SettingsVie
     grace_minutes: 15,
     message_templates: ["Ваш стол готов", "Опаздываете?", "Мы рядом", "Ждём вас"],
     cancel_reasons: ["Дождь", "Авария", "Частное мероприятие", "Технические проблемы"],
+    // In the server's own order: by username, whatever case it was typed in.
     staff: [
+      { username: "marina", bound: false },
       { username: "nastya", bound: true },
       { username: "pavel", bound: false },
-      { username: "marina", bound: false },
     ],
     next_table_number: 9,
     limits: LIMITS,

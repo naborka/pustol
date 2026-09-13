@@ -10,7 +10,7 @@
  */
 
 import { draftOf, type SettingsDraft, type SettingsView } from "./api";
-import { copyDraft, differs, edited, type Edit } from "./settingsRules";
+import { copyDraft, differs, edited, trimmed, type Edit } from "./settingsRules";
 
 export interface SettingsPair {
   settings: SettingsView;
@@ -83,26 +83,84 @@ function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function usernameKey(member: { username: string }): string {
+  return member.username.toLowerCase();
+}
+
 /**
- * Three-way, one top-level field at a time: a field only I changed is mine, a field only they
- * changed is theirs, and a field we both changed differently is mine and named as a conflict.
+ * A proposal as the server stores it and reads it back: `Draft::resolve` in `pustol-domain`, then
+ * the order storage lists it in. Advisory, like `settingsRules`: it only decides whether two
+ * proposals mean the same, so the manager's own save, trimmed or reordered by the server, is never
+ * taken for somebody else's.
+ *
+ * Tables go by number: one these settings have keeps its number, any other takes the next in the
+ * order the proposal lists it. Staff go by username, whatever its case.
+ */
+export function asStored(draft: SettingsDraft, settings: SettingsView): SettingsDraft {
+  let next = settings.next_table_number;
+  const numbered = draft.tables.map((table) => ({
+    table,
+    number: settings.tables.find((known) => known.id === table.id)?.number ?? next++,
+  }));
+  return {
+    ...copyDraft(draft),
+    name: trimmed(draft.name),
+    address: trimmed(draft.address),
+    contact: trimmed(draft.contact),
+    tables: numbered
+      .sort((left, right) => left.number - right.number)
+      .map(({ table }) => ({ ...table })),
+    message_templates: draft.message_templates.map((text) => trimmed(text)),
+    cancel_reasons: draft.cancel_reasons.map((text) => trimmed(text)),
+    staff: draft.staff
+      .map((member) => ({ ...member }))
+      .sort((left, right) => {
+        const [a, b] = [usernameKey(left), usernameKey(right)];
+        return a < b ? -1 : a > b ? 1 : 0;
+      }),
+  };
+}
+
+/**
+ * Three-way, one top-level field at a time, each compared as the server stores it: a field only I
+ * changed is mine, a field only they changed, or one we both made the same, is theirs, and a field
+ * we both changed differently is mine and named as a conflict.
  */
 export function mergeDrafts(
-  base: SettingsDraft,
+  shown: SettingsView,
   mine: SettingsDraft,
-  theirs: SettingsDraft,
+  next: SettingsView,
 ): { draft: SettingsDraft; conflicts: DraftField[] } {
+  const theirs = draftOf(next);
+  const base = asStored(draftOf(shown), shown);
+  const mineStored = asStored(mine, shown);
+  const theirsStored = asStored(theirs, next);
   const draft = copyDraft(theirs);
   const kept = copyDraft(mine);
   const conflicts: DraftField[] = [];
   for (const field of FIELDS) {
-    if (same(mine[field], base[field])) continue;
-    Object.assign(draft, { [field]: kept[field] });
-    if (!same(theirs[field], base[field]) && !same(mine[field], theirs[field])) {
-      conflicts.push(field);
+    if (same(mineStored[field], base[field]) || same(mineStored[field], theirsStored[field])) {
+      continue;
     }
+    Object.assign(draft, { [field]: kept[field] });
+    if (!same(theirsStored[field], base[field])) conflicts.push(field);
   }
   return { draft, conflicts };
+}
+
+/**
+ * Settings of one version are the same settings whichever evening they were read for, and now the
+ * server lists them in one order: only the evening and its per-table counts are news.
+ */
+function withEveningOf(shown: SettingsView, next: SettingsView): SettingsView {
+  return {
+    ...shown,
+    service_date: next.service_date,
+    tables: shown.tables.map((table) => ({
+      ...table,
+      bookings_today: next.tables.find((each) => each.id === table.id)?.bookings_today ?? 0,
+    })),
+  };
 }
 
 /** Settings read from the server, folded into what is on screen, and what to tell the manager. */
@@ -113,10 +171,12 @@ export function received(
   if (current === null) return { pair: fresh(next), notice: null };
   const newer = compareVersions(next.version, current.settings.version);
   if (newer < 0) return { pair: current, notice: null };
+  if (newer === 0) {
+    return { pair: { ...current, settings: withEveningOf(current.settings, next) }, notice: null };
+  }
   if (!isDirty(current)) return { pair: fresh(next), notice: null };
-  if (newer === 0) return { pair: { ...current, settings: next }, notice: null };
 
-  const { draft, conflicts } = mergeDrafts(draftOf(current.settings), current.draft, draftOf(next));
+  const { draft, conflicts } = mergeDrafts(current.settings, current.draft, next);
   const pair = { settings: next, draft };
   if (conflicts.length > 0) {
     const fields = conflicts.map((field) => FIELD_NAME[field]).join(", ");

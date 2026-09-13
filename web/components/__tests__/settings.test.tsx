@@ -48,7 +48,7 @@ describe("the index", () => {
     expect(
       screen.getByText("4 и 4 — персонал выбирает только из них"),
     ).toBeDefined();
-    expect(screen.getByText("@nastya · @pavel · @marina")).toBeDefined();
+    expect(screen.getByText("@marina · @nastya · @pavel")).toBeDefined();
   });
 
   it("says a day off is a day off", () => {

@@ -45,7 +45,7 @@ import {
   type Refusal,
 } from "@/lib/outcomes";
 import { edited, firstReason, type Edit } from "@/lib/settingsRules";
-import type { Newer } from "@/lib/reads";
+import type { Order } from "@/lib/reads";
 import { isDirty, received, savedInto, type SettingsPair } from "@/lib/settingsSync";
 import {
   NO_SHEET,
@@ -56,7 +56,7 @@ import {
   type SheetContent,
 } from "@/lib/sheet";
 import { credentials, haptics, openBotChat, openContact, webApp } from "@/lib/telegram";
-import { TIMING } from "@/lib/tokens";
+import { SPACE, TIMING } from "@/lib/tokens";
 import { failureOf, useRead } from "@/lib/useRead";
 import { ShiftActions, ShiftScreen, type ShiftPane } from "@/components/AdminShift";
 import { AppShell, InsetFrame, type StaffTab } from "@/components/AppChrome";
@@ -75,16 +75,25 @@ import { useInsets } from "@/components/ThemeProvider";
 import {
   BookingSheet,
   CancelReasonSheet,
-  ChoiceSheet,
   ConflictSheet,
   DaySheet,
   GuestCancelSheet,
   ManualBookingSheet,
+  MessageSheet,
   MoveBookingSheet,
   TableSheet,
   WalkInSheet,
 } from "@/components/Sheets";
-import { Failure, MainButton, Spinner, Toast, type ToastMessage } from "@/components/ui";
+import {
+  Card,
+  Failure,
+  MainButton,
+  Note,
+  Spinner,
+  StaleNotice,
+  Toast,
+  type ToastMessage,
+} from "@/components/ui";
 
 type Tab = StaffTab;
 type GuestScreen = "home" | "book" | "done";
@@ -118,8 +127,12 @@ const SESSION = "session";
  */
 const SETTINGS = "settings";
 
-/** Rooms are ordered by the server's version, not by when they were asked or when they arrived. */
-const newerRoom: Newer<ShiftView> = (next, shown) => next.version >= shown.version;
+/**
+ * Rooms are ordered by the server's version, not by when they arrived. The version does not move
+ * with the clock or with whether the bot can reach a guest, so two rooms of one version go by when
+ * they were asked.
+ */
+const roomOrder: Order<ShiftView> = (next, shown) => next.version - shown.version;
 
 /** A read whose answers are only drawn, never folded into anything. */
 const nothing = () => {};
@@ -203,10 +216,12 @@ export default function Page() {
   const [settingsSection, setSettingsSection] = useState<Section | null>(null);
   const [editedWeekday, setEditedWeekday] = useState(1);
   const [saving, changeSaving, savingNow] = useSynced(false);
-  // A settings read somebody asked for while a save was on its way, made once it has answered.
-  const settingsWanted = useRef<"quiet" | "asked" | null>(null);
+  // Whether somebody asked for the settings while a save was on its way, to read once it answered.
+  const settingsWanted = useRef(false);
   // Why the last save was refused, until the next edit or save.
   const [refusal, setRefusal] = useState<Refusal | null>(null);
+  // What a read folded into the edit, said on the settings screen until the next edit or save.
+  const [folded, setFolded] = useState<string | null>(null);
 
   const insets = useInsets();
   const [sheet, setSheet] = useState<OpenSheet>(NO_SHEET);
@@ -250,18 +265,29 @@ export default function Page() {
   // ---- reads ------------------------------------------------------------------------------------
 
   /**
-   * Turns a failure into words for whoever is looking at it, when it is worth any.
-   *
-   * A failure only relaunching can fix is always recorded, however quietly it came: the session is
-   * dead, and the screen says so until a session read answers after it.
+   * Whether a failure ended the session, which is then recorded however it came: the screen says so
+   * until a session read asked after it answers.
    */
-  const reportRef = useRef<(failure: ApiFailure, audience: "guest" | "staff", tell?: boolean) => void>(
-    () => {},
-  );
+  const endsSessionRef = useRef<(failure: ApiFailure) => boolean>(() => false);
+  const endsSession = useCallback((failure: ApiFailure) => endsSessionRef.current(failure), []);
+
+  /**
+   * A failed read says nothing of its own. Its question, if still on screen, shows it where its
+   * answer is drawn — a failure card, or a notice over the answer before — and only an ended session
+   * has a screen of its own.
+   */
+  const readFailed = (failure: ApiFailure) => {
+    endsSession(failure);
+  };
+
+  /** Turns a failed action into words for whoever took it. */
   const report = useCallback(
-    (failure: ApiFailure, audience: "guest" | "staff", tellIt = true) =>
-      reportRef.current(failure, audience, tellIt),
-    [],
+    (failure: ApiFailure, audience: "guest" | "staff") => {
+      if (endsSession(failure)) return;
+      haptics.error();
+      tell(messageFor(failure, audience));
+    },
+    [endsSession, tell],
   );
 
   const sessionRead = useRead<Session>(
@@ -271,27 +297,21 @@ export default function Page() {
       setServiceDate((current) => current ?? next.bookable_days[0] ?? next.bar.today);
       setShiftDate((current) => current ?? next.bar.today);
     },
-    (failure, { tell: tellIt, number }) => {
-      if (!needsRelaunch(failure)) {
-        setEnded((current) => (current && number > current.at ? { ...current, failure } : current));
-      }
-      report(failure, "guest", tellIt);
+    (failure, number) => {
+      if (endsSession(failure)) return;
+      setEnded((current) => (current && number > current.at ? { ...current, failure } : current));
     },
   );
   const { load: loadSession, put: putSession, mark: markSession } = sessionRead;
   const session = sessionRead.value;
 
   useEffect(() => {
-    reportRef.current = (failure, audience, tellIt = true) => {
-      if (needsRelaunch(failure)) {
-        setEnded({ at: markSession(), failure });
-        return;
-      }
-      if (!tellIt) return;
-      haptics.error();
-      tell(messageFor(failure, audience));
+    endsSessionRef.current = (failure) => {
+      if (!needsRelaunch(failure)) return false;
+      setEnded({ at: markSession(), failure });
+      return true;
     };
-  }, [markSession, tell]);
+  }, [markSession]);
 
   /** Puts what a guest write answered on screen at once; a reread afterwards only freshens it. */
   const amendSession = (change: (current: Session) => Session) =>
@@ -307,7 +327,7 @@ export default function Page() {
   const daysRead = useRead<DayOffer[]>(
     api ? { key: String(partySize), ask: async () => (await api.days(partySize)).days } : null,
     nothing,
-    (failure, { tell: tellIt }) => report(failure, "guest", tellIt),
+    readFailed,
   );
   const loadDays = daysRead.load;
 
@@ -326,7 +346,7 @@ export default function Page() {
         }
       : null,
     nothing,
-    (failure, { tell: tellIt }) => report(failure, "guest", tellIt),
+    readFailed,
   );
   const loadTimes = timesRead.load;
 
@@ -341,10 +361,10 @@ export default function Page() {
     (room, { onScreen }) => {
       if (onScreen) setSheet((current) => refreshedSheet(current, room));
     },
-    (failure, { tell: tellIt }) => report(failure, "staff", tellIt),
-    newerRoom,
+    readFailed,
+    roomOrder,
   );
-  const { load: loadShift, put: putShift } = shiftRead;
+  const { load: loadShift, put: putShift, mark: markShift } = shiftRead;
 
   useEffect(() => {
     if (tab !== "shift" || shiftDate === null) return;
@@ -353,14 +373,14 @@ export default function Page() {
 
   useWhileVisible(
     useMemo(
-      () => (tab === "shift" && shiftDate !== null ? () => void loadShift(true) : null),
+      () => (tab === "shift" && shiftDate !== null ? () => void loadShift() : null),
       [tab, shiftDate, loadShift],
     ),
     SHIFT_REFRESH_MS,
   );
   useWhileVisible(
     useMemo(
-      () => (tab === "client" && screen === "home" ? () => void loadSession(true) : null),
+      () => (tab === "client" && screen === "home" ? () => void loadSession() : null),
       [tab, screen, loadSession],
     ),
     HOME_REFRESH_MS,
@@ -368,33 +388,31 @@ export default function Page() {
 
   // Folded into the edit at the moment it lands, so nothing typed while it loaded is lost. A read
   // landing while a save is on its way may or may not have seen that save, so it is dropped and
-  // asked again once the save has answered.
+  // asked again once the save has answered. What it did to the edit waits on the settings screen:
+  // it may land while the shift is on screen, where a toast would be gone before anybody came back.
   const settingsRead = useRead<SettingsView>(
     api && shiftDate !== null ? { key: SETTINGS, ask: () => api.settings(shiftDate) } : null,
     (next) => {
       if (savingNow.current) {
-        settingsWanted.current = settingsWanted.current ?? "quiet";
+        settingsWanted.current = true;
         return;
       }
       const outcome = received(pairNow.current, next);
       changePair(() => outcome.pair);
-      if (outcome.notice) tell(outcome.notice);
+      if (outcome.notice) setFolded(outcome.notice);
     },
-    (failure, { tell: tellIt }) => report(failure, "staff", tellIt),
+    readFailed,
   );
   const readSettings = settingsRead.load;
 
   /** Reads the settings now, or once the save on its way has answered. */
-  const loadSettings = useCallback(
-    (quiet = false) => {
-      if (!savingNow.current) {
-        void readSettings(quiet);
-        return;
-      }
-      settingsWanted.current = quiet && settingsWanted.current !== "asked" ? "quiet" : "asked";
-    },
-    [readSettings, savingNow],
-  );
+  const loadSettings = useCallback(() => {
+    if (!savingNow.current) {
+      void readSettings();
+      return;
+    }
+    settingsWanted.current = true;
+  }, [readSettings, savingNow]);
 
   const settingsDirty = pair !== null && isDirty(pair);
 
@@ -414,6 +432,7 @@ export default function Page() {
     (change: Edit) => {
       editsDuringSave.current?.push(change);
       setRefusal(null);
+      setFolded(null);
       changePair((current) => current && { ...current, draft: edited(current.draft, change) });
     },
     [changePair],
@@ -422,6 +441,7 @@ export default function Page() {
   const revertDraft = useCallback(() => {
     if (editsDuringSave.current) editsDuringSave.current = [];
     setRefusal(null);
+    setFolded(null);
     changePair((current) => current && { ...current, draft: draftOf(current.settings) });
   }, [changePair]);
 
@@ -444,7 +464,7 @@ export default function Page() {
         }
       : null,
     nothing,
-    (failure, { tell: tellIt }) => report(failure, "staff", tellIt),
+    readFailed,
   );
   const loadStaffTimes = staffTimesRead.load;
 
@@ -512,8 +532,10 @@ export default function Page() {
     );
   }
   const dead = ended !== null && sessionRead.answeredUpTo < ended.at ? ended : null;
+  // Only a session read asked after the end can bring the app back, so only such a read may spin
+  // over the screen that says so.
   const blocking = dead
-    ? sessionRead.pending
+    ? sessionRead.pendingUpTo > dead.at
       ? null
       : dead.failure
     : session === null
@@ -553,9 +575,10 @@ export default function Page() {
   const isToday = shiftDate === today;
   // ISO dates compare as strings. An evening that is over is read, not written into.
   const isPast = shiftDate < today;
-  // An answer to another question must not stand in for one that failed.
-  const days = daysRead.failure ? null : daysRead.shown;
-  const times = timesRead.failure ? null : timesRead.shown;
+  // An answer to another question must not stand in for one that failed; this question's own
+  // answer before still can, with a word that it could not be read again.
+  const days = daysRead.failure ? daysRead.value : daysRead.shown;
+  const times = timesRead.failure ? timesRead.value : timesRead.shown;
   const shownStaffTimes = staffTimesRead.failure ? null : staffTimesRead.shown;
 
   // ---- guest actions --------------------------------------------------------------------------
@@ -585,15 +608,15 @@ export default function Page() {
         bookings: heldAfter(current.bookings, answer.replaced, answer.booking),
       }));
       setScreen("done");
-      void loadSession(true);
+      void loadSession();
     } catch (error) {
       const failure = failureOf(error);
       report(failure, "guest");
       if (failure.code === "booking_changed") {
         // What the guest holds changed since the button was drawn. The picker stays as it is; the
         // button redraws from what they hold now, for them to look at and press again.
-        void loadSession(true);
-        void loadDays(true);
+        void loadSession();
+        void loadDays();
         return;
       }
       // The refusal is usually "somebody just took it", so the picker is refreshed rather than left
@@ -616,7 +639,7 @@ export default function Page() {
         bookings: heldAfter(current.bookings, [was.id], null),
       }));
       tell("Бронь отменена. Стол снова свободен.");
-      void loadSession(true);
+      void loadSession();
     } catch (error) {
       report(failureOf(error), "guest");
     }
@@ -626,7 +649,7 @@ export default function Page() {
     try {
       const reminders = await api.optInToReminders();
       amendSession((current) => ({ ...current, reminders }));
-      void loadSession(true);
+      void loadSession();
       openBotChat(process.env.NEXT_PUBLIC_BOT_USERNAME ?? "");
       tell(`Напомним за ${fmt.hoursWord(bar.remind_hours)} до брони.`);
     } catch (error) {
@@ -638,7 +661,7 @@ export default function Page() {
     try {
       const reminders = await api.dismissReminderPrompt();
       amendSession((current) => ({ ...current, reminders }));
-      void loadSession(true);
+      void loadSession();
     } catch (error) {
       report(failureOf(error), "guest");
     }
@@ -668,13 +691,17 @@ export default function Page() {
   // ---- staff actions -------------------------------------------------------------------------
 
   /**
-   * Puts the evening a staff action answered with on screen, if it is still the evening on screen.
+   * Sends a staff write and puts the evening it answered with on record for that evening.
    *
    * The answer is the room after the write, every booking in it, so a party the server reseated is
-   * shown where it now sits, and a sheet on a booking that is gone closes.
+   * shown where it now sits, and a sheet on a booking that is gone closes. It is numbered when the
+   * write is sent: a room of the same version read after that is fresher, one read before is not.
    */
-  const showAnswered = (room: ShiftView) => {
-    putShift(room.service_date, () => room);
+  const writeShift = async <A extends { shift: ShiftView }>(send: () => Promise<A>): Promise<A> => {
+    const sent = markShift();
+    const answer = await send();
+    putShift(answer.shift.service_date, () => answer.shift, sent);
+    return answer;
   };
 
   /**
@@ -687,9 +714,8 @@ export default function Page() {
   const setAttendance = exclusive(
     async (booking: ShiftBooking, attendance: Attendance, undoable = true) => {
       try {
-        const answer = await api.setAttendance(booking.id, attendance);
+        const answer = await writeShift(() => api.setAttendance(booking.id, attendance));
         haptics.success();
-        showAnswered(answer.shift);
         say({
           text: attendanceOutcome(answer.booking, attendance),
           ...(undoable && answer.previous !== attendance
@@ -712,7 +738,7 @@ export default function Page() {
 
   const setNote = exclusive(async (booking: ShiftBooking, note: string | null) => {
     try {
-      showAnswered((await api.setNote(booking.id, note)).shift);
+      await writeShift(() => api.setNote(booking.id, note));
     } catch (error) {
       report(failureOf(error), "staff");
     }
@@ -721,12 +747,11 @@ export default function Page() {
   const cancelAsStaff = exclusive(
     async (from: OpenSheet, booking: ShiftBooking, reason: string) => {
       try {
-        const answer = await api.cancelAsStaff(booking.id, reason);
+        const answer = await writeShift(() => api.cancelAsStaff(booking.id, reason));
         const told = answer.guest_notified
           ? `${booking.guest_name} получил сообщение с причиной.`
           : `${booking.guest_name} не получит сообщения — предупредите его сами.`;
         closeIfStill(from);
-        showAnswered(answer.shift);
         say({
           text: [`Бронь отменена. ${told}`, reconciliationReport(answer.reconciliation)]
             .filter(Boolean)
@@ -744,7 +769,10 @@ export default function Page() {
       closeIfStill(from);
       tell(`Отправлено ${booking.guest_name}: «${text}»`);
     } catch (error) {
-      report(failureOf(error), "staff");
+      const failure = failureOf(error);
+      report(failure, "staff");
+      // The room on screen said the bot could reach the guest. Read again, it says it cannot.
+      if (failure.code === "no_bot_chat") void loadShift();
     }
   });
 
@@ -769,8 +797,9 @@ export default function Page() {
     const moved: Reconciliation = { moved: [], orphaned: [] };
     try {
       for (const closure of closures) {
-        const answer = await api.blockTables(shiftDate, closure.tableIds, closure.reason);
-        showAnswered(answer.shift);
+        const answer = await writeShift(() =>
+          api.blockTables(shiftDate, closure.tableIds, closure.reason),
+        );
         closed.push(...answer.closed);
         moved.moved.push(...answer.reconciliation.moved);
         moved.orphaned.push(...answer.reconciliation.orphaned);
@@ -796,8 +825,7 @@ export default function Page() {
   const openTables = exclusive(async (from: OpenSheet, tableIds: string[], number: number) => {
     closeIfStill(from);
     try {
-      const answer = await api.unblockTables(shiftDate, tableIds);
-      showAnswered(answer.shift);
+      const answer = await writeShift(() => api.unblockTables(shiftDate, tableIds));
       const text = rearranged(
         answer.reconciliation,
         `Стол ${number} снова в подборе.`,
@@ -817,8 +845,7 @@ export default function Page() {
   const findTables = exclusive(async (from: OpenSheet) => {
     closeIfStill(from);
     try {
-      const answer = await api.reconcileShift(shiftDate);
-      showAnswered(answer.shift);
+      const answer = await writeShift(() => api.reconcileShift(shiftDate));
       tell(
         rearranged(
           answer.reconciliation,
@@ -833,35 +860,30 @@ export default function Page() {
 
   const seatWalkIn = exclusive(async (from: OpenSheet, tableId: string) => {
     try {
-      const answer = await api.seatWalkIn(shiftDate, walkInParty, tableId);
+      const answer = await writeShift(() => api.seatWalkIn(shiftDate, walkInParty, tableId));
       haptics.success();
       closeIfStill(from);
-      showAnswered(answer.shift);
       tell(`Посадили за стол ${answer.booking.table_number}.`);
     } catch (error) {
       report(failureOf(error), "staff");
       // A refusal carries no room, and it usually means the room on screen is behind.
-      void loadShift(true);
+      void loadShift();
     }
   });
 
   const createManualBooking = exclusive(async (from: OpenSheet, tableId: string) => {
     const sent = manual;
-    if (sent.minutes === null) return;
+    const minutes = sent.minutes;
+    if (minutes === null) return;
     try {
-      const answer = await api.createStaffBooking(
-        shiftDate,
-        sent.minutes,
-        sent.partySize,
-        sent.name,
-        tableId,
+      const answer = await writeShift(() =>
+        api.createStaffBooking(shiftDate, minutes, sent.partySize, sent.name, tableId),
       );
       // A form already holding the next guest is not this one's to clear.
       setManual((current) =>
         JSON.stringify(current) === JSON.stringify(sent) ? EMPTY_MANUAL : current,
       );
       closeIfStill(from);
-      showAnswered(answer.shift);
       const created = answer.booking;
       tell(
         `${created.guest_name} записан на ${fmt.time(created.start_minutes)}, стол ${created.table_number}.`,
@@ -882,10 +904,9 @@ export default function Page() {
       party: number,
     ) => {
       try {
-        const answer = await api.moveBooking(booking.id, minutes, tableId, party);
+        const answer = await writeShift(() => api.moveBooking(booking.id, minutes, tableId, party));
         haptics.success();
         closeIfStill(from);
-        showAnswered(answer.shift);
         const now = answer.booking;
         const where = `стол ${now.table_number}`;
         const told =
@@ -902,7 +923,7 @@ export default function Page() {
         });
       } catch (error) {
         report(failureOf(error), "staff");
-        void loadShift(true);
+        void loadShift();
       }
     },
   );
@@ -912,6 +933,7 @@ export default function Page() {
     if (!sent) return;
     const openedBefore = openings.current;
     setRefusal(null);
+    setFolded(null);
     changeSaving(() => true);
     editsDuringSave.current = [];
     try {
@@ -923,7 +945,7 @@ export default function Page() {
         parts.push(`${fmt.bookings(saved.above_cap)} больше нового лимита — они остаются в силе.`);
       }
       tell(parts.filter(Boolean).join(" "));
-      void loadSession(true);
+      void loadSession();
     } catch (error) {
       const failure = failureOf(error);
       report(failure, "staff");
@@ -940,8 +962,8 @@ export default function Page() {
       editsDuringSave.current = null;
       changeSaving(() => false);
       const wanted = settingsWanted.current;
-      settingsWanted.current = null;
-      if (wanted !== null) void readSettings(wanted === "quiet");
+      settingsWanted.current = false;
+      if (wanted) void readSettings();
     }
   });
 
@@ -1008,13 +1030,10 @@ export default function Page() {
             onFindTable={() => void findTables(sheet)}
           />
 
-          <ChoiceSheet
+          <MessageSheet
             open={sheet.kind === "templates"}
-            title="Написать гостю"
-            hint={`Уйдёт от бота в чат гостя. ${
-              sheet.kind === "templates" ? sheet.booking.guest_name : ""
-            } получит его сразу — отменить отправку нельзя.`}
-            choices={shiftOnScreen?.message_templates ?? []}
+            booking={sheet.kind === "templates" ? sheet.booking : null}
+            templates={shiftOnScreen?.message_templates ?? []}
             onClose={closeSheet}
             onChoose={(text) => {
               if (sheet.kind === "templates") void sendTemplate(sheet, sheet.booking, text);
@@ -1186,22 +1205,29 @@ export default function Page() {
 
       {tab === "shift" ? (
         shiftOnScreen ? (
-          <ShiftScreen
-            shift={shiftOnScreen}
-            today={shiftOnScreen.today}
-            graceMinutes={bar.grace_minutes}
-            pane={pane}
-            onPane={setPane}
-            onServiceDate={setShiftDate}
-            onOpenDays={() => openSheet({ kind: "days" })}
-            onOpenTable={(table) => openSheet({ kind: "table", table })}
-            actions={{
-              onOpen: (booking) => openSheet({ kind: "booking", booking }),
-              onSeat: seat,
-              onLeft: markLeft,
-              onFindTable: () => void findTables(NO_SHEET),
-            }}
-          />
+          <>
+            {shiftRead.failure ? (
+              <div style={{ padding: `${SPACE[3]}px ${SPACE[3]}px 0` }}>
+                <StaleNotice onRetry={() => void loadShift()} />
+              </div>
+            ) : null}
+            <ShiftScreen
+              shift={shiftOnScreen}
+              today={shiftOnScreen.today}
+              graceMinutes={bar.grace_minutes}
+              pane={pane}
+              onPane={setPane}
+              onServiceDate={setShiftDate}
+              onOpenDays={() => openSheet({ kind: "days" })}
+              onOpenTable={(table) => openSheet({ kind: "table", table })}
+              actions={{
+                onOpen: (booking) => openSheet({ kind: "booking", booking }),
+                onSeat: seat,
+                onLeft: markLeft,
+                onFindTable: () => void findTables(NO_SHEET),
+              }}
+            />
+          </>
         ) : shiftRead.failure ? (
           <Failure
             message="Не удалось прочитать смену."
@@ -1215,16 +1241,30 @@ export default function Page() {
 
       {tab === "settings" ? (
         pair ? (
-          <SettingsScreen
-            settings={pair.settings}
-            draft={pair.draft}
-            serviceDate={shiftDate}
-            editedWeekday={editedWeekday}
-            onEdit={editDraft}
-            onEditWeekday={setEditedWeekday}
-            section={settingsSection}
-            onSection={setSettingsSection}
-          />
+          <>
+            {folded !== null && settingsDirty ? (
+              <div style={{ padding: `${SPACE[3]}px ${SPACE[4]}px 0` }}>
+                <Card gap={SPACE[2]}>
+                  <Note tone="warn">{folded}</Note>
+                </Card>
+              </div>
+            ) : null}
+            {settingsRead.failure ? (
+              <div style={{ padding: `${SPACE[3]}px ${SPACE[4]}px 0` }}>
+                <StaleNotice onRetry={() => loadSettings()} />
+              </div>
+            ) : null}
+            <SettingsScreen
+              settings={pair.settings}
+              draft={pair.draft}
+              serviceDate={shiftDate}
+              editedWeekday={editedWeekday}
+              onEdit={editDraft}
+              onEditWeekday={setEditedWeekday}
+              section={settingsSection}
+              onSection={setSettingsSection}
+            />
+          </>
         ) : settingsRead.failure ? (
           <Failure
             message="Не удалось прочитать настройки."

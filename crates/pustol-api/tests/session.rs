@@ -216,6 +216,50 @@ async fn an_older_payload_never_writes_back_a_name_a_newer_one_replaced() {
 }
 
 #[tokio::test]
+async fn a_telegram_profile_holding_a_nul_character_is_refused_as_text_the_bar_cannot_keep() {
+    // PostgreSQL text cannot hold U+0000. A name carrying one reached the account row and came back
+    // as a server fault, from a payload and from a session alike.
+    use pustol_telegram::init_data::{BotToken, TelegramUser, sign_for_tests};
+
+    let app = harness().await;
+    // JSON's escape for U+0000, spelled out: a NUL byte itself is not JSON, and never reaches a name.
+    let escaped_nul = format!("{}u0000", char::from(0x5C_u8));
+    let user = format!(
+        r#"{{"id":5550001,"first_name":"Ан{escaped_nul}на","username":"nul_guest","language_code":"ru"}}"#
+    );
+    let init_data = sign_for_tests(
+        &[("auth_date", &morning().timestamp().to_string()), ("user", &user)],
+        &BotToken::new(common::TOKEN),
+    );
+    let session = pustol_telegram::session::issue(
+        &TelegramUser {
+            id: 5_550_002,
+            first_name: "Анна".to_owned(),
+            last_name: Some("К\u{0}".to_owned()),
+            username: None,
+            language_code: None,
+            is_premium: None,
+            photo_url: None,
+        },
+        morning() + TimeDelta::hours(1),
+        &BotToken::new(common::TOKEN),
+    );
+
+    for credentials in [format!("tma {init_data}"), format!("session {session}")] {
+        for path in ["/api/session", SHIFT] {
+            let answer = app.send_raw("GET", path, Some(&credentials), None).await;
+            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{path}: {}", answer.body);
+            assert_eq!(answer.error_code(), Some("text_invalid"), "{path}");
+        }
+    }
+    let stored: i64 = sqlx::query_scalar("select count(*) from telegram_user where id in (5550001, 5550002)")
+        .fetch_one(app.store.pool())
+        .await
+        .expect("counted");
+    assert_eq!(stored, 0);
+}
+
+#[tokio::test]
 async fn a_session_proves_who_is_asking_and_not_what_they_may_do() {
     let app = harness().await;
     let guest = Caller::new("Гость");

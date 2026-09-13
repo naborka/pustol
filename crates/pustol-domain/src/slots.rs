@@ -98,7 +98,7 @@ impl<'a> Query<'a> {
 /// special case anywhere downstream.
 #[must_use]
 pub fn slot_list(query: &Query<'_>) -> Vec<Slot> {
-    arrival_minutes(query)
+    arrival_minutes(query.config, query.service_day)
         .map(|minutes| evaluate(query, minutes))
         .collect()
 }
@@ -108,9 +108,21 @@ pub fn slot_list(query: &Query<'_>) -> Vec<Slot> {
 /// offered it — without running the allocator over the other forty-odd slots to answer about one.
 #[must_use]
 pub fn slot_at(query: &Query<'_>, start_minutes: i32) -> Option<Slot> {
-    arrival_minutes(query)
+    arrival_minutes(query.config, query.service_day)
         .find(|minutes| *minutes == start_minutes)
         .map(|minutes| evaluate(query, minutes))
+}
+
+/// Whether `day`'s grid still has an arrival time after `now`: one that happens, and that the grid
+/// would not call past.
+///
+/// Asked of the grid itself, never of closing time less a turn. A step that does not divide the
+/// shift ends the grid earlier than that, and the clocks can skip its last arrivals; either way a
+/// guest told they could still move to tonight would find no time to move to.
+#[must_use]
+pub fn has_arrival_after(config: &ValidConfig, day: ServiceDay, now: DateTime<Utc>) -> bool {
+    arrival_minutes(config, day)
+        .any(|minutes| matches!(timing(config, day, minutes, now), Timing::Ahead(_)))
 }
 
 /// Every wall-clock minute a party may arrive at on this shift, in order.
@@ -119,13 +131,14 @@ pub fn slot_at(query: &Query<'_>, start_minutes: i32) -> Option<Slot> {
 /// stopping one turn before closing so no booking runs past the moment the lights go off. Empty on
 /// a day off, which is what makes every caller need no special case for one.
 ///
-/// Written once because two callers walk it — the whole grid, and the first free slot on it — and
-/// two copies of the same loop is two chances to disagree about the last arrival time.
-fn arrival_minutes(query: &Query<'_>) -> impl Iterator<Item = i32> {
-    let hours = query.config.week.for_service_day(query.service_day);
+/// Written once because every caller walks it — the whole grid, one slot of it, the first free slot
+/// on it, and whether any of it is left — and copies of the same loop are chances to disagree about
+/// the last arrival time.
+fn arrival_minutes(config: &ValidConfig, day: ServiceDay) -> impl Iterator<Item = i32> {
+    let hours = config.week.for_service_day(day);
     // A validated config guarantees a positive step, so this range is always finite.
-    let step = query.config.slot_step_minutes;
-    let last_arrival = hours.close_minutes - query.config.turn_minutes;
+    let step = config.slot_step_minutes;
+    let last_arrival = hours.close_minutes - config.turn_minutes;
     let open = hours.open_minutes;
     let closed = hours.closed;
     std::iter::successors(
@@ -135,6 +148,27 @@ fn arrival_minutes(query: &Query<'_>) -> impl Iterator<Item = i32> {
             (next <= last_arrival).then_some(next)
         },
     )
+}
+
+/// Where one arrival time stands against the clock, before anybody asks which table it would get.
+enum Timing {
+    /// The clocks jump over it.
+    Nonexistent,
+    Past(Interval),
+    Ahead(Interval),
+}
+
+fn timing(config: &ValidConfig, day: ServiceDay, start_minutes: i32, now: DateTime<Utc>) -> Timing {
+    // Against a validated config the only way this can fail is a wall-clock time the spring
+    // clock change jumps over: the minute offset is bounded by closing time and the turn is
+    // positive, so neither of the other failures is reachable.
+    match resolve(day, start_minutes, config.timezone)
+        .and_then(|start| Interval::from_duration(start, config.turn_minutes))
+    {
+        Err(_) => Timing::Nonexistent,
+        Ok(window) if window.start() <= now => Timing::Past(window),
+        Ok(window) => Timing::Ahead(window),
+    }
 }
 
 fn evaluate(query: &Query<'_>, start_minutes: i32) -> Slot {
@@ -150,22 +184,13 @@ fn evaluate(query: &Query<'_>, start_minutes: i32) -> Slot {
         availability,
     };
 
-    // Against a validated config the only way this can fail is a wall-clock time the spring
-    // clock change jumps over: the minute offset is bounded by closing time and the turn is
-    // positive, so neither of the other failures is reachable.
-    let Ok(window) = resolve(query.service_day, start_minutes, query.config.timezone)
-        .and_then(|start| Interval::from_duration(start, query.config.turn_minutes))
-    else {
-        return slot(None, SlotAvailability::Nonexistent);
-    };
-
-    if window.start() <= query.now {
-        return slot(Some(window), SlotAvailability::Past);
-    }
-
-    match allocator::assign(&query.request(window)) {
-        Some(_) => slot(Some(window), SlotAvailability::Free),
-        None => slot(Some(window), SlotAvailability::Taken),
+    match timing(query.config, query.service_day, start_minutes, query.now) {
+        Timing::Nonexistent => slot(None, SlotAvailability::Nonexistent),
+        Timing::Past(window) => slot(Some(window), SlotAvailability::Past),
+        Timing::Ahead(window) => match allocator::assign(&query.request(window)) {
+            Some(_) => slot(Some(window), SlotAvailability::Free),
+            None => slot(Some(window), SlotAvailability::Taken),
+        },
     }
 }
 
@@ -209,5 +234,6 @@ pub fn bookable_days(config: &ValidConfig, today: ServiceDay) -> Vec<ServiceDay>
 /// allocator over every slot of every day to answer a question that is settled by the first.
 #[must_use]
 pub fn first_free_minutes(query: &Query<'_>) -> Option<i32> {
-    arrival_minutes(query).find(|minutes| evaluate(query, *minutes).availability.is_free())
+    arrival_minutes(query.config, query.service_day)
+        .find(|minutes| evaluate(query, *minutes).availability.is_free())
 }

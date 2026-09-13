@@ -4,6 +4,8 @@
 //! needs no public address, no secret and no registration with Telegram, so it runs the same on a
 //! laptop as in production, and the one process stays the only thing that has to be running.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use pustol_db::{BarId, Store, TelegramUserId};
@@ -26,6 +28,13 @@ const AFTER_FAILURE: Duration = Duration::from_secs(5);
 /// in seconds, and asking every five would fill the log with the same line.
 const AFTER_REFUSAL: Duration = Duration::from_mins(1);
 
+/// How many more times this process tries to answer an update whose answer failed, before it lets
+/// the update go.
+///
+/// An update is answered in order, so one whose answer fails every time would hold back every update
+/// behind it for as long as the fault lasts. Enough retries to ride out a moment's fault, and no more.
+pub const ANSWER_RETRIES: u32 = 5;
+
 #[derive(Clone, Debug)]
 pub struct Inbox {
     store: Store,
@@ -37,6 +46,9 @@ pub struct Inbox {
     /// Drawn afresh for every inbox, so a process that starts again is somebody else and never takes
     /// back a claim it may already have answered. Clones share it: they are the same process.
     owner: Uuid,
+    /// How often answering each update still in hand has failed, by update id. Shared by clones, as
+    /// the owner is.
+    failures: Arc<Mutex<HashMap<i64, u32>>>,
 }
 
 impl Inbox {
@@ -47,6 +59,7 @@ impl Inbox {
             bar,
             clock,
             owner: Uuid::new_v4(),
+            failures: Arc::default(),
         }
     }
 }
@@ -57,7 +70,9 @@ pub enum HandleError {
     #[error("the bot token names no bot, so no update of it can be claimed")]
     NoBot,
     #[error("could not take an update in hand: {0}")]
-    Store(#[from] pustol_db::Error),
+    Claim(pustol_db::Error),
+    #[error("could not read what the answer to an update needs: {0}")]
+    Answer(pustol_db::Error),
 }
 
 /// Why one poll of the inbox did not finish.
@@ -74,8 +89,10 @@ impl Inbox {
     ///
     /// Only the wait for Telegram is cut short by a stop. Updates already in hand are settled in
     /// full, so a guest's tap is never left cancelled but unanswered, and before stopping Telegram is
-    /// told what was settled. An update that cannot be taken in hand stops the batch where it is: it
-    /// is fetched again once the wait after a failure is over.
+    /// told what was settled whenever that is not what it was last told — lower included, since after
+    /// Telegram counts ids afresh the offset past the last settled update is below the old one. An
+    /// update that cannot be settled stops the batch where it is: it is fetched again once the wait
+    /// after a failure is over.
     pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut offset = None;
         let mut confirmed = offset;
@@ -92,7 +109,7 @@ impl Inbox {
                     match stopped {
                         Ok(()) => continue,
                         Err(error) => {
-                            tracing::error!(%error, "could not take an update in hand");
+                            tracing::error!(%error, "could not settle an update");
                             AFTER_FAILURE
                         }
                     }
@@ -112,7 +129,7 @@ impl Inbox {
             }
         }
         if let Some(settled) = offset
-            && offset > confirmed
+            && offset != confirmed
             && let Err(error) = self.confirm(settled).await
         {
             tracing::warn!(%error, "could not tell Telegram which updates were settled");
@@ -136,10 +153,12 @@ impl Inbox {
 
     /// Settles each update in order and gives the offset past the last one settled.
     ///
-    /// An update is settled once it is claimed and answered, or found claimed by somebody else, and
-    /// the offset moves past it either way: an update whose answer fails every time must not be
-    /// fetched again for ever. The first update that cannot be taken in hand stops the batch before
-    /// it, with the error.
+    /// An update is settled once it is claimed and answered, found claimed by somebody else, or let
+    /// go once its answer has failed on the first try and on every one of [`ANSWER_RETRIES`] retries,
+    /// and the offset moves past it every way: an update whose answer fails every time must not be
+    /// fetched again for ever. The first update that cannot be settled stops the batch before it,
+    /// with the error. One that cannot be claimed is never let go: the database is out of reach, and
+    /// letting it go would drop every update behind it too.
     ///
     /// Past the last one settled, not past the highest id ever seen: after a quiet week Telegram counts
     /// ids afresh from a random number, and an offset held at an old, higher id confirms nothing it
@@ -149,18 +168,52 @@ impl Inbox {
         updates: Vec<Update>,
         mut offset: Option<i64>,
     ) -> (Option<i64>, Result<(), HandleError>) {
-        let fetched = !updates.is_empty();
+        // An update that failed comes back at the front of every fetch until it is settled. One this
+        // fetch does not bring back is gone from Telegram, and counting on for it would cut short a
+        // later update that reuses its id.
+        let fetched: HashSet<i64> = updates.iter().map(|update| update.update_id).collect();
+        self.failures().retain(|id, _| fetched.contains(id));
+
         for update in updates {
-            let after = update.update_id + 1;
-            if let Err(error) = self.handle(update).await {
-                return (offset, Err(error));
+            let id = update.update_id;
+            match self.handle(update).await {
+                Ok(_) => {
+                    self.failures().remove(&id);
+                }
+                Err(HandleError::Answer(error)) if self.out_of_retries(id) => {
+                    tracing::error!(
+                        %error,
+                        update_id = id,
+                        retries = ANSWER_RETRIES,
+                        "could not answer an update, and let it go"
+                    );
+                }
+                Err(error) => return (offset, Err(error)),
             }
-            offset = Some(after);
+            offset = Some(id + 1);
         }
-        if fetched {
+        if !fetched.is_empty() {
             self.forget_old_claims().await;
         }
         (offset, Ok(()))
+    }
+
+    /// Counts one more failure to answer update `id`, and says whether its retries are spent. One
+    /// whose retries are spent is let go, so its count is forgotten with it.
+    fn out_of_retries(&self, id: i64) -> bool {
+        let mut failures = self.failures();
+        let failed = failures.entry(id).or_insert(0);
+        *failed += 1;
+        let spent = *failed > ANSWER_RETRIES;
+        if spent {
+            failures.remove(&id);
+        }
+        spent
+    }
+
+    fn failures(&self) -> MutexGuard<'_, HashMap<i64, u32>> {
+        // A count is only ever incremented or removed whole, so one left by a panic is still a count.
+        self.failures.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Answers one update if this process is the one that claims it, and says whether it was.
@@ -171,24 +224,28 @@ impl Inbox {
     /// gives up, and the guest taps again, which Telegram sends as a new update. Answering twice
     /// instead would cancel twice and say so twice, which nobody can take back.
     ///
-    /// A failure to read what the answer needs, before anything has been said, is the error of the
-    /// whole update: the batch stops, the update is fetched again, and this inbox, which owns the
-    /// claim, takes it again and answers. So is a claim that was written while the reply saying so was
-    /// lost. Failures once something has been sent are logged; there is nobody else to tell.
+    /// A failure to read what the answer needs, before anything has been said, is
+    /// [`HandleError::Answer`]: the update is fetched again, and this inbox, which owns the claim,
+    /// takes it again and answers, as often as its retries allow. A claim that was written while the
+    /// reply saying so was lost is [`HandleError::Claim`], and comes back the same way however often
+    /// it happens. Failures once something has been sent are logged; there is nobody else to tell.
     pub async fn handle(&self, update: Update) -> Result<bool, HandleError> {
         let bot = self.bot.id().ok_or(HandleError::NoBot)?;
         let now = self.clock.now();
         if !self
             .store
             .claim_update(bot, update.update_id, self.owner, now, now - UPDATE_RETENTION)
-            .await?
+            .await
+            .map_err(HandleError::Claim)?
         {
             return Ok(false);
         }
         if let Some(query) = update.callback_query {
             self.answer_tap(query).await;
         } else if let Some(message) = update.message {
-            self.answer_message(message).await?;
+            self.answer_message(message)
+                .await
+                .map_err(HandleError::Answer)?;
         }
         Ok(true)
     }

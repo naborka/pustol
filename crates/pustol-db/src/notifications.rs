@@ -64,17 +64,27 @@ impl Store {
     /// the handler instead would leave the rule for every future caller to remember. Checked in
     /// the transaction that queues it, under the bar's lock a settings save also holds, so a
     /// template removed a moment ago cannot slip through.
+    ///
+    /// Only to a guest the bot can reach: a booking with an account behind it, which the bot has not
+    /// found it cannot write to. Staff are told the message went, and one that can never arrive would
+    /// tell them the guest knows what the guest does not, when somebody has to call instead.
     pub async fn send_template(
         &self,
         bar: BarId,
         booking: BookingId,
-        recipient: TelegramUserId,
         text: &str,
         now: DateTime<Utc>,
     ) -> Result<Uuid> {
         let mut transaction = self.pool().begin().await?;
         crate::lock_bar(&mut transaction, bar).await?;
         let config = crate::bar::load_config(&mut transaction, bar).await?;
+        let record = crate::bookings::fetch_booking(&mut transaction, bar, booking).await?;
+        let Some(recipient) = record
+            .telegram_user_id
+            .filter(|_| record.reachable_by_bot)
+        else {
+            return Err(crate::Error::NoBotChat);
+        };
         if !config.message_templates.iter().any(|offered| offered == text) {
             return Err(crate::Error::UnknownMessage);
         }

@@ -25,8 +25,10 @@ export type SlotState = "free" | "taken" | "past";
  * What a new booking would do to one the guest already holds — the server's rule, never guessed here.
  *
  * `any_evening`: a plan not yet begun, replaced by a booking on any evening. `same_evening`: a
- * no-show whose table is still held, replaced only by a booking on its own evening. `null`: never
- * replaced, and a booking on its evening is refused.
+ * no-show whose table is still held, replaced only by a booking on its own evening while that evening
+ * still has an arrival time by the server's own clock and slot grid. `null`: never replaced — a
+ * party at the table, or a held no-show with no arrival time left — and a booking on its evening is
+ * refused. «Перенести» is offered exactly when it is not `null`.
  */
 export type Rebooking = "any_evening" | "same_evening" | null;
 

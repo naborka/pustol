@@ -106,9 +106,12 @@ pub struct DayHours {
 
 impl DayHours {
     /// Length of the shift in minutes.
+    ///
+    /// Wide, because these are a proposal's hours until validated, and the difference of any two
+    /// integers a body can carry does not fit in the width they arrived in.
     #[must_use]
-    pub const fn shift_minutes(self) -> i32 {
-        self.close_minutes - self.open_minutes
+    pub fn shift_minutes(self) -> i64 {
+        i64::from(self.close_minutes) - i64::from(self.open_minutes)
     }
 }
 
@@ -206,60 +209,6 @@ impl BarConfig {
         self.active_tables().map(|table| table.seats).max().unwrap_or(0)
     }
 
-    /// Total live seats — the settings summary line.
-    #[must_use]
-    pub fn total_seats(&self) -> i32 {
-        self.active_tables().map(|table| table.seats).sum()
-    }
-
-    /// Latest wall-clock minute a party may arrive on `weekday`, or `None` when closed.
-    ///
-    /// Derived, never stored: it is closing time minus one turn, and a stored copy would drift
-    /// away from the two facts it is made of.
-    #[must_use]
-    pub fn last_arrival_minutes(&self, weekday: Weekday) -> Option<i32> {
-        let hours = self.week.on(weekday);
-        (!hours.closed).then(|| hours.close_minutes - self.turn_minutes)
-    }
-
-    /// The shift that is running, or about to run, at `now`.
-    ///
-    /// Not the calendar date. At one in the morning a bar that shuts at two is still working
-    /// yesterday's shift, and a guest tapping "tonight" means the evening they are currently
-    /// sitting in. Getting this wrong would move the whole day strip forward by one at midnight
-    /// and show staff an empty room while the room is full.
-    ///
-    /// Decided on instants, never on the wall clock: yesterday runs until [`Self::shift_end`]. The
-    /// wall clock repeats an hour in autumn, and reading it made a shift that had closed at the first
-    /// 02:30 start running again at the second 02:00, an hour after every table was free.
-    #[must_use]
-    pub fn current_service_day(&self, now: DateTime<Utc>) -> ServiceDay {
-        let today = ServiceDay::new(now.with_timezone(&self.timezone).date_naive());
-        match today.checked_sub_days(1) {
-            Some(yesterday) if self.shift_end(yesterday).is_some_and(|end| now < end) => yesterday,
-            _ => today,
-        }
-    }
-
-    /// The moment the last sitting `day` allows is over, or `None` on a day off.
-    ///
-    /// The last arrival is resolved as the grid resolves every arrival, and held for one turn of real
-    /// time as every booking is, so a shift stops running exactly when its last possible booking
-    /// finishes. On the night the clocks go forward that is an hour after closing on the wall, which
-    /// is the hour the last sitting really has. A last arrival the clocks skip counts from the moment
-    /// they jump past it: nobody can arrive then, but the evening still ends a turn later.
-    fn shift_end(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
-        let hours = self.week.for_service_day(day);
-        if hours.closed {
-            return None;
-        }
-        let last_arrival =
-            resolve_boundary(day, hours.close_minutes - self.turn_minutes, self.timezone).ok()?;
-        Interval::from_duration(last_arrival, self.turn_minutes)
-            .ok()
-            .map(Interval::end)
-    }
-
     /// Every reason this configuration is illegal. Empty means legal.
     ///
     /// All reasons are reported, not just the first: a settings screen that fixes one problem
@@ -323,7 +272,10 @@ impl BarConfig {
                     minutes: hours.close_minutes,
                 });
             }
-            if !hours.closed && hours.close_minutes - self.turn_minutes < hours.open_minutes {
+            if !hours.closed
+                && i64::from(hours.close_minutes) - i64::from(self.turn_minutes)
+                    < i64::from(hours.open_minutes)
+            {
                 errors.push(ConfigError::ShiftShorterThanTurn {
                     weekday,
                     shift_minutes: hours.shift_minutes(),
@@ -495,6 +447,79 @@ impl ValidConfig {
     pub fn into_inner(self) -> BarConfig {
         self.0
     }
+
+    // Everything below does arithmetic on the hours, the turn and the room, and so lives here rather
+    // than on the proposal: it is correct only for values validation has bounded.
+
+    /// Total live seats — the settings summary line.
+    #[must_use]
+    pub fn total_seats(&self) -> i32 {
+        self.active_tables().map(|table| table.seats).sum()
+    }
+
+    /// Latest wall-clock minute a party may arrive on `weekday`, or `None` when closed.
+    ///
+    /// Derived, never stored: it is closing time minus one turn, and a stored copy would drift
+    /// away from the two facts it is made of.
+    #[must_use]
+    pub fn last_arrival_minutes(&self, weekday: Weekday) -> Option<i32> {
+        let hours = self.week.on(weekday);
+        (!hours.closed).then(|| hours.close_minutes - self.turn_minutes)
+    }
+
+    /// The shift that is running, or about to run, at `now`.
+    ///
+    /// Not the calendar date. At one in the morning a bar that shuts at two is still working
+    /// yesterday's shift, and a guest tapping "tonight" means the evening they are currently
+    /// sitting in. Getting this wrong would move the whole day strip forward by one at midnight
+    /// and show staff an empty room while the room is full.
+    ///
+    /// Decided on instants, never on the wall clock: yesterday runs until [`Self::shift_end`]. The
+    /// wall clock repeats an hour in autumn, and reading it made a shift that had closed at the first
+    /// 02:30 start running again at the second 02:00, an hour after every table was free.
+    #[must_use]
+    pub fn current_service_day(&self, now: DateTime<Utc>) -> ServiceDay {
+        let today = ServiceDay::new(now.with_timezone(&self.timezone).date_naive());
+        match today.checked_sub_days(1) {
+            Some(yesterday) if self.shift_end(yesterday).is_some_and(|end| now < end) => yesterday,
+            _ => today,
+        }
+    }
+
+    /// The window a party sitting down at `now` holds on `day`, or `None` when `day` has no now: a
+    /// day off, or a shift that has already ended.
+    ///
+    /// One turn, cut short where the shift ends, as every booking the grid offers already is. Held
+    /// past that end, the party would still sit at its table once the next shift is running, and
+    /// that shift's screen, which reads only its own bookings, would call the table free while the
+    /// room refused it to the next party at the door.
+    #[must_use]
+    pub fn walk_in_window(&self, day: ServiceDay, now: DateTime<Utc>) -> Option<Interval> {
+        let turn = Interval::from_duration(now, self.turn_minutes).ok()?;
+        let end = self.shift_end(day)?;
+        Interval::new(now, turn.end().min(end)).ok()
+    }
+
+    /// The moment `day` stops running, or `None` on a day off.
+    ///
+    /// One turn of real time after the latest arrival closing time allows, that arrival resolved as
+    /// a boundary. No booking the grid offers finishes later: on the night the clocks go forward this
+    /// is an hour after closing on the wall, which is the hour the last sitting really has.
+    ///
+    /// It is not always the moment the grid's last sitting finishes. A time step that does not divide
+    /// the shift ends the grid before closing less a turn, and a latest arrival the clocks skip counts
+    /// from the moment they jump past it, so the evening can run on after its last sitting is over.
+    fn shift_end(&self, day: ServiceDay) -> Option<DateTime<Utc>> {
+        let hours = self.week.for_service_day(day);
+        if hours.closed {
+            return None;
+        }
+        let last_arrival =
+            resolve_boundary(day, hours.close_minutes - self.turn_minutes, self.timezone).ok()?;
+        Interval::from_duration(last_arrival, self.turn_minutes)
+            .ok()
+            .map(Interval::end)
+    }
 }
 
 impl std::ops::Deref for ValidConfig {
@@ -551,7 +576,7 @@ pub enum ConfigError {
     )]
     ShiftShorterThanTurn {
         weekday: Weekday,
-        shift_minutes: i32,
+        shift_minutes: i64,
         turn_minutes: i32,
     },
     #[error("{setting:?} is {value}, outside {}..={}", bounds.min, bounds.max)]

@@ -136,7 +136,7 @@ async fn availability(
     Query(query): Query<AvailabilityQuery>,
 ) -> ApiResult<Json<Availability>> {
     let now = state.now();
-    let day = ServiceDay::new(query.service_date);
+    let day = query.service_date.day()?;
     let mine = own_bookings(&state, &caller, now).await?;
     let reading = state
         .store
@@ -184,6 +184,7 @@ async fn book(
     JsonBody(request): JsonBody<BookingRequest>,
 ) -> ApiResult<Json<BookingTaken>> {
     let now = state.now();
+    let service_day = request.service_date.day()?;
     // The account has to exist before a booking can point at it, and the name the booking is filed
     // under is the one stored for it rather than whatever a session remembered.
     let viewer = caller.viewer(&state).await?;
@@ -193,7 +194,7 @@ async fn book(
         .create_booking(
             &NewBooking {
                 bar: state.bar,
-                service_day: ServiceDay::new(request.service_date),
+                service_day,
                 start_minutes: request.start_minutes,
                 party_size: request.party_size,
                 channel: Channel::Guest {

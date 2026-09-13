@@ -17,7 +17,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pustol_db::Store;
 
-const PREFIX: &str = "pustol_t";
+/// What every test database these suites make is named with, before the second, the pid and the
+/// counter.
+///
+/// Names were once `pustol_t` followed by the numbers. No name in that form matches this prefix, so
+/// the sweep never reads a second out of a name it did not make; `scripts/pg.sh start` clears both.
+pub const PREFIX: &str = "pustol_test_";
 
 /// How old a test database with nobody connected has to be before it counts as abandoned.
 ///
@@ -66,19 +71,21 @@ pub fn unix_seconds() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// The name of a test database made at `made_at` by process `pid`, the `counter`th it made.
-pub fn database_name(made_at: u64, pid: u32, counter: u64) -> String {
-    format!("{PREFIX}{made_at}_{pid}_{counter}")
+/// The name of a test database under `prefix`, made at `made_at` by process `pid`, the `counter`th
+/// it made.
+pub fn database_name(prefix: &str, made_at: u64, pid: u32, counter: u64) -> String {
+    format!("{prefix}{made_at}_{pid}_{counter}")
 }
 
 /// A migrated database of this test's own, with a pool belonging to this test's runtime.
 pub async fn fresh_store() -> Store {
     let admin = maintenance().await;
     if !SWEPT.swap(true, Ordering::SeqCst) {
-        sweep_abandoned(&admin, unix_seconds()).await;
+        sweep_abandoned(&admin, PREFIX, unix_seconds()).await;
     }
     let name = create_database(&admin, || {
         database_name(
+            PREFIX,
             unix_seconds(),
             std::process::id(),
             NEXT_DATABASE.fetch_add(1, Ordering::Relaxed),
@@ -102,8 +109,9 @@ pub async fn fresh_store() -> Store {
 pub async fn create_database(admin: &sqlx::PgPool, mut next: impl FnMut() -> String) -> String {
     loop {
         let name = next();
-        // `create database` takes no bind parameters, so the name has to be interpolated. It is built
-        // from numbers by `database_name` and never from anything a caller supplies.
+        assert!(is_plain(&name), "{name:?} is not a name this suite makes");
+        // `create database` takes no bind parameters, so the name has to be interpolated. It is made
+        // of letters, digits and underscores, as just asserted.
         match sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
             .execute(admin)
             .await
@@ -124,28 +132,31 @@ fn is_taken(error: &sqlx::Error) -> bool {
         .is_some_and(|code| code == "42P04" || code == "23505")
 }
 
-/// Drops every test database older than [`ABANDONED_AFTER`] at `now` that nobody is connected to.
+/// Drops every database named under `prefix` that is older than [`ABANDONED_AFTER`] at `now` and
+/// that nobody is connected to.
 ///
 /// Without force: a connection made after the list was read makes the drop fail, and that database
 /// is left for a later sweep.
-pub async fn sweep_abandoned(admin: &sqlx::PgPool, now: u64) {
+pub async fn sweep_abandoned(admin: &sqlx::PgPool, prefix: &str, now: u64) {
+    assert!(is_plain(prefix), "{prefix:?} is not a prefix this suite makes");
     let idle: Vec<String> = sqlx::query_scalar(
         "select datname from pg_database d
-         where datname like 'pustol\\_t%'
+         where datname like $1
            and not exists (select 1 from pg_stat_activity a where a.datid = d.oid)",
     )
+    .bind(format!("{}%", prefix.replace('_', "\\_")))
     .fetch_all(admin)
     .await
     .expect("the cluster lists its databases");
     for name in idle {
-        let Some(made_at) = made_at(&name) else {
+        let Some(made_at) = made_at(prefix, &name) else {
             continue;
         };
         if now.saturating_sub(made_at) < ABANDONED_AFTER.as_secs() {
             continue;
         }
-        // Interpolated for the same reason as `create database`; `made_at` has admitted only names
-        // made of letters, digits and underscores.
+        // Interpolated for the same reason as `create database`; `made_at` has admitted only the
+        // prefix followed by numbers.
         let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
             "drop database if exists \"{name}\""
         )))
@@ -154,10 +165,18 @@ pub async fn sweep_abandoned(admin: &sqlx::PgPool, now: u64) {
     }
 }
 
-/// The second a test database was made, or `None` for a name this suite never makes.
-fn made_at(name: &str) -> Option<u64> {
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+/// The second a database was made, when `name` is exactly `prefix` and the three numbers
+/// [`database_name`] writes; `None` for any other name.
+fn made_at(prefix: &str, name: &str) -> Option<u64> {
+    let mut numbers = name.strip_prefix(prefix)?.split('_');
+    let (made_at, pid, counter) = (numbers.next()?, numbers.next()?, numbers.next()?);
+    let is_number = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    if numbers.next().is_some() || ![made_at, pid, counter].into_iter().all(is_number) {
         return None;
     }
-    name.strip_prefix(PREFIX)?.split('_').next()?.parse().ok()
+    made_at.parse().ok()
+}
+
+fn is_plain(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
